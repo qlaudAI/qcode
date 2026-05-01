@@ -10,6 +10,10 @@ src-tauri/Cargo.lock
 src-tauri/gen
 src-tauri/WixTools
 
+# TypeScript incremental cache
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
 # Editor / OS
 .idea
 .vscode/*
