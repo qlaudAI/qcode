@@ -83,6 +83,9 @@ export type AgentEvent =
       type: 'finished';
       stopReason?: string;
       turns: number;
+      /** Aggregated usage across every model call in this run. Used
+       *  by the UI to show a per-turn cost/token pill. */
+      usage: { inputTokens: number; outputTokens: number };
     }
   | { type: 'error'; message: string };
 
@@ -105,6 +108,11 @@ export type RunAgentOpts = {
 export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
   const messages: Message[] = [...opts.history];
   const tools = opts.workspace ? ALL_TOOLS : undefined;
+  // Aggregate per-turn usage across the whole runAgent call. Each
+  // streamMessage iteration adds its own input/output token count;
+  // the final 'finished' event ships the cumulative number.
+  let totalInput = 0;
+  let totalOutput = 0;
 
   for (let turn = 0; turn < MAX_LOOPS; turn++) {
     opts.onEvent({ type: 'turn_start', turn });
@@ -143,12 +151,16 @@ export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
             status: 'running',
           });
         },
+        onMessageStart: (info) => {
+          if (info.inputTokens != null) totalInput += info.inputTokens;
+        },
         onMessageStop: (info) => {
           if (currentText) {
             assistantBlocks.push({ type: 'text', text: currentText });
             currentText = '';
           }
           stopReason = info.stopReason;
+          if (info.outputTokens != null) totalOutput += info.outputTokens;
         },
       });
     } catch (e) {
@@ -160,7 +172,12 @@ export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
     messages.push({ role: 'assistant', content: assistantBlocks });
 
     if (stopReason !== 'tool_use') {
-      opts.onEvent({ type: 'finished', stopReason, turns: turn + 1 });
+      opts.onEvent({
+        type: 'finished',
+        stopReason,
+        turns: turn + 1,
+        usage: { inputTokens: totalInput, outputTokens: totalOutput },
+      });
       return messages;
     }
 

@@ -3,6 +3,7 @@ import { ArrowUp, FileText, Sparkles, Square, X } from 'lucide-react';
 
 import { runAgent, type AgentEvent } from '../lib/agent';
 import { buildAttachmentContext } from '../lib/attachments';
+import { fetchBalance } from '../lib/billing';
 import { cn } from '../lib/cn';
 import { MODELS } from '../lib/models';
 import type { Message } from '../lib/qlaud-client';
@@ -16,10 +17,9 @@ import { Markdown } from './Markdown';
 import { MentionMenu, getMentionResults } from './MentionMenu';
 import { ToolCallCard, type ToolCallView } from './ToolCallCard';
 
-// Each "block" rendered in the chat is the smallest UI unit:
-// either the full user message, an assistant text run, a tool
-// call card, or an approval card. The agent loop emits a stream
-// of events that `handleEvent` translates into block mutations.
+// Each "block" rendered in the chat is the smallest UI unit. The
+// agent loop emits a stream of events that `handleEvent` translates
+// into block mutations.
 type RenderBlock =
   | { type: 'user_text'; text: string }
   | { type: 'assistant_text'; text: string }
@@ -29,6 +29,17 @@ type RenderBlock =
       id: string;
       request: ApprovalRequest;
       resolved?: 'allow' | 'reject';
+    }
+  | {
+      type: 'usage';
+      inputTokens: number;
+      outputTokens: number;
+      /** USD charged for the turn. Computed from balance delta after
+       *  the turn ends; null when we couldn't read balance (offline,
+       *  rate-limited, etc.). */
+      costUsd: number | null;
+      model: string;
+      durationMs: number;
     };
 
 // Pending approval resolvers, keyed by tool_use id. The agent loop
@@ -150,13 +161,22 @@ export function ChatSurface({
     setBusy(true);
     abortRef.current = new AbortController();
 
+    // Snapshot wallet balance + start time so we can compute the
+    // exact dollar cost of this turn from the balance delta.
+    const startMs = Date.now();
+    const preBalance = (await fetchBalance())?.balanceUsd ?? null;
+    let lastUsage: { inputTokens: number; outputTokens: number } | null = null;
+
     try {
       const finalHistory = await runAgent({
         model,
         workspace: workspace?.path ?? null,
         history: nextHistory,
         signal: abortRef.current.signal,
-        onEvent: (e) => handleEvent(e, setBlocks),
+        onEvent: (e) => {
+          if (e.type === 'finished') lastUsage = e.usage;
+          handleEvent(e, setBlocks);
+        },
         onApproval: (toolUseId, _request) =>
           new Promise<ApprovalDecision>((resolve) => {
             approvalsRef.current.set(toolUseId, resolve);
@@ -164,6 +184,30 @@ export function ChatSurface({
       });
       setHistory(finalHistory);
       onTurnComplete?.(finalHistory);
+
+      // After the turn ends, fetch the new balance and append a
+      // usage block. Balance delta is the authoritative cost (qlaud's
+      // markup included); token counts are the granular per-stream
+      // numbers. Both shown side-by-side.
+      if (lastUsage) {
+        const postBalance = (await fetchBalance())?.balanceUsd ?? null;
+        const usage: { inputTokens: number; outputTokens: number } = lastUsage;
+        const cost =
+          preBalance != null && postBalance != null
+            ? Math.max(0, preBalance - postBalance)
+            : null;
+        setBlocks((b) => [
+          ...b,
+          {
+            type: 'usage',
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            costUsd: cost,
+            model,
+            durationMs: Date.now() - startMs,
+          },
+        ]);
+      }
     } catch (e) {
       const code = e instanceof Error ? e.message : 'unknown';
       setError(mapError(code));
@@ -438,6 +482,19 @@ function BlockRow({
       </div>
     );
   }
+  if (block.type === 'usage') {
+    return (
+      <div className="flex pl-10">
+        <UsagePill
+          inputTokens={block.inputTokens}
+          outputTokens={block.outputTokens}
+          costUsd={block.costUsd}
+          model={block.model}
+          durationMs={block.durationMs}
+        />
+      </div>
+    );
+  }
   // assistant_text
   if (!block.text && busy) {
     return (
@@ -476,6 +533,56 @@ function TypingDots() {
       <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:400ms]" />
     </div>
   );
+}
+
+// Inline pill summarizing a turn's usage. Tokens come from the SSE
+// stream (Anthropic message_start + message_delta usage); cost
+// comes from balance delta against /v1/billing/balance — the
+// authoritative dollars-charged number, qlaud's markup included.
+function UsagePill({
+  inputTokens,
+  outputTokens,
+  costUsd,
+  model,
+  durationMs,
+}: {
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number | null;
+  model: string;
+  durationMs: number;
+}) {
+  const m = MODELS.find((x) => x.slug === model);
+  const cost =
+    costUsd == null
+      ? null
+      : costUsd < 0.01
+        ? `${(costUsd * 100).toFixed(2)}¢`
+        : `$${costUsd.toFixed(4)}`;
+  return (
+    <div
+      className="flex items-center gap-2 rounded-full border border-border/60 bg-background/70 px-2.5 py-0.5 text-[10.5px] tabular-nums text-muted-foreground"
+      title={`${inputTokens.toLocaleString()} input · ${outputTokens.toLocaleString()} output · ${(durationMs / 1000).toFixed(1)}s · ${m?.label ?? model}`}
+    >
+      <span>{formatTokens(inputTokens)} in</span>
+      <span className="opacity-50">·</span>
+      <span>{formatTokens(outputTokens)} out</span>
+      {cost && (
+        <>
+          <span className="opacity-50">·</span>
+          <span className="text-foreground/70">{cost}</span>
+        </>
+      )}
+      <span className="opacity-50">·</span>
+      <span>{(durationMs / 1000).toFixed(1)}s</span>
+    </div>
+  );
+}
+
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${Math.round(n / 1000)}k`;
 }
 
 function EmptyState({
