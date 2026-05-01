@@ -19,6 +19,7 @@
 import { runBashSession } from './bash-session';
 import { computeDiff, type DiffLine } from './diff';
 import type { IgnoreMatcher } from './gitignore';
+import { runHook } from './hooks';
 import { hasRipgrep, rgGlob, rgGrep } from './ripgrep';
 import { isTauri } from './tauri';
 import { getMatcher } from './workspace';
@@ -532,6 +533,18 @@ async function runWriteFile(
   const added = diff.filter((d) => d.kind === 'add').length;
   const removed = diff.filter((d) => d.kind === 'remove').length;
 
+  // Pre-write hook — gate by path/content. Common use: enforce
+  // license headers, block edits to vendored files, require
+  // updates to a CHANGELOG when src/* changes.
+  const preWrite = await runHook({
+    workspace: opts.workspace,
+    event: 'pre_write_file',
+    input: { path: relativizePath(abs, opts.workspace), content, isNew },
+  });
+  if (!preWrite.proceed) {
+    return err(call.id, preWrite.message);
+  }
+
   const decision = await opts.requestApproval({
     kind: 'write_file',
     path: relativizePath(abs, opts.workspace),
@@ -557,10 +570,19 @@ async function runWriteFile(
     }
   }
   await writeTextFile(abs, content);
-  return ok(
-    call.id,
-    `Wrote ${content.length} bytes to ${relativizePath(abs, opts.workspace)} (+${added} -${removed}).`,
-  );
+
+  // Post-write hook — auto-format, lint, etc. Output (if any) is
+  // appended so the model sees what the formatter said.
+  const postWrite = await runHook({
+    workspace: opts.workspace,
+    event: 'post_write_file',
+    input: { path: relativizePath(abs, opts.workspace), content, isNew },
+  });
+  let summary = `Wrote ${content.length} bytes to ${relativizePath(abs, opts.workspace)} (+${added} -${removed}).`;
+  if (postWrite.message) {
+    summary += `\n[post_write_file hook]\n${postWrite.message}`;
+  }
+  return ok(call.id, summary);
 }
 
 async function runEditFile(
@@ -624,6 +646,22 @@ async function runEditFile(
   const added = diff.filter((d) => d.kind === 'add').length;
   const removed = diff.filter((d) => d.kind === 'remove').length;
 
+  // Pre-edit hook — symmetric with pre_write_file but receives
+  // old/new strings rather than full content (useful for "block
+  // edits that change a SQL migration file" or similar).
+  const preEdit = await runHook({
+    workspace: opts.workspace,
+    event: 'pre_edit_file',
+    input: {
+      path: relativizePath(abs, opts.workspace),
+      old_string: oldString,
+      new_string: newString,
+    },
+  });
+  if (!preEdit.proceed) {
+    return err(call.id, preEdit.message);
+  }
+
   const decision = await opts.requestApproval({
     kind: 'edit_file',
     path: relativizePath(abs, opts.workspace),
@@ -635,10 +673,23 @@ async function runEditFile(
     return ok(call.id, 'User rejected the edit. No changes made.');
   }
   await writeTextFile(abs, after);
-  return ok(
-    call.id,
-    `Edited ${relativizePath(abs, opts.workspace)} (+${added} -${removed}).`,
-  );
+
+  // Post-edit hook — most useful for auto-formatting after a
+  // surgical edit. e.g. ${file}.ts edits → run prettier on it.
+  const postEdit = await runHook({
+    workspace: opts.workspace,
+    event: 'post_edit_file',
+    input: {
+      path: relativizePath(abs, opts.workspace),
+      old_string: oldString,
+      new_string: newString,
+    },
+  });
+  let summary = `Edited ${relativizePath(abs, opts.workspace)} (+${added} -${removed}).`;
+  if (postEdit.message) {
+    summary += `\n[post_edit_file hook]\n${postEdit.message}`;
+  }
+  return ok(call.id, summary);
 }
 
 async function runBash(
@@ -656,6 +707,20 @@ async function runBash(
   }
   if (!opts.requestApproval) {
     return err(call.id, 'Bash is not enabled in this session.');
+  }
+
+  // Pre-bash hook: runs BEFORE approval so a project-level guard
+  // (e.g. block any `git push --force` against main) can deny the
+  // call without bothering the user. Post-hook fires after the
+  // command runs and can transform output (summarize a 2K-line
+  // pytest dump down to "x failed, y passed", etc.).
+  const preHook = await runHook({
+    workspace: opts.workspace,
+    event: 'pre_bash',
+    input: { command },
+  });
+  if (!preHook.proceed) {
+    return err(call.id, preHook.message);
   }
 
   const decision = await opts.requestApproval({
@@ -685,11 +750,32 @@ async function runBash(
   }
 
   const { exitCode, stdout, stderr } = result;
-  const out =
+  let out =
     `exit ${exitCode}\n` +
     (stdout ? `--- stdout ---\n${stdout}` : '') +
     (stderr ? `--- stderr ---\n${stderr}` : '');
-  return exitCode === 0
+
+  // Post-bash hook: transform the result before the model sees it.
+  // Returning empty stdout = passthrough (most hooks are gates, not
+  // transformers, so the empty case is the common one).
+  const postHook = await runHook({
+    workspace: opts.workspace,
+    event: 'post_bash',
+    input: {
+      command,
+      exitCode,
+      stdout,
+      stderr,
+    },
+  });
+  if (postHook.message) {
+    out = postHook.message;
+  }
+  if (preHook.message) {
+    out = `[pre_bash hook]\n${preHook.message}\n\n${out}`;
+  }
+
+  return exitCode === 0 && !postHook.hookErrored
     ? ok(call.id, out)
     : { tool_use_id: call.id, content: out, is_error: true };
 }
