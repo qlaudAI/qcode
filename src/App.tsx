@@ -5,9 +5,11 @@ import {
   clearAuth,
   getKey,
   getProfile,
+  setProfile as persistProfile,
   startSignIn,
   type Profile,
 } from './lib/auth';
+import { fetchBalance } from './lib/billing';
 import { startDeepLinkListener } from './lib/deep-link';
 import { DEFAULT_MODEL } from './lib/models';
 import { useShortcuts, type MenuId } from './lib/shortcuts';
@@ -31,17 +33,42 @@ export function App() {
   );
   const [chatNonce, setChatNonce] = useState(0);
 
+  // Pull live balance from qlaud and merge into the cached profile so
+  // the title-bar spend bar shows fresh numbers. Idempotent — safe to
+  // call from anywhere (boot, post-turn, manual refresh click).
+  const refreshBalance = useCallback(async () => {
+    if (!getKey()) return;
+    const info = await fetchBalance();
+    if (!info) return;
+    setProfile((p) => {
+      const next: Profile = {
+        email: p?.email ?? '',
+        user_id: p?.user_id ?? '',
+        balance_usd: info.balanceUsd,
+      };
+      persistProfile(next);
+      return next;
+    });
+  }, []);
+
   // Deep-link listener: qcode://auth?k=… from the qlaud sign-in flow.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     startDeepLinkListener(() => {
       setAuthed(true);
       setProfile(getProfile());
+      void refreshBalance();
     }).then((u) => {
       unlisten = u;
     });
     return () => unlisten?.();
-  }, []);
+  }, [refreshBalance]);
+
+  // Boot: pull a fresh balance on the first authed render so the
+  // spend bar isn't sitting at $0 while the cache hydrates.
+  useEffect(() => {
+    if (authed) void refreshBalance();
+  }, [authed, refreshBalance]);
 
   // Cross-tab storage sync (vite-dev convenience).
   useEffect(() => {
@@ -103,6 +130,7 @@ export function App() {
         onModelChange={setModel}
         profile={profile}
         workspaceName={workspace?.name}
+        onRefreshBalance={refreshBalance}
         onSignOut={async () => {
           await clearAuth();
           setCurrentWorkspace(null);
@@ -122,7 +150,11 @@ export function App() {
           onNewChat={() => setChatNonce((n) => n + 1)}
         />
         <main className="flex flex-1 flex-col bg-background/85 backdrop-blur-sm">
-          <ChatSurface key={chatNonce} model={model} />
+          <ChatSurface
+            key={chatNonce}
+            model={model}
+            onTurnComplete={refreshBalance}
+          />
         </main>
       </div>
     </div>
@@ -136,10 +168,12 @@ function Titlebar({
   onModelChange,
   profile,
   workspaceName,
+  onRefreshBalance,
   onSignOut,
 }: {
   model: string;
   onModelChange: (slug: string) => void;
+  onRefreshBalance: () => void;
   profile: Profile | null;
   workspaceName?: string;
   onSignOut: () => void;
@@ -167,7 +201,7 @@ function Titlebar({
 
       <div className="no-drag flex items-center gap-2">
         <ModelPicker value={model} onChange={onModelChange} />
-        <SpendBar profile={profile} />
+        <SpendBar profile={profile} onRefresh={onRefreshBalance} />
         <button
           aria-label="Settings"
           className="grid h-7 w-7 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
@@ -181,13 +215,26 @@ function Titlebar({
   );
 }
 
-function SpendBar({ profile }: { profile: Profile | null }) {
+function SpendBar({
+  profile,
+  onRefresh,
+}: {
+  profile: Profile | null;
+  onRefresh: () => void;
+}) {
   if (!profile) return null;
   const balance = profile.balance_usd ?? 0;
+  const low = balance < 0.5;
   return (
     <button
-      className="flex items-center gap-1.5 rounded border border-border/60 bg-background/70 px-2 py-1 text-[11px] tabular-nums text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
-      title="Click to top up"
+      onClick={onRefresh}
+      className={
+        'flex items-center gap-1.5 rounded border bg-background/70 px-2 py-1 text-[11px] tabular-nums transition-colors ' +
+        (low
+          ? 'border-primary/30 text-primary hover:border-primary/50'
+          : 'border-border/60 text-muted-foreground hover:border-foreground/30 hover:text-foreground')
+      }
+      title={low ? 'Low balance — click to refresh, then top up at qlaud.ai' : 'Click to refresh'}
     >
       <Wallet className="h-3 w-3" />
       ${balance.toFixed(2)}

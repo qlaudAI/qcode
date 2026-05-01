@@ -8,6 +8,7 @@ import type { Message } from '../lib/qlaud-client';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
 import { getCurrentWorkspace } from '../lib/workspace';
 import { ApprovalCard } from './ApprovalCard';
+import { Markdown } from './Markdown';
 import { ToolCallCard, type ToolCallView } from './ToolCallCard';
 
 // Each "block" rendered in the chat is the smallest UI unit:
@@ -36,7 +37,13 @@ const SAMPLE_PROMPTS = [
   'Summarize the architecture from the README and source',
 ];
 
-export function ChatSurface({ model }: { model: string }) {
+export function ChatSurface({
+  model,
+  onTurnComplete,
+}: {
+  model: string;
+  onTurnComplete?: () => void;
+}) {
   const m = MODELS.find((x) => x.slug === model);
   const [history, setHistory] = useState<Message[]>([]);
   const [blocks, setBlocks] = useState<RenderBlock[]>([]);
@@ -117,6 +124,9 @@ export function ChatSurface({ model }: { model: string }) {
       // bails before the loop reaches the awaiting Promise.
       for (const resolve of approvalsRef.current.values()) resolve('reject');
       approvalsRef.current.clear();
+      // Refresh the live spend bar — usage was billed during the
+      // turn, balance just dropped.
+      onTurnComplete?.();
     }
   }
 
@@ -325,9 +335,7 @@ function BlockRow({
     <div className="flex gap-3">
       <Avatar />
       <div className="flex-1 pt-0.5">
-        <p className="whitespace-pre-wrap text-sm leading-relaxed">
-          {block.text}
-        </p>
+        <Markdown source={block.text} />
       </div>
     </div>
   );
