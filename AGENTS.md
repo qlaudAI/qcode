@@ -60,7 +60,18 @@ src-tauri/
    
    Architecture: extend `agent.ts` to emit `tool_call_pending_approval` events; `ChatSurface` halts the loop and shows the approval UI; user clicks → agent loop continues with the result. The protocol is the same, just an interstitial state.
 
-2. **Auto-updater backend Worker.** `tauri.conf.json` references `https://qlaud.ai/qcode/release-channels/{{target}}/{{arch}}/{{current_version}}` — this endpoint doesn't exist yet. Build a Cloudflare Worker that reads from the GitHub releases API and returns the Tauri update manifest format. ~50 lines.
+2. **Auto-updater backend.** ✅ Live at `https://qlaud.ai/qcode/release-channels/{target}/{arch}/{current_version}`. Reads from GitHub releases, returns the Tauri update manifest. To activate auto-updates the user has to do these one-time steps:
+
+   ```bash
+   cd qcode
+   pnpm tauri signer generate -w ~/.tauri/qcode.key
+   # records a passphrase; emits two files (private + .pub)
+   ```
+   - Paste the contents of `~/.tauri/qcode.key.pub` into `tauri.conf.json` → `plugins.updater.pubkey` (replace `REPLACE_WITH_TAURI_GENERATED_PUBKEY`)
+   - Add the private key as a GitHub Actions secret named `TAURI_SIGNING_PRIVATE_KEY` (paste the raw file contents) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the passphrase)
+   - The release workflow already reads both secrets and signs each release artifact — `.tar.gz`/`.zip` bundle plus a `.sig` sibling that the updater route looks for.
+
+   Without these the route correctly returns `204` (no update) for every check, so end-users won't see install errors. They just won't auto-update until you do the keypair step.
 
 3. **Code signing + notarization.**
    - Mac: Apple Developer cert, `productbuild`, notarize via `xcrun notarytool`
