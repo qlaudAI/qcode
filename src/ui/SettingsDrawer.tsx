@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
+  Check,
+  Copy,
   ExternalLink,
   Github,
   KeyRound,
@@ -7,10 +9,12 @@ import {
   Sparkles,
   Trash2,
   X,
+  Zap,
 } from 'lucide-react';
 
 import { cn } from '../lib/cn';
 import { MODELS } from '../lib/models';
+import { hasRipgrep, ripgrepInstallHint } from '../lib/ripgrep';
 import {
   getSettings,
   patchSettings,
@@ -158,6 +162,10 @@ export function SettingsDrawer({
               Updates are signed and verified by your local Tauri public key.
               Only signed releases install.
             </p>
+          </Section>
+
+          <Section title="Search performance">
+            <RipgrepStatus />
           </Section>
 
           <Section title="Connectors">
@@ -365,5 +373,100 @@ function DangerButton({
       </span>
       <span className="text-[11px] text-muted-foreground">{hint}</span>
     </button>
+  );
+}
+
+// Detection-state pill + per-platform install hint for ripgrep.
+// When `rg` is on PATH, the existing JS walker for glob/grep gets
+// replaced by ripgrep — 10-50× faster on large repos. Most users
+// already have it (VS Code ships it) but we still nudge the
+// missing case so they're not silently stuck on the slow path.
+function RipgrepStatus() {
+  const [installed, setInstalled] = useState<boolean | null>(null);
+  const [hint, setHint] = useState<{
+    command: string | null;
+    url: string;
+  } | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([hasRipgrep(), ripgrepInstallHint()]).then(
+      ([has, h]) => {
+        if (cancelled) return;
+        setInstalled(has);
+        setHint(h);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  if (installed == null) {
+    return (
+      <p className="text-[12px] text-muted-foreground">Detecting ripgrep…</p>
+    );
+  }
+  if (installed) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2">
+        <Zap className="h-3.5 w-3.5 text-emerald-600" />
+        <span className="text-[12px] text-foreground/85">
+          ripgrep detected — file search using the fast path.
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2.5">
+      <div className="flex items-start gap-2">
+        <Zap className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+        <div className="flex-1 text-[12px] text-foreground/85">
+          ripgrep not detected. Falling back to a slower JS walker for
+          glob/grep — fine on small repos, noticeably slower on big
+          ones (typically 10-50× the search time).
+        </div>
+      </div>
+      {hint?.command && (
+        <div className="flex items-center gap-2">
+          <code className="flex-1 rounded border border-border/60 bg-background/70 px-2 py-1 font-mono text-[11px] text-foreground/85">
+            {hint.command}
+          </code>
+          <button
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(hint.command!);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              } catch {
+                // clipboard blocked — fall through silently
+              }
+            }}
+            className="grid h-6 w-6 place-items-center rounded border border-border bg-background text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
+            aria-label="Copy install command"
+            title="Copy"
+          >
+            {copied ? (
+              <Check className="h-3 w-3 text-emerald-600" />
+            ) : (
+              <Copy className="h-3 w-3" />
+            )}
+          </button>
+        </div>
+      )}
+      {hint?.url && (
+        <button
+          onClick={() => void openExternal(hint.url)}
+          className="self-start text-[11px] text-muted-foreground underline decoration-border hover:decoration-foreground/60 hover:text-foreground"
+        >
+          {hint.command
+            ? 'or install via another package manager'
+            : 'pick the right package manager for your distro'}{' '}
+          ↗
+        </button>
+      )}
+      <p className="mt-0.5 text-[10.5px] text-muted-foreground">
+        After installing, reopen qcode for detection to refresh.
+      </p>
+    </div>
   );
 }

@@ -53,3 +53,28 @@ export async function openExternal(url: string): Promise<void> {
   const { open } = await import('@tauri-apps/plugin-shell');
   await open(url);
 }
+
+/** OS family for branching install hints / env probes. Cached for
+ *  the session because it doesn't change. Returns 'unknown' outside
+ *  Tauri so the UI just hides platform-specific hints. */
+let cachedPlatform: 'macos' | 'linux' | 'windows' | 'unknown' | null = null;
+export async function getPlatform(): Promise<
+  'macos' | 'linux' | 'windows' | 'unknown'
+> {
+  if (cachedPlatform) return cachedPlatform;
+  if (!isTauri()) {
+    cachedPlatform = 'unknown';
+    return cachedPlatform;
+  }
+  try {
+    const { type } = await import('@tauri-apps/plugin-os');
+    const t = type();
+    if (t === 'macos') cachedPlatform = 'macos';
+    else if (t === 'windows') cachedPlatform = 'windows';
+    else if (t === 'linux') cachedPlatform = 'linux';
+    else cachedPlatform = 'unknown';
+  } catch {
+    cachedPlatform = 'unknown';
+  }
+  return cachedPlatform;
+}

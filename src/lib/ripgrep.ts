@@ -17,7 +17,7 @@
 // That keeps behavior consistent (rg's gitignore is the canonical one
 // users expect) and saves the matcher round-trip.
 
-import { isTauri } from './tauri';
+import { getPlatform, isTauri } from './tauri';
 
 let detectionCache: Promise<boolean> | null = null;
 
@@ -43,6 +43,36 @@ export async function hasRipgrep(): Promise<boolean> {
  *  invalidate the cache. */
 export function resetRipgrepDetection(): void {
   detectionCache = null;
+}
+
+/** One-line install command for the user's platform. Settings UI
+ *  shows this with a copy button when ripgrep is missing. Returns
+ *  null when we can't make a confident recommendation (Linux distros
+ *  vary too much; the Linux hint links the user to ripgrep's docs
+ *  instead of guessing apt vs dnf vs pacman). */
+export async function ripgrepInstallHint(): Promise<{
+  command: string | null;
+  url: string;
+} | null> {
+  const platform = await getPlatform();
+  if (platform === 'macos') {
+    return { command: 'brew install ripgrep', url: 'https://github.com/BurntSushi/ripgrep#installation' };
+  }
+  if (platform === 'windows') {
+    return {
+      command: 'winget install BurntSushi.ripgrep.MSVC',
+      url: 'https://github.com/BurntSushi/ripgrep#installation',
+    };
+  }
+  if (platform === 'linux') {
+    // No single command works across distros — surface the URL so
+    // the user picks the right package manager themselves.
+    return {
+      command: null,
+      url: 'https://github.com/BurntSushi/ripgrep#installation',
+    };
+  }
+  return null;
 }
 
 export type RgGlobResult = { files: string[]; truncated: boolean };
