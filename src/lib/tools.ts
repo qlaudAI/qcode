@@ -17,7 +17,9 @@
 // bash, expected-replacements check for edit_file, etc.).
 
 import { computeDiff, type DiffLine } from './diff';
+import type { IgnoreMatcher } from './gitignore';
 import { isTauri } from './tauri';
+import { getMatcher } from './workspace';
 
 // Anthropic-shape tool definition. Sent verbatim to /v1/messages.
 export type ToolDef = {
@@ -327,7 +329,8 @@ async function runGlob(
   }
   const re = globToRegex(pattern);
   const matches: string[] = [];
-  await walkDir(opts.workspace, opts.workspace, re, matches);
+  const matcher = await getMatcher(opts.workspace);
+  await walkDir(opts.workspace, opts.workspace, re, matches, matcher);
   const top = matches.slice(0, MAX_GLOB_MATCHES);
   const trailer =
     matches.length > MAX_GLOB_MATCHES
@@ -368,7 +371,8 @@ async function runGrep(
 
   const fileGlobRe = fileGlob ? globToRegex(fileGlob) : null;
   const files: string[] = [];
-  await walkDir(root, opts.workspace, /.*/, files);
+  const matcher = await getMatcher(opts.workspace);
+  await walkDir(root, opts.workspace, /.*/, files, matcher);
   const matches: string[] = [];
   const { stat, readTextFile } = await import('@tauri-apps/plugin-fs');
   for (const file of files) {
@@ -728,23 +732,12 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
-const HIDE = new Set([
-  'node_modules',
-  '.git',
-  '.next',
-  '.open-next',
-  'dist',
-  'build',
-  'target',
-  '.cache',
-  'coverage',
-]);
-
 async function walkDir(
   start: string,
   root: string,
   re: RegExp,
   out: string[],
+  matcher: IgnoreMatcher,
 ): Promise<void> {
   if (out.length >= MAX_GLOB_MATCHES) return;
   const { readDir } = await import('@tauri-apps/plugin-fs');
@@ -755,11 +748,11 @@ async function walkDir(
     return;
   }
   for (const e of entries) {
-    if (HIDE.has(e.name)) continue;
     const childAbs = start + '/' + e.name;
     const rel = relativizePath(childAbs, root);
+    if (matcher(rel, e.isDirectory)) continue;
     if (e.isDirectory) {
-      await walkDir(childAbs, root, re, out);
+      await walkDir(childAbs, root, re, out, matcher);
     } else if (re.test(rel)) {
       out.push(rel);
     }

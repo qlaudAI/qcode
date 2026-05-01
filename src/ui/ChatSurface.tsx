@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUp, FileText, Sparkles, Square, X } from 'lucide-react';
+import {
+  AlertCircle,
+  ArrowUp,
+  FileText,
+  RotateCcw,
+  Sparkles,
+  Square,
+  X,
+} from 'lucide-react';
 
 import { runAgent, type AgentEvent } from '../lib/agent';
 import { buildAttachmentContext } from '../lib/attachments';
@@ -46,6 +54,16 @@ type RenderBlock =
       costUsd: number | null;
       model: string;
       durationMs: number;
+    }
+  | {
+      type: 'error';
+      /** Mapped, user-facing message. */
+      message: string;
+      /** Original send arguments so the retry button can re-invoke
+       *  send() with the exact same input + attachments. Set null
+       *  once the user has retried (or sent a new turn) so we don't
+       *  show a stale Retry. */
+      retry: { text: string; images: AttachedImage[]; attached: string[] } | null;
     };
 
 // Pending approval resolvers, keyed by tool_use id. The agent loop
@@ -120,6 +138,31 @@ export function ChatSurface({
     [],
   );
 
+  function retry(retryInputs: {
+    text: string;
+    images: AttachedImage[];
+    attached: string[];
+  }) {
+    // Mark every still-retryable error block as resolved so we don't
+    // show a stale Retry; the new turn either succeeds or pushes its
+    // own fresh error block.
+    setBlocks((bs) =>
+      bs.map((b) =>
+        b.type === 'error' && b.retry ? { ...b, retry: null } : b,
+      ),
+    );
+    setInput(retryInputs.text);
+    setImages(retryInputs.images);
+    setAttached(retryInputs.attached);
+    // Defer one tick so the state setters land before send() reads
+    // them. send() reads from the latest closure (`text` arg + the
+    // current state snapshot for images/attached), so we pass text
+    // explicitly and trust the state to be settled by the next paint.
+    queueMicrotask(() => {
+      void send(retryInputs.text);
+    });
+  }
+
   function decide(id: string, decision: ApprovalDecision) {
     const resolve = approvalsRef.current.get(id);
     if (!resolve) return;
@@ -141,6 +184,16 @@ export function ChatSurface({
     if (busy) return;
     setInput('');
     setError(null);
+
+    // Snapshot exactly what the user is sending so the inline error
+    // block (if the turn fails) can offer a one-click retry with the
+    // identical inputs. Captured before any of the state-clearing
+    // setX([])s below.
+    const retryInputs = {
+      text: userMsg,
+      images: [...images],
+      attached: [...attached],
+    };
 
     const workspace = getCurrentWorkspace();
     let modelText = userMsg || 'Please look at the attached.';
@@ -240,7 +293,17 @@ export function ChatSurface({
       }
     } catch (e) {
       const code = e instanceof Error ? e.message : 'unknown';
-      setError(mapError(code));
+      // Inline error block with retry context. Image-error / network
+      // banner state stays for transient toasts that don't make sense
+      // to "retry" (image too big, etc.).
+      setBlocks((b) => [
+        ...b,
+        {
+          type: 'error',
+          message: mapError(code),
+          retry: retryInputs,
+        },
+      ]);
     } finally {
       setBusy(false);
       abortRef.current = null;
@@ -282,6 +345,9 @@ export function ChatSurface({
                   onReject={() =>
                     b.type === 'approval' ? decide(b.id, 'reject') : undefined
                   }
+                  onRetry={() => {
+                    if (b.type === 'error' && b.retry) retry(b.retry);
+                  }}
                 />
               ))}
             </div>
@@ -506,11 +572,13 @@ function BlockRow({
   busy,
   onAllow,
   onReject,
+  onRetry,
 }: {
   block: RenderBlock;
   busy: boolean;
   onAllow?: () => void;
   onReject?: () => void;
+  onRetry?: () => void;
 }) {
   if (block.type === 'user_text') {
     return (
@@ -570,6 +638,27 @@ function BlockRow({
           model={block.model}
           durationMs={block.durationMs}
         />
+      </div>
+    );
+  }
+  if (block.type === 'error') {
+    return (
+      <div className="flex pl-10">
+        <div className="flex flex-1 items-start gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-3.5 py-2.5">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+          <div className="flex-1 text-sm text-foreground/85">
+            {block.message}
+          </div>
+          {block.retry && (
+            <button
+              onClick={() => onRetry?.()}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground/80 transition-colors hover:border-foreground/30 hover:text-foreground"
+            >
+              <RotateCcw className="h-3 w-3" />
+              Retry
+            </button>
+          )}
+        </div>
       </div>
     );
   }

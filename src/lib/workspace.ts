@@ -3,6 +3,7 @@
 // sensitive: just paths). The actual file contents come from
 // Tauri's fs plugin on demand; we don't cache them here.
 
+import { buildMatcher, type IgnoreMatcher } from './gitignore';
 import { isTauri, pickFolder } from './tauri';
 
 const CURRENT_KEY = 'qcode.workspace.current';
@@ -64,19 +65,23 @@ export async function openFolderPicker(): Promise<Workspace | null> {
   const name = path.split(/[/\\]/).filter(Boolean).pop() ?? path;
   const w = { path, name };
   setCurrentWorkspace(w);
+  // Pre-warm the matcher so the first walk after open doesn't pay
+  // an extra .gitignore round-trip.
+  void getMatcher(path);
   return w;
 }
 
 /** Walk the workspace recursively and return relative file paths.
- *  Skips the same hidden dirs the file tree filters out + bails at
- *  10k entries so command-palette indexing never hangs on a giant
- *  monorepo. */
+ *  Skips per-workspace `.gitignore` patterns + a base list of
+ *  things you'd never want scanned. Bails at 10k entries so
+ *  command-palette indexing never hangs on a giant monorepo. */
 export async function listAllFiles(root: string): Promise<string[]> {
   if (!isTauri()) {
     return ['src/main.tsx', 'src/App.tsx', 'package.json', 'README.md'];
   }
+  const matcher = await getMatcher(root);
   const out: string[] = [];
-  await walkAll(root, '', out);
+  await walkAll(root, '', out, matcher);
   return out;
 }
 
@@ -84,6 +89,7 @@ async function walkAll(
   root: string,
   rel: string,
   out: string[],
+  matcher: IgnoreMatcher,
 ): Promise<void> {
   if (out.length >= 10_000) return;
   const { readDir: fsReadDir } = await import('@tauri-apps/plugin-fs');
@@ -95,10 +101,10 @@ async function walkAll(
     return;
   }
   for (const e of entries) {
-    if (shouldHide(e.name)) continue;
     const childRel = rel ? `${rel}/${e.name}` : e.name;
+    if (matcher(childRel, e.isDirectory)) continue;
     if (e.isDirectory) {
-      await walkAll(root, childRel, out);
+      await walkAll(root, childRel, out, matcher);
     } else {
       out.push(childRel);
     }
@@ -117,6 +123,12 @@ export async function readDir(path: string): Promise<FileNode[]> {
       { name: 'README.md', path: `${path}/README.md`, isDir: false },
     ];
   }
+  // Resolve the active workspace root by stripping the requested
+  // path back to its current-workspace prefix; if the user happens
+  // to navigate outside the workspace (rare — the picker enforces
+  // it) we fall back to a workspace-less matcher so nothing leaks.
+  const ws = getCurrentWorkspace();
+  const matcher = ws && path.startsWith(ws.path) ? await getMatcher(ws.path) : null;
   try {
     const { readDir: fsReadDir } = await import('@tauri-apps/plugin-fs');
     const entries = await fsReadDir(path);
@@ -126,7 +138,13 @@ export async function readDir(path: string): Promise<FileNode[]> {
         path: `${path}/${e.name}`,
         isDir: e.isDirectory,
       }))
-      .filter((e) => !shouldHide(e.name))
+      .filter((e) => {
+        if (!matcher || !ws) return !shouldHide(e.name);
+        const rel = e.path.startsWith(ws.path + '/')
+          ? e.path.slice(ws.path.length + 1)
+          : e.name;
+        return !matcher(rel, e.isDir);
+      })
       .sort((a, b) => {
         if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
         return a.name.localeCompare(b.name, 'en');
@@ -134,6 +152,36 @@ export async function readDir(path: string): Promise<FileNode[]> {
   } catch {
     return [];
   }
+}
+
+// ─── Per-workspace matcher cache ───────────────────────────────────
+//
+// Each workspace gets one matcher built from its .gitignore + our
+// base list. The cache invalidates when a different workspace is
+// opened (by storing the path-keyed map). We don't watch for
+// .gitignore changes; users opening a fresh workspace gets a fresh
+// matcher, which is the common case.
+
+const MATCHER_CACHE = new Map<string, IgnoreMatcher>();
+
+export async function getMatcher(workspacePath: string): Promise<IgnoreMatcher> {
+  const cached = MATCHER_CACHE.get(workspacePath);
+  if (cached) return cached;
+  let gitignoreText: string | null = null;
+  if (isTauri()) {
+    try {
+      const { exists, readTextFile } = await import('@tauri-apps/plugin-fs');
+      const giPath = `${workspacePath}/.gitignore`;
+      if (await exists(giPath)) {
+        gitignoreText = await readTextFile(giPath);
+      }
+    } catch {
+      gitignoreText = null;
+    }
+  }
+  const m = buildMatcher(gitignoreText);
+  MATCHER_CACHE.set(workspacePath, m);
+  return m;
 }
 
 // Drop the noise that fills every dev workspace. We can extend this
