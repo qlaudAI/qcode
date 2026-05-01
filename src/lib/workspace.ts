@@ -67,6 +67,45 @@ export async function openFolderPicker(): Promise<Workspace | null> {
   return w;
 }
 
+/** Walk the workspace recursively and return relative file paths.
+ *  Skips the same hidden dirs the file tree filters out + bails at
+ *  10k entries so command-palette indexing never hangs on a giant
+ *  monorepo. */
+export async function listAllFiles(root: string): Promise<string[]> {
+  if (!isTauri()) {
+    return ['src/main.tsx', 'src/App.tsx', 'package.json', 'README.md'];
+  }
+  const out: string[] = [];
+  await walkAll(root, '', out);
+  return out;
+}
+
+async function walkAll(
+  root: string,
+  rel: string,
+  out: string[],
+): Promise<void> {
+  if (out.length >= 10_000) return;
+  const { readDir: fsReadDir } = await import('@tauri-apps/plugin-fs');
+  const start = rel ? `${root}/${rel}` : root;
+  let entries;
+  try {
+    entries = await fsReadDir(start);
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (shouldHide(e.name)) continue;
+    const childRel = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory) {
+      await walkAll(root, childRel, out);
+    } else {
+      out.push(childRel);
+    }
+    if (out.length >= 10_000) return;
+  }
+}
+
 /** Read the immediate children of a folder. Used by the file tree
  *  on expand. Returns an empty array if not in Tauri or on error. */
 export async function readDir(path: string): Promise<FileNode[]> {

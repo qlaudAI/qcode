@@ -29,6 +29,7 @@ import {
 } from './lib/workspace';
 import type { Message } from './lib/qlaud-client';
 import { ChatSurface } from './ui/ChatSurface';
+import { CommandPalette } from './ui/CommandPalette';
 import { FileTree } from './ui/FileTree';
 import { ModelPicker } from './ui/ModelPicker';
 import { SettingsDrawer } from './ui/SettingsDrawer';
@@ -43,6 +44,7 @@ export function App() {
     getCurrentWorkspace(),
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Persist when the user picks a new default. We update the user's
   // current view immediately (setModel) and stash the choice as the
@@ -187,9 +189,7 @@ export function App() {
           setWorkspace(null);
           break;
         case 'command_palette':
-          // Phase 2 stub. No-op so the shortcut doesn't fire silently
-          // into the void; swap this for setOpen(true) when the
-          // palette lands.
+          setPaletteOpen(true);
           break;
         case 'model_picker':
           // Phase 2: focus the picker programmatically.
@@ -257,6 +257,21 @@ export function App() {
         email={profile?.email ?? null}
         onSignOut={handleSignOut}
         onClearedThreads={refreshThreads}
+      />
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        workspace={workspace}
+        onOpenFolder={async () => {
+          const w = await openFolderPicker();
+          if (w) setWorkspace(w);
+        }}
+        onNewChat={newThread}
+        onSwitchModel={onModelChange}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onRefreshBalance={refreshBalance}
+        onSignOut={handleSignOut}
       />
     </div>
   );

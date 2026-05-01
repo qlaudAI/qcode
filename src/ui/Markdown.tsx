@@ -1,8 +1,10 @@
 import { useMemo, useState } from 'react';
-import { Check, Copy } from 'lucide-react';
+import { Check, Copy, FileText } from 'lucide-react';
 
 import { cn } from '../lib/cn';
 import { parseMarkdown, type Block, type Inline } from '../lib/markdown';
+import { openExternal } from '../lib/tauri';
+import { getCurrentWorkspace } from '../lib/workspace';
 
 // Renders a parsed markdown block tree. Code blocks get a copy
 // button + language label; everything else is straight text styling.
@@ -101,15 +103,52 @@ function InlineNode({ node }: { node: Inline }) {
       </em>
     );
   }
+  if (node.type === 'link') {
+    return (
+      <a
+        href={node.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-primary underline-offset-2 hover:underline"
+      >
+        <Inlines tokens={node.tokens} />
+      </a>
+    );
+  }
+  return <FileLink path={node.path} line={node.line} />;
+}
+
+// ─── Inline file link ──────────────────────────────────────────────
+//
+// Rendered when the markdown parser detects a workspace-relative
+// path in assistant text. Clicking opens the file in the user's
+// default editor via Tauri's shell.open() — VS Code, Cursor,
+// JetBrains, whatever is registered for that file extension.
+//
+// In browser-mode (no Tauri host), we degrade to a non-action mono
+// span so the path is still visible but doesn't pretend to work.
+
+function FileLink({ path, line }: { path: string; line: number | null }) {
+  const display = line ? `${path}:${line}` : path;
+  function open() {
+    const ws = getCurrentWorkspace();
+    if (!ws) return;
+    const abs = path.startsWith('/') ? path : `${ws.path}/${path}`;
+    // VS Code / Cursor accept this URL form to open at a specific
+    // line (`vscode://file/<abs>:<line>`). For safety + portability
+    // we hand the raw path to the OS — the registered editor opens
+    // the file; jumping to the line is a future enhancement.
+    void openExternal(abs);
+  }
   return (
-    <a
-      href={node.href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-primary underline-offset-2 hover:underline"
+    <button
+      onClick={open}
+      title={`Open ${display}`}
+      className="inline-flex items-center gap-1 rounded border border-border/60 bg-muted/60 px-1.5 py-px font-mono text-[12px] text-foreground transition-colors hover:border-foreground/30 hover:bg-muted"
     >
-      <Inlines tokens={node.tokens} />
-    </a>
+      <FileText className="h-3 w-3 text-muted-foreground" />
+      {display}
+    </button>
   );
 }
 

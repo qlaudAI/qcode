@@ -29,7 +29,10 @@ export type Inline =
   | { type: 'code'; text: string }
   | { type: 'bold'; tokens: Inline[] }
   | { type: 'italic'; tokens: Inline[] }
-  | { type: 'link'; href: string; tokens: Inline[] };
+  | { type: 'link'; href: string; tokens: Inline[] }
+  /** Workspace-relative file path mentioned in assistant text.
+   *  Clicking opens the file in the user's default editor. */
+  | { type: 'file_link'; path: string; line: number | null };
 
 export function parseMarkdown(src: string): Block[] {
   const lines = src.split('\n');
@@ -172,5 +175,67 @@ export function parseInline(src: string): Inline[] {
     i++;
   }
   flush();
+  return linkifyFilePaths(out);
+}
+
+// ─── File-path detection ──────────────────────────────────────────
+//
+// Walk the token tree post-parse and split `text` tokens whenever a
+// path-like substring appears. We require at least one slash before
+// the extension to avoid false positives on prose ("the readme.md
+// approach is fine") — model output that wants to refer to a root-
+// level file should write `./readme.md`. The regex also picks up the
+// optional `:line` suffix Claude Code et al. emit (`src/auth.ts:42`).
+
+// Match either:
+//   ./<filename>.<ext>            — explicit root-relative form
+//   <dir>/<…dirs>/<file>.<ext>    — path with at least one directory
+// Optional :<line> suffix in both cases. We don't match bare
+// filenames (`README.md` in prose) because the false-positive rate
+// is too high — model that wants to link a root file should write
+// `./README.md`.
+const FILE_PATH_RE =
+  /(?:\.\/[\w.-]+|(?:[\w@-][\w.-]*\/)+[\w.-]+)\.[a-zA-Z][\w]{0,5}(?::\d+)?/g;
+
+function linkifyFilePaths(tokens: Inline[]): Inline[] {
+  const out: Inline[] = [];
+  for (const t of tokens) {
+    if (t.type === 'text') {
+      out.push(...splitText(t.text));
+    } else if (t.type === 'bold' || t.type === 'italic') {
+      out.push({ ...t, tokens: linkifyFilePaths(t.tokens) });
+    } else if (t.type === 'link') {
+      // Don't recurse into explicit markdown links — the href there
+      // is the source of truth, and link labels are user-authored.
+      out.push(t);
+    } else {
+      out.push(t);
+    }
+  }
   return out;
+}
+
+function splitText(src: string): Inline[] {
+  const out: Inline[] = [];
+  let last = 0;
+  FILE_PATH_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = FILE_PATH_RE.exec(src)) !== null) {
+    if (m.index > last) {
+      out.push({ type: 'text', text: src.slice(last, m.index) });
+    }
+    const raw = m[0];
+    // Strip leading "./" for the cleaner path we render.
+    const cleaned = raw.startsWith('./') ? raw.slice(2) : raw;
+    const colon = cleaned.lastIndexOf(':');
+    const hasLine = colon > 0 && /^\d+$/.test(cleaned.slice(colon + 1));
+    const path = hasLine ? cleaned.slice(0, colon) : cleaned;
+    const line = hasLine ? Number.parseInt(cleaned.slice(colon + 1), 10) : null;
+    out.push({ type: 'file_link', path, line });
+    last = m.index + raw.length;
+  }
+  if (last < src.length) {
+    out.push({ type: 'text', text: src.slice(last) });
+  }
+  return out.length ? out : [{ type: 'text', text: src }];
 }
