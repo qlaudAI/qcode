@@ -19,6 +19,7 @@ import {
 } from './qlaud-client';
 import {
   ALL_TOOLS,
+  READ_TOOLS,
   executeTool,
   type ApprovalDecision,
   type ApprovalRequest,
@@ -26,7 +27,7 @@ import {
   type ToolResult,
 } from './tools';
 
-const SYSTEM_PROMPT = `You are qcode, a multi-model coding agent running on the user's desktop.
+const SYSTEM_PROMPT_AGENT = `You are qcode, a multi-model coding agent running on the user's desktop.
 
 Style:
 - Be direct. Show, don't tell. Match the user's terseness.
@@ -42,6 +43,20 @@ Safety:
 - Stay inside the user's open workspace. Tool calls outside it will fail.
 - Don't run destructive commands without good reason. The bash tool has a deny-list, but it isn't exhaustive.
 - If the user rejects an approval, don't immediately retry the same change — propose a different approach or ask what they'd prefer.`;
+
+const SYSTEM_PROMPT_PLAN = `You are qcode in PLAN MODE. The user has explicitly asked you to investigate and propose, not to change anything.
+
+Style:
+- Use list_files / glob to map the project, then read_file / grep to confirm specifics.
+- Produce a concrete, file-by-file plan. Reference exact paths and function names. When proposing edits, quote the existing code you'd change and the replacement.
+- Be specific about ordering: which file first, which test to run after, what the rollback is.
+- If the user's request is ambiguous, surface the choice points before recommending one.
+
+Tools available to you:
+- list_files / read_file / glob / grep — use them freely.
+- write_file / edit_file / bash are NOT available in plan mode by design. Don't claim you'll run them; don't ask to use them. Describe the change in prose.
+
+When the user is satisfied with the plan they'll switch out of plan mode and ask you to execute.`;
 
 const MAX_LOOPS = 16; // hard ceiling; with write tools, real tasks need more turns
 
@@ -94,6 +109,9 @@ export type RunAgentOpts = {
   workspace: string | null;
   /** Prior conversation. Includes the just-sent user turn at the end. */
   history: Message[];
+  /** 'agent' (default) — full toolkit. 'plan' — read-only tools +
+   *  proposal-style system prompt. */
+  mode?: 'agent' | 'plan';
   signal?: AbortSignal;
   onEvent: (e: AgentEvent) => void;
   /** Resolves to allow/reject for a write/edit/bash tool. The UI
@@ -107,7 +125,13 @@ export type RunAgentOpts = {
 
 export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
   const messages: Message[] = [...opts.history];
-  const tools = opts.workspace ? ALL_TOOLS : undefined;
+  const planMode = opts.mode === 'plan';
+  const systemPrompt = planMode ? SYSTEM_PROMPT_PLAN : SYSTEM_PROMPT_AGENT;
+  const tools = opts.workspace
+    ? planMode
+      ? READ_TOOLS
+      : ALL_TOOLS
+    : undefined;
   // Aggregate per-turn usage across the whole runAgent call. Each
   // streamMessage iteration adds its own input/output token count;
   // the final 'finished' event ships the cumulative number.
@@ -124,7 +148,7 @@ export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
     try {
       await streamMessage({
         model: opts.model,
-        system: SYSTEM_PROMPT,
+        system: systemPrompt,
         tools,
         messages,
         signal: opts.signal,

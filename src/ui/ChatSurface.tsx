@@ -61,10 +61,12 @@ const SAMPLE_PROMPTS = [
 
 export function ChatSurface({
   model,
+  mode = 'agent',
   initialHistory = [],
   onTurnComplete,
 }: {
   model: string;
+  mode?: 'agent' | 'plan';
   initialHistory?: Message[];
   /** Called when a turn finishes (success, abort, or error). Receives
    *  the full thread history so the parent can persist it. */
@@ -197,6 +199,7 @@ export function ChatSurface({
     try {
       const finalHistory = await runAgent({
         model,
+        mode,
         workspace: workspace?.path ?? null,
         history: nextHistory,
         signal: abortRef.current.signal,

@@ -11,7 +11,11 @@ import {
 } from './lib/auth';
 import { fetchBalance } from './lib/billing';
 import { startDeepLinkListener } from './lib/deep-link';
-import { getSettings, patchSettings } from './lib/settings';
+import {
+  getSettings,
+  patchSettings,
+  type AgentMode,
+} from './lib/settings';
 import { useShortcuts, type MenuId } from './lib/shortcuts';
 import {
   createThread,
@@ -40,6 +44,7 @@ export function App() {
   const [authed, setAuthed] = useState<boolean>(() => Boolean(getKey()));
   const [profile, setProfile] = useState<Profile | null>(() => getProfile());
   const [model, setModel] = useState<string>(() => getSettings().defaultModel);
+  const [mode, setMode] = useState<AgentMode>(() => getSettings().mode);
   const [workspace, setWorkspace] = useState<Workspace | null>(() =>
     getCurrentWorkspace(),
   );
@@ -54,6 +59,11 @@ export function App() {
   const onModelChange = useCallback((slug: string) => {
     setModel(slug);
     patchSettings({ defaultModel: slug });
+  }, []);
+
+  const onModeChange = useCallback((next: AgentMode) => {
+    setMode(next);
+    patchSettings({ mode: next });
   }, []);
 
   const handleSignOut = useCallback(async () => {
@@ -209,6 +219,8 @@ export function App() {
       <Titlebar
         model={model}
         onModelChange={onModelChange}
+        mode={mode}
+        onModeChange={onModeChange}
         profile={profile}
         workspaceName={workspace?.name}
         onRefreshBalance={refreshBalance}
@@ -247,6 +259,7 @@ export function App() {
               void refreshBalance();
             }}
             model={model}
+            mode={mode}
           />
         </main>
       </div>
@@ -282,6 +295,8 @@ export function App() {
 function Titlebar({
   model,
   onModelChange,
+  mode,
+  onModeChange,
   profile,
   workspaceName,
   onRefreshBalance,
@@ -289,6 +304,8 @@ function Titlebar({
 }: {
   model: string;
   onModelChange: (slug: string) => void;
+  mode: AgentMode;
+  onModeChange: (m: AgentMode) => void;
   onRefreshBalance: () => void;
   profile: Profile | null;
   workspaceName?: string;
@@ -316,6 +333,7 @@ function Titlebar({
       </div>
 
       <div className="no-drag flex items-center gap-2">
+        <ModeToggle value={mode} onChange={onModeChange} />
         <ModelPicker value={model} onChange={onModelChange} />
         <SpendBar profile={profile} onRefresh={onRefreshBalance} />
         <button
@@ -354,6 +372,80 @@ function SpendBar({
     >
       <Wallet className="h-3 w-3" />
       ${balance.toFixed(2)}
+    </button>
+  );
+}
+
+// ─── Mode toggle ───────────────────────────────────────────────────
+//
+// Two-state segmented pill for Agent vs Plan. Visually distinct
+// when in Plan so the user always knows write tools are off.
+
+function ModeToggle({
+  value,
+  onChange,
+}: {
+  value: AgentMode;
+  onChange: (next: AgentMode) => void;
+}) {
+  const isPlan = value === 'plan';
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Mode"
+      className={
+        'flex items-center rounded-full border p-0.5 ' +
+        (isPlan
+          ? 'border-amber-500/40 bg-amber-500/5'
+          : 'border-border/60 bg-background/70')
+      }
+      title={
+        isPlan
+          ? 'Plan mode — read-only tools only. The model proposes; you switch to Agent to execute.'
+          : 'Agent mode — full toolkit. Write/edit/bash require approval.'
+      }
+    >
+      <Segment
+        active={value === 'agent'}
+        onClick={() => onChange('agent')}
+        label="Agent"
+      />
+      <Segment
+        active={isPlan}
+        onClick={() => onChange('plan')}
+        label="Plan"
+        amber
+      />
+    </div>
+  );
+}
+
+function Segment({
+  active,
+  onClick,
+  label,
+  amber,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  amber?: boolean;
+}) {
+  return (
+    <button
+      role="radio"
+      aria-checked={active}
+      onClick={onClick}
+      className={
+        'rounded-full px-2 py-0.5 text-[10.5px] font-medium transition-colors ' +
+        (active
+          ? amber
+            ? 'bg-amber-500/15 text-amber-700'
+            : 'bg-foreground text-background'
+          : 'text-muted-foreground hover:text-foreground')
+      }
+    >
+      {label}
     </button>
   );
 }

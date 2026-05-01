@@ -126,6 +126,22 @@ export function SettingsDrawer({
             <p className="text-[11px] text-muted-foreground">
               You can still switch the model per-conversation from the title bar.
             </p>
+
+            <FieldLabel>Default mode for new chats</FieldLabel>
+            <select
+              value={settings.mode}
+              onChange={(e) =>
+                update('mode', e.target.value as 'agent' | 'plan')
+              }
+              className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/30"
+            >
+              <option value="agent">Agent — full toolkit (write, edit, bash)</option>
+              <option value="plan">Plan — read-only, propose changes in prose</option>
+            </select>
+            <p className="text-[11px] text-muted-foreground">
+              The title-bar Agent / Plan toggle overrides this for the
+              current session.
+            </p>
           </Section>
 
           <Section title="Updates">

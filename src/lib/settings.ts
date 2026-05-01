@@ -7,17 +7,27 @@ import { DEFAULT_MODEL } from './models';
 
 const STORAGE_KEY = 'qcode.settings';
 
+/** Plan mode: model only sees read-only tools, system prompt
+ *  steers it toward investigation + proposal. Useful for safe
+ *  exploration of unfamiliar code or when the user wants to
+ *  approve every step manually before any tools fire. */
+export type AgentMode = 'agent' | 'plan';
+
 export type Settings = {
   /** Model picked when a new chat is created. The title-bar dropdown
    *  still lets the user override per-thread. */
   defaultModel: string;
   /** Auto-fetch + install updates on launch. Default on. */
   autoUpdate: boolean;
+  /** agent — full tool kit including write_file/edit_file/bash.
+   *  plan  — read tools only; model proposes changes in prose. */
+  mode: AgentMode;
 };
 
 const DEFAULTS: Settings = {
   defaultModel: DEFAULT_MODEL,
   autoUpdate: true,
+  mode: 'agent',
 };
 
 export function getSettings(): Settings {
