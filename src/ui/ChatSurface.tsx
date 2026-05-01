@@ -23,6 +23,7 @@ import {
 } from '../lib/images';
 import { getProjectMemory, type ProjectMemory } from '../lib/memory';
 import { MODELS } from '../lib/models';
+import { planToAgentHandoff, setLastMode } from '../lib/mode-tracking';
 import { getSettings } from '../lib/settings';
 import type { ContentBlock, Message } from '../lib/qlaud-client';
 import {
@@ -291,8 +292,17 @@ export function ChatSurface({
     };
 
     const workspace = getCurrentWorkspace();
+    // Plan → Agent handoff: if the user just flipped the mode toggle
+    // from plan to agent on this thread, inject a context note so
+    // the model knows it should EXECUTE the plan it produced earlier
+    // (rather than starting a fresh investigation). No-op for first
+    // turn / agent-only threads / agent → plan transitions.
+    const handoff = planToAgentHandoff(threadId, mode);
     let modelText = userMsg || 'Please look at the attached.';
     let displayText = userMsg;
+    if (handoff) {
+      modelText = handoff + modelText;
+    }
     if (workspace && attached.length > 0) {
       const ctx = await buildAttachmentContext(workspace.path, attached);
       if (ctx.contextBlock) {
@@ -367,6 +377,9 @@ export function ChatSurface({
       });
 
       onTurnLanded?.({ userText: userMsg || null, threadId: id });
+      // Remember which mode this turn ran in so the next send can
+      // detect a plan → agent transition.
+      setLastMode(id, mode);
 
       // After the turn ends, fetch the new balance and append a
       // usage block. Balance delta is the authoritative cost (qlaud's
