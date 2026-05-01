@@ -18,11 +18,15 @@ import {
 } from './lib/settings';
 import { useShortcuts, type MenuId } from './lib/shortcuts';
 import {
-  createThread,
-  deleteThread as deleteThreadStorage,
-  getThread,
-  listThreads,
-  saveThread,
+  createRemoteThread,
+  deleteRemoteThread,
+  listRemoteThreads,
+  loadCachedSummaries,
+  patchCachedSummary,
+  removeCachedSummary,
+  saveCachedSummaries,
+  titleFromPrompt,
+  upsertCachedSummary,
   type ThreadSummary,
 } from './lib/threads';
 import {
@@ -31,7 +35,6 @@ import {
   setCurrentWorkspace,
   type Workspace,
 } from './lib/workspace';
-import type { Message } from './lib/qlaud-client';
 import { ChatSurface } from './ui/ChatSurface';
 import { CommandPalette } from './ui/CommandPalette';
 import { FileTree } from './ui/FileTree';
@@ -75,15 +78,58 @@ export function App() {
     setSettingsOpen(false);
   }, []);
 
-  // Threads. The sidebar lists summaries; the chat surface gets the
-  // active thread's full history. Switching threads remounts
-  // ChatSurface (cheap — no in-flight request to abort here since the
-  // old chat's busy state lived inside its own component).
-  const [threads, setThreads] = useState<ThreadSummary[]>(() => listThreads());
-  const [currentId, setCurrentId] = useState<string | null>(
-    () => listThreads()[0]?.id ?? null,
+  // Threads. qlaud owns the canonical history at /v1/threads; we
+  // hold a localStorage cache of summaries so the sidebar renders
+  // before the network round-trip lands. ChatSurface fetches the
+  // active thread's messages via GET /v1/threads/:id/messages on
+  // mount and re-renders from there.
+  const [threads, setThreads] = useState<ThreadSummary[]>(() =>
+    loadCachedSummaries(),
   );
-  const currentThread = currentId ? getThread(currentId) : null;
+  const [currentId, setCurrentId] = useState<string | null>(
+    () => loadCachedSummaries()[0]?.id ?? null,
+  );
+
+  // Reconcile the cache against qlaud on first authed render. Remote
+  // wins on conflict — if a thread was deleted on another device,
+  // our local cache loses its row. Newly-created remote threads get
+  // a synthesized title (qlaud doesn't store one yet).
+  useEffect(() => {
+    if (!authed) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const remote = await listRemoteThreads();
+        if (cancelled) return;
+        const cache = loadCachedSummaries();
+        const cacheById = new Map(cache.map((s) => [s.id, s]));
+        const merged: ThreadSummary[] = remote.map((r) => {
+          const cached = cacheById.get(r.id);
+          return {
+            id: r.id,
+            title: cached?.title ?? 'New chat',
+            model: cached?.model ?? model,
+            createdAt: r.created_at,
+            updatedAt: r.last_active_at,
+          };
+        });
+        saveCachedSummaries(merged);
+        setThreads(merged);
+        // If our active id no longer exists remotely, fall back to
+        // the most recent thread (or null).
+        if (currentId && !merged.some((t) => t.id === currentId)) {
+          setCurrentId(merged[0]?.id ?? null);
+        }
+      } catch {
+        // Network blip on boot — keep the cached view, retry implicit
+        // on next render that triggers the effect.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed]);
 
   // Pull live balance from qlaud and merge into the cached profile so
   // the title-bar spend bar shows fresh numbers. Idempotent — safe to
@@ -133,47 +179,91 @@ export function App() {
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
-  // Thread mutations. We keep the localStorage layer authoritative
-  // and re-derive the in-memory list after each change so summaries
-  // (titles, updatedAt) stay in lockstep.
+  // Thread mutations. qlaud is authoritative; we mutate the cache
+  // optimistically and reconcile on the next list call.
   const refreshThreads = useCallback(() => {
-    setThreads(listThreads());
+    setThreads(loadCachedSummaries());
   }, []);
 
-  const newThread = useCallback(() => {
-    const t = createThread(model);
-    refreshThreads();
-    setCurrentId(t.id);
-  }, [model, refreshThreads]);
+  const newThread = useCallback(async () => {
+    try {
+      const t = await createRemoteThread();
+      const summary: ThreadSummary = {
+        id: t.id,
+        title: 'New chat',
+        model,
+        createdAt: t.created_at,
+        updatedAt: t.last_active_at,
+      };
+      setThreads(upsertCachedSummary(summary));
+      setCurrentId(t.id);
+    } catch {
+      // Network failure — leave the user on whatever they had.
+      // The composer will surface the error on first send if the
+      // problem persists.
+    }
+  }, [model]);
 
   const switchThread = useCallback((id: string) => {
     setCurrentId(id);
   }, []);
 
   const removeThread = useCallback(
-    (id: string) => {
-      deleteThreadStorage(id);
-      const next = listThreads();
+    async (id: string) => {
+      // Optimistic prune — drop from cache + list immediately, then
+      // delete server-side. If the delete fails the next refresh
+      // will resurrect the row.
+      const next = removeCachedSummary(id);
       setThreads(next);
       if (currentId === id) {
         setCurrentId(next[0]?.id ?? null);
+      }
+      try {
+        await deleteRemoteThread(id);
+      } catch {
+        // Tolerated — see comment above.
       }
     },
     [currentId],
   );
 
-  // Persist the active thread's history every time the chat surface
-  // hands us a new turn. Auto-titles on first user message.
-  const persistTurn = useCallback(
-    (history: Message[]) => {
-      const id = currentId;
-      if (!id) return;
-      const existing = getThread(id);
+  // Lazy thread provisioning. ChatSurface calls this before its
+  // first send when no thread is active — gives us a real qlaud
+  // thread id to address. Mirrors the legacy "first turn → conjure
+  // a thread" path but delegates the round-trip out of the
+  // composer's hot path.
+  const ensureThreadId = useCallback(async (): Promise<string> => {
+    if (currentId) return currentId;
+    const t = await createRemoteThread();
+    const summary: ThreadSummary = {
+      id: t.id,
+      title: 'New chat',
+      model,
+      createdAt: t.created_at,
+      updatedAt: t.last_active_at,
+    };
+    setThreads(upsertCachedSummary(summary));
+    setCurrentId(t.id);
+    return t.id;
+  }, [currentId, model]);
+
+  // ChatSurface reports back when a turn lands. We use that to
+  // refresh the cached summary's updatedAt and (if the title is
+  // still the "New chat" placeholder) seed a real title from the
+  // user's prompt. Canonical history lives on qlaud — we don't
+  // replay or re-persist it locally.
+  const onTurnLanded = useCallback(
+    (info: { userText: string | null; threadId: string }) => {
+      const cache = loadCachedSummaries();
+      const existing = cache.find((s) => s.id === info.threadId);
       if (!existing) return;
-      saveThread({ ...existing, model, history });
-      refreshThreads();
+      const patch: Partial<ThreadSummary> = { updatedAt: Date.now() };
+      if (existing.title === 'New chat' && info.userText) {
+        patch.title = titleFromPrompt(info.userText);
+      }
+      setThreads(patchCachedSummary(info.threadId, patch));
     },
-    [currentId, model, refreshThreads],
+    [],
   );
 
   // Single source of truth for native-menu + keyboard shortcuts.
@@ -181,7 +271,7 @@ export function App() {
     async (id: MenuId) => {
       switch (id) {
         case 'new_chat':
-          newThread();
+          void newThread();
           break;
         case 'open_folder': {
           const w = await openFolderPicker();
@@ -242,20 +332,10 @@ export function App() {
         />
         <main className="flex flex-1 flex-col bg-background/85 backdrop-blur-sm">
           <ChatSurface
-            key={currentId ?? 'empty'}
-            initialHistory={currentThread?.history ?? []}
-            onTurnComplete={(history) => {
-              if (!currentId) {
-                // First turn → conjure a thread on demand. Catches
-                // the post-sign-in case where the user types before
-                // explicitly clicking New Chat.
-                const t = createThread(model);
-                saveThread({ ...t, history });
-                refreshThreads();
-                setCurrentId(t.id);
-              } else {
-                persistTurn(history);
-              }
+            threadId={currentId}
+            ensureThreadId={ensureThreadId}
+            onTurnLanded={(info) => {
+              onTurnLanded(info);
               void refreshBalance();
             }}
             model={model}

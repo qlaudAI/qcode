@@ -1,16 +1,13 @@
-// Conversation persistence. One row per thread, persisted to
-// localStorage today; we'll move to Tauri's app-data directory once
-// we want cross-device sync via qlaud's threads API. The shape here
-// matches what qlaud's /v1/threads endpoint emits, so the eventual
-// switch is a renamed import + a different storage adapter.
+// Thread state — qlaud now owns the canonical conversation history.
 //
-// Storage layout:
-//   qcode.threads          — index { ids: string[] }
-//   qcode.thread.<uuid>    — full Thread object
+// We keep a localStorage cache of thread *summaries* (id, title,
+// model, timestamps) so the sidebar renders before the network
+// round-trip lands on cold app start. The remote is authoritative;
+// the cache is best-effort and reconciled in the background by
+// listRemoteThreads().
 //
-// Rationale for one-key-per-thread instead of one big blob: writes
-// stay O(1) per turn even when the user has hundreds of threads,
-// and a corrupted single thread doesn't take down the whole list.
+// Sprint C-2 dropped the per-thread message blobs in localStorage —
+// /v1/threads/:id/messages GET is the source of truth now.
 
 import { getKey } from './auth';
 import type { ContentBlock, Message } from './qlaud-client';
@@ -19,157 +16,18 @@ const BASE =
   (import.meta.env.VITE_QLAUD_BASE as string | undefined) ??
   'https://api.qlaud.ai';
 
-export type Thread = {
+const TITLE_MAX = 60;
+const SUMMARY_INDEX_KEY = 'qcode.threads.summaries.v2';
+
+export type ThreadSummary = {
   id: string;
-  /** Auto-derived from the first user message; user-editable later. */
   title: string;
-  /** Model slug at the moment of the latest turn. */
   model: string;
-  /** Full message history in Anthropic shape. */
-  history: Message[];
   createdAt: number;
   updatedAt: number;
 };
 
-export type ThreadSummary = Pick<
-  Thread,
-  'id' | 'title' | 'model' | 'createdAt' | 'updatedAt'
->;
-
-const INDEX_KEY = 'qcode.threads';
-const THREAD_KEY = (id: string) => `qcode.thread.${id}`;
-const TITLE_MAX = 60;
-
-type Index = { ids: string[] };
-
-function readIndex(): Index {
-  if (typeof localStorage === 'undefined') return { ids: [] };
-  const raw = localStorage.getItem(INDEX_KEY);
-  if (!raw) return { ids: [] };
-  try {
-    const v = JSON.parse(raw) as Index;
-    return Array.isArray(v.ids) ? v : { ids: [] };
-  } catch {
-    return { ids: [] };
-  }
-}
-
-function writeIndex(idx: Index): void {
-  localStorage.setItem(INDEX_KEY, JSON.stringify(idx));
-}
-
-/** All threads, newest-first by updatedAt. Cheap — only reads the
- *  per-thread blobs to surface their summary fields. */
-export function listThreads(): ThreadSummary[] {
-  const idx = readIndex();
-  const out: ThreadSummary[] = [];
-  for (const id of idx.ids) {
-    const t = getThread(id);
-    if (!t) continue;
-    out.push({
-      id: t.id,
-      title: t.title,
-      model: t.model,
-      createdAt: t.createdAt,
-      updatedAt: t.updatedAt,
-    });
-  }
-  out.sort((a, b) => b.updatedAt - a.updatedAt);
-  return out;
-}
-
-export function getThread(id: string): Thread | null {
-  if (typeof localStorage === 'undefined') return null;
-  const raw = localStorage.getItem(THREAD_KEY(id));
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as Thread;
-  } catch {
-    return null;
-  }
-}
-
-/** Create a new empty thread and prepend it to the index. */
-export function createThread(model: string): Thread {
-  const now = Date.now();
-  const t: Thread = {
-    id: uuid(),
-    title: 'New chat',
-    model,
-    history: [],
-    createdAt: now,
-    updatedAt: now,
-  };
-  saveThread(t);
-  return t;
-}
-
-/** Persist updated thread state. Updates updatedAt automatically.
- *  Auto-derives the title from the first user message if it's still
- *  the placeholder. */
-export function saveThread(t: Thread): Thread {
-  const next: Thread = {
-    ...t,
-    updatedAt: Date.now(),
-    title:
-      t.title === 'New chat' && t.history.length > 0
-        ? deriveTitle(t.history) || t.title
-        : t.title,
-  };
-  localStorage.setItem(THREAD_KEY(next.id), JSON.stringify(next));
-  // Move (or insert) to the front of the index.
-  const idx = readIndex();
-  const ids = [next.id, ...idx.ids.filter((x) => x !== next.id)];
-  writeIndex({ ids });
-  return next;
-}
-
-export function deleteThread(id: string): void {
-  if (typeof localStorage === 'undefined') return;
-  localStorage.removeItem(THREAD_KEY(id));
-  const idx = readIndex();
-  writeIndex({ ids: idx.ids.filter((x) => x !== id) });
-}
-
-/** Drop everything. Wired to the Settings → "Clear chat history"
- *  action when that lands. */
-export function clearAllThreads(): void {
-  const idx = readIndex();
-  for (const id of idx.ids) localStorage.removeItem(THREAD_KEY(id));
-  writeIndex({ ids: [] });
-}
-
-// ─── Helpers ────────────────────────────────────────────────────────
-
-function uuid(): string {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  // Fallback for the rare environment without crypto.randomUUID.
-  return 't_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
-
-function deriveTitle(history: Message[]): string | null {
-  for (const msg of history) {
-    if (msg.role !== 'user') continue;
-    for (const block of msg.content) {
-      if (block.type !== 'text') continue;
-      const text = block.text.trim().split('\n')[0] ?? '';
-      if (!text) continue;
-      return text.length > TITLE_MAX
-        ? text.slice(0, TITLE_MAX - 1).trim() + '…'
-        : text;
-    }
-  }
-  return null;
-}
-
-// ─── Remote thread API ─────────────────────────────────────────────
-//
-// Server-side thread storage at /v1/threads. qlaud owns the canonical
-// history; localStorage now only caches the summary list for the
-// sidebar (id, title, model, timestamps) so it can render before the
-// network round-trip lands. The remote always wins on conflict.
+// ─── Remote API ────────────────────────────────────────────────────
 
 export type RemoteThread = {
   id: string;
@@ -211,9 +69,8 @@ async function api<T>(
 }
 
 /** Create a fresh thread on qlaud. Returns the canonical id qcode
- *  will use for every subsequent message + tool-result POST on this
- *  conversation. Optional metadata stays on the qlaud row — surfaced
- *  back via getRemoteThread / listRemoteThreads. */
+ *  uses for every subsequent message + tool-result POST on this
+ *  conversation. */
 export async function createRemoteThread(opts?: {
   metadata?: Record<string, unknown>;
 }): Promise<RemoteThread> {
@@ -225,7 +82,7 @@ export async function createRemoteThread(opts?: {
 
 /** Newest-first list of the caller's threads. Up to `limit` rows. */
 export async function listRemoteThreads(
-  limit = 20,
+  limit = 50,
   signal?: AbortSignal,
 ): Promise<RemoteThread[]> {
   const data = await api<{ data: RemoteThread[] }>(
@@ -235,9 +92,9 @@ export async function listRemoteThreads(
   return data.data;
 }
 
-/** Soft-delete a thread on qlaud. Idempotent — already-deleted
- *  rows return 404 which we map to a no-throw resolution so the
- *  sidebar can prune optimistically without retry loops. */
+/** Soft-delete a thread on qlaud. Idempotent — already-deleted rows
+ *  return 404 which we map to a no-throw resolution so the sidebar
+ *  can prune optimistically without retry loops. */
 export async function deleteRemoteThread(id: string): Promise<void> {
   try {
     await api<unknown>(`/v1/threads/${encodeURIComponent(id)}`, {
@@ -249,11 +106,9 @@ export async function deleteRemoteThread(id: string): Promise<void> {
   }
 }
 
-/** Load the conversation history for a thread, oldest-first. Returns
- *  Anthropic-shape Messages so ChatSurface can re-render with the
- *  same renderer it uses for live turns. Tool-result blocks pair
- *  back with their tool_use blocks via tool_use_id (the model loop
- *  already enforced that ordering). */
+/** Load full conversation history for a thread, oldest-first.
+ *  Returns Anthropic-shape Messages so ChatSurface can render with
+ *  the same renderer it uses for live turns. */
 export async function getRemoteThreadMessages(
   id: string,
   signal?: AbortSignal,
@@ -274,46 +129,30 @@ function normalizeContent(c: ContentBlock[] | string): ContentBlock[] {
 }
 
 // ─── Sidebar summary cache (localStorage) ───────────────────────────
-//
-// qcode wants instant "list my threads" even before the network round-
-// trip lands, especially on cold app start. We cache the summary
-// fields locally and reconcile in the background. The remote `id`
-// is authoritative — we never invent ids on the client now that
-// qlaud generates them on POST /v1/threads.
 
-const SUMMARY_INDEX_KEY = 'qcode.threads.summaries.v2';
-
-export type RemoteThreadSummary = {
-  id: string;
-  title: string;
-  model: string;
-  createdAt: number;
-  updatedAt: number;
-};
-
-export function loadCachedSummaries(): RemoteThreadSummary[] {
+export function loadCachedSummaries(): ThreadSummary[] {
   if (typeof localStorage === 'undefined') return [];
   const raw = localStorage.getItem(SUMMARY_INDEX_KEY);
   if (!raw) return [];
   try {
     const v = JSON.parse(raw);
-    return Array.isArray(v) ? (v as RemoteThreadSummary[]) : [];
+    return Array.isArray(v) ? (v as ThreadSummary[]) : [];
   } catch {
     return [];
   }
 }
 
-export function saveCachedSummaries(rows: RemoteThreadSummary[]): void {
+export function saveCachedSummaries(rows: ThreadSummary[]): void {
   if (typeof localStorage === 'undefined') return;
   localStorage.setItem(SUMMARY_INDEX_KEY, JSON.stringify(rows));
 }
 
 /** Update one summary in the local cache. Used after the user sends
- *  a turn (updates updatedAt + maybe the auto-derived title). */
+ *  a turn (refreshes updatedAt + may set the auto-derived title). */
 export function patchCachedSummary(
   id: string,
-  patch: Partial<RemoteThreadSummary>,
-): RemoteThreadSummary[] {
+  patch: Partial<ThreadSummary>,
+): ThreadSummary[] {
   const all = loadCachedSummaries();
   const idx = all.findIndex((s) => s.id === id);
   if (idx === -1) return all;
@@ -323,21 +162,54 @@ export function patchCachedSummary(
   return out;
 }
 
-/** Used when a remote thread is created or first observed locally —
- *  prepends to the cache so the sidebar shows it immediately. */
-export function upsertCachedSummary(s: RemoteThreadSummary): RemoteThreadSummary[] {
+/** Insert/refresh a summary at the top of the cache. Used when a
+ *  remote thread is created or first observed locally. */
+export function upsertCachedSummary(s: ThreadSummary): ThreadSummary[] {
   const all = loadCachedSummaries().filter((x) => x.id !== s.id);
   const out = [s, ...all];
   saveCachedSummaries(out);
   return out;
 }
 
-export function removeCachedSummary(id: string): RemoteThreadSummary[] {
+export function removeCachedSummary(id: string): ThreadSummary[] {
   const out = loadCachedSummaries().filter((s) => s.id !== id);
   saveCachedSummaries(out);
   return out;
 }
 
-/** Re-export deriveTitle for callers that need to seed a summary
- *  from the user's first message. */
-export { deriveTitle };
+/** Wipe local cache — does NOT delete remote threads. Use when
+ *  signing out / clearing local state. */
+export function clearCachedSummaries(): void {
+  if (typeof localStorage === 'undefined') return;
+  localStorage.removeItem(SUMMARY_INDEX_KEY);
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────
+
+/** Best-effort derivation of a thread title from its history. We
+ *  use the first non-empty user-text line, truncated. Called when
+ *  qcode wants to update the local summary after a turn lands. */
+export function deriveTitle(history: Message[]): string | null {
+  for (const msg of history) {
+    if (msg.role !== 'user') continue;
+    for (const block of msg.content) {
+      if (block.type !== 'text') continue;
+      const text = block.text.trim().split('\n')[0] ?? '';
+      if (!text) continue;
+      return text.length > TITLE_MAX
+        ? text.slice(0, TITLE_MAX - 1).trim() + '…'
+        : text;
+    }
+  }
+  return null;
+}
+
+/** Same idea as deriveTitle but pulls the seed straight from a
+ *  user-typed prompt before any history exists. */
+export function titleFromPrompt(prompt: string): string {
+  const first = prompt.trim().split('\n')[0] ?? '';
+  if (!first) return 'New chat';
+  return first.length > TITLE_MAX
+    ? first.slice(0, TITLE_MAX - 1).trim() + '…'
+    : first;
+}

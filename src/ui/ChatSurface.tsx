@@ -10,7 +10,7 @@ import {
   X,
 } from 'lucide-react';
 
-import { runAgent, type AgentEvent } from '../lib/agent';
+import { runThreadAgent, type AgentEvent } from '../lib/agent';
 import { buildAttachmentContext } from '../lib/attachments';
 import { fetchBalance } from '../lib/billing';
 import { cn } from '../lib/cn';
@@ -23,6 +23,7 @@ import {
 import { getProjectMemory, type ProjectMemory } from '../lib/memory';
 import { MODELS } from '../lib/models';
 import type { ContentBlock, Message } from '../lib/qlaud-client';
+import { getRemoteThreadMessages } from '../lib/threads';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
 import {
   getCurrentWorkspace,
@@ -82,21 +83,28 @@ const SAMPLE_PROMPTS = [
 export function ChatSurface({
   model,
   mode = 'agent',
-  initialHistory = [],
-  onTurnComplete,
+  threadId,
+  ensureThreadId,
+  onTurnLanded,
 }: {
   model: string;
   mode?: 'agent' | 'plan';
-  initialHistory?: Message[];
-  /** Called when a turn finishes (success, abort, or error). Receives
-   *  the full thread history so the parent can persist it. */
-  onTurnComplete?: (history: Message[]) => void;
+  /** Active qlaud thread id, or null when the user hasn't opened one
+   *  yet. The first send creates a thread on demand via
+   *  ensureThreadId so the user doesn't pay a new-chat round-trip
+   *  unless they actually type something. */
+  threadId: string | null;
+  /** Lazily provision a thread id. ChatSurface calls this before
+   *  every send; App.tsx returns the active id or creates a new
+   *  remote thread + updates the sidebar. */
+  ensureThreadId: () => Promise<string>;
+  /** Fired after a turn completes so App.tsx can refresh the
+   *  cached summary's title (first turn) and updatedAt. The user's
+   *  prompt text is passed as `userText` for title derivation. */
+  onTurnLanded?: (info: { userText: string | null; threadId: string }) => void;
 }) {
   const m = MODELS.find((x) => x.slug === model);
-  const [history, setHistory] = useState<Message[]>(initialHistory);
-  const [blocks, setBlocks] = useState<RenderBlock[]>(() =>
-    historyToBlocks(initialHistory),
-  );
+  const [blocks, setBlocks] = useState<RenderBlock[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -146,6 +154,47 @@ export function ChatSurface({
       cancelled = true;
     };
   }, []);
+
+  // Rehydrate when the active thread changes. qlaud owns the
+  // canonical history — we GET the message list and convert back
+  // into render blocks.
+  //
+  // Busy guard: when the user sends a turn against a brand-new
+  // session, ensureThreadId provisions a remote thread mid-send and
+  // bumps threadId from null to a real id. We don't want to fetch
+  // (and overwrite the just-pushed user_text block) in that race —
+  // the new thread is empty server-side anyway. Skip the load while
+  // a send is in flight; the next thread-switch covers it.
+  //
+  // Also skip if we've already loaded this exact id this session
+  // (covers re-renders that aren't thread-switches, like model
+  // changes propagating through props).
+  const lastLoadedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!threadId) {
+      setBlocks([]);
+      lastLoadedRef.current = null;
+      return;
+    }
+    if (busy) return;
+    if (lastLoadedRef.current === threadId) return;
+    lastLoadedRef.current = threadId;
+    let cancelled = false;
+    void getRemoteThreadMessages(threadId)
+      .then((msgs) => {
+        if (cancelled) return;
+        setBlocks(historyToBlocks(msgs));
+      })
+      .catch(() => {
+        // 404 (deleted from another device) / network — leave blocks
+        // empty; the user can still send a fresh turn.
+        if (cancelled) return;
+        setBlocks([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [threadId, busy]);
 
   useEffect(
     () => () => {
@@ -248,11 +297,6 @@ export function ChatSurface({
     }
     userContent.push({ type: 'text', text: modelText });
 
-    const nextHistory: Message[] = [
-      ...history,
-      { role: 'user', content: userContent },
-    ];
-
     const sentImages = images.length > 0 ? images : undefined;
     setImages([]);
 
@@ -263,18 +307,25 @@ export function ChatSurface({
     setBusy(true);
     abortRef.current = new AbortController();
 
-    // Snapshot wallet balance + start time so we can compute the
-    // exact dollar cost of this turn from the balance delta.
+    // Snapshot wallet balance + start time for the cost-from-delta
+    // calc on the usage pill. qlaud doesn't ship cost on the SSE
+    // stream yet — the balance delta is the source of truth.
     const startMs = Date.now();
     const preBalance = (await fetchBalance())?.balanceUsd ?? null;
     let lastUsage: { inputTokens: number; outputTokens: number } | null = null;
 
     try {
-      const finalHistory = await runAgent({
+      // Lazily provision the thread on first send. App.tsx returns
+      // the active id when there is one, otherwise creates a remote
+      // thread and updates the sidebar before resolving.
+      const id = await ensureThreadId();
+
+      await runThreadAgent({
+        threadId: id,
         model,
         mode,
         workspace: workspace?.path ?? null,
-        history: nextHistory,
+        content: userContent,
         signal: abortRef.current.signal,
         onEvent: (e) => {
           if (e.type === 'finished') lastUsage = e.usage;
@@ -285,13 +336,12 @@ export function ChatSurface({
             approvalsRef.current.set(toolUseId, resolve);
           }),
       });
-      setHistory(finalHistory);
-      onTurnComplete?.(finalHistory);
+
+      onTurnLanded?.({ userText: userMsg || null, threadId: id });
 
       // After the turn ends, fetch the new balance and append a
       // usage block. Balance delta is the authoritative cost (qlaud's
-      // markup included); token counts are the granular per-stream
-      // numbers. Both shown side-by-side.
+      // markup included); token counts come from the SSE stream.
       if (lastUsage) {
         const postBalance = (await fetchBalance())?.balanceUsd ?? null;
         const usage: { inputTokens: number; outputTokens: number } = lastUsage;

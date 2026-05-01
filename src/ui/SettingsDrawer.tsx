@@ -16,7 +16,11 @@ import {
   patchSettings,
   type Settings,
 } from '../lib/settings';
-import { clearAllThreads } from '../lib/threads';
+import {
+  clearCachedSummaries,
+  deleteRemoteThread,
+  loadCachedSummaries,
+} from '../lib/threads';
 import { openExternal } from '../lib/tauri';
 
 // Slide-in drawer from the right. macOS preferences-style: a column
@@ -161,8 +165,17 @@ export function SettingsDrawer({
               icon={<Trash2 className="h-3.5 w-3.5" />}
               label="Clear all conversations"
               hint="Deletes every saved chat from this device. Cannot be undone."
-              onConfirm={() => {
-                clearAllThreads();
+              onConfirm={async () => {
+                // Delete every remote thread we know about, then
+                // wipe the local cache. Failures per-row are
+                // tolerated (a stale row left server-side will get
+                // pruned the next time the user explicitly deletes
+                // it; the cache is already gone).
+                const ids = loadCachedSummaries().map((s) => s.id);
+                await Promise.allSettled(
+                  ids.map((id) => deleteRemoteThread(id)),
+                );
+                clearCachedSummaries();
                 onClearedThreads();
               }}
             />
@@ -302,14 +315,14 @@ function DangerButton({
   icon: React.ReactNode;
   label: string;
   hint: string;
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
 }) {
   const [confirming, setConfirming] = useState(false);
   return (
     <button
       onClick={() => {
         if (confirming) {
-          onConfirm();
+          void onConfirm();
           setConfirming(false);
         } else {
           setConfirming(true);
