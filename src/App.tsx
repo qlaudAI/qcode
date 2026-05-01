@@ -340,6 +340,11 @@ export function App() {
             }}
             model={model}
             mode={mode}
+            hasWorkspace={!!workspace}
+            onOpenFolder={async () => {
+              const w = await openFolderPicker();
+              if (w) setWorkspace(w);
+            }}
           />
         </main>
       </div>

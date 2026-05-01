@@ -4,6 +4,7 @@ import {
   ArrowUp,
   BookOpen,
   FileText,
+  FolderOpen,
   RotateCcw,
   Sparkles,
   Square,
@@ -87,6 +88,8 @@ export function ChatSurface({
   threadId,
   ensureThreadId,
   onTurnLanded,
+  hasWorkspace,
+  onOpenFolder,
 }: {
   model: string;
   mode?: 'agent' | 'plan';
@@ -103,6 +106,12 @@ export function ChatSurface({
    *  cached summary's title (first turn) and updatedAt. The user's
    *  prompt text is passed as `userText` for title derivation. */
   onTurnLanded?: (info: { userText: string | null; threadId: string }) => void;
+  /** Drives the empty-state onboarding branch — when false the
+   *  EmptyState pushes the user to open a folder before sending. */
+  hasWorkspace: boolean;
+  /** Triggered by the EmptyState's primary CTA on first launch.
+   *  App.tsx owns the picker + workspace state. */
+  onOpenFolder: () => void | Promise<void>;
 }) {
   const m = MODELS.find((x) => x.slug === model);
   const [blocks, setBlocks] = useState<RenderBlock[]>([]);
@@ -405,6 +414,8 @@ export function ChatSurface({
               modelLabel={m?.label ?? model}
               provider={m?.provider}
               memory={memory}
+              hasWorkspace={hasWorkspace}
+              onOpenFolder={onOpenFolder}
               onPick={(s) => setInput(s)}
             />
           ) : (
@@ -831,13 +842,64 @@ function EmptyState({
   modelLabel,
   provider,
   memory,
+  hasWorkspace,
+  onOpenFolder,
   onPick,
 }: {
   modelLabel: string;
   provider?: string;
   memory: ProjectMemory | null;
+  hasWorkspace: boolean;
+  onOpenFolder: () => void | Promise<void>;
   onPick: (s: string) => void;
 }) {
+  // First-launch branch: no workspace yet → push the user to open
+  // one before showing sample prompts. The 7 file/edit/bash tools
+  // need a workspace; without one the model can't do anything
+  // useful, so demanding the choice up front is better than letting
+  // the user discover that mid-prompt.
+  if (!hasWorkspace) {
+    return (
+      <div className="flex flex-col items-center pt-12 text-center">
+        <div className="grid h-12 w-12 place-items-center rounded-2xl bg-primary/10 text-primary">
+          <Sparkles className="h-5 w-5" />
+        </div>
+        <h2 className="mt-6 text-2xl font-semibold tracking-tight">
+          Welcome to qcode
+        </h2>
+        <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
+          Open a folder to give qcode something to work on. It only reads
+          what you point it at — your filesystem stays private otherwise.
+        </p>
+        <button
+          onClick={() => void onOpenFolder()}
+          className="mt-6 inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90 active:scale-[0.98]"
+        >
+          <FolderOpen className="h-4 w-4" />
+          Open folder
+          <Kbd className="ml-1 border-primary-foreground/30 text-primary-foreground/70">
+            ⌘O
+          </Kbd>
+        </button>
+        <div className="mt-10 grid w-full max-w-2xl gap-3 text-left sm:grid-cols-3">
+          <OnboardingTip
+            title="Edits with diff approval"
+            body="Every write or edit shows a diff before applying. Bash commands too. You stay in control."
+          />
+          <OnboardingTip
+            title="Multi-model"
+            body={`Connected to ${modelLabel}${provider ? ` · ${provider}` : ''}. Switch in the title bar — Claude, GPT, DeepSeek, more.`}
+          />
+          <OnboardingTip
+            title="qcode.md or CLAUDE.md"
+            body="Drop one in your repo to teach qcode your conventions. Loaded automatically every turn."
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Returning user with a workspace open — the existing canvas.
   return (
     <div className="flex flex-col items-center pt-12 text-center">
       <div className="grid h-12 w-12 place-items-center rounded-2xl bg-primary/10 text-primary">
@@ -878,6 +940,36 @@ function EmptyState({
         ))}
       </div>
     </div>
+  );
+}
+
+function OnboardingTip({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="rounded-lg border border-border/60 bg-background/70 px-3 py-2.5">
+      <div className="text-[12px] font-medium text-foreground">{title}</div>
+      <p className="mt-1 text-[11.5px] leading-relaxed text-muted-foreground">
+        {body}
+      </p>
+    </div>
+  );
+}
+
+function Kbd({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <kbd
+      className={cn(
+        'rounded border border-border/60 bg-background/40 px-1.5 py-0.5 font-sans text-[10px] tabular-nums',
+        className,
+      )}
+    >
+      {children}
+    </kbd>
   );
 }
 
