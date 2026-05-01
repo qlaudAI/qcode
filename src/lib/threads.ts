@@ -106,21 +106,52 @@ export async function deleteRemoteThread(id: string): Promise<void> {
   }
 }
 
+/** Auto-compaction status for a thread. Surfaced by /v1/threads/:id
+ *  /messages so the UI can render a "↳ N earlier turns summarized"
+ *  pill above the visible messages. Null on threads that haven't
+ *  crossed the compaction threshold yet. */
+export type CompactionInfo = {
+  summary: string;
+  summarizedThroughSeq: number;
+};
+
+/** Bundle of what `/v1/threads/:id/messages` returns: the rehydrated
+ *  Anthropic-shape Messages + compaction state for the indicator. */
+export type RemoteThreadHistory = {
+  messages: Message[];
+  compaction: CompactionInfo | null;
+};
+
 /** Load full conversation history for a thread, oldest-first.
- *  Returns Anthropic-shape Messages so ChatSurface can render with
- *  the same renderer it uses for live turns. */
+ *  Returns Anthropic-shape Messages + the thread's compaction state
+ *  so ChatSurface can render the indicator above the first
+ *  visible turn. */
 export async function getRemoteThreadMessages(
   id: string,
   signal?: AbortSignal,
-): Promise<Message[]> {
-  const data = await api<{ data: RemoteThreadMessage[] }>(
+): Promise<RemoteThreadHistory> {
+  const data = await api<{
+    data: RemoteThreadMessage[];
+    compaction: {
+      summary: string;
+      summarized_through_seq: number;
+    } | null;
+  }>(
     `/v1/threads/${encodeURIComponent(id)}/messages?limit=200&order=asc`,
     { signal },
   );
-  return data.data.map((m) => ({
-    role: m.role,
-    content: normalizeContent(m.content),
-  }));
+  return {
+    messages: data.data.map((m) => ({
+      role: m.role,
+      content: normalizeContent(m.content),
+    })),
+    compaction: data.compaction
+      ? {
+          summary: data.compaction.summary,
+          summarizedThroughSeq: data.compaction.summarized_through_seq,
+        }
+      : null,
+  };
 }
 
 function normalizeContent(c: ContentBlock[] | string): ContentBlock[] {

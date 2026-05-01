@@ -25,7 +25,10 @@ import { getProjectMemory, type ProjectMemory } from '../lib/memory';
 import { MODELS } from '../lib/models';
 import { getSettings } from '../lib/settings';
 import type { ContentBlock, Message } from '../lib/qlaud-client';
-import { getRemoteThreadMessages } from '../lib/threads';
+import {
+  getRemoteThreadMessages,
+  type CompactionInfo,
+} from '../lib/threads';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
 import {
   getCurrentWorkspace,
@@ -115,6 +118,7 @@ export function ChatSurface({
 }) {
   const m = MODELS.find((x) => x.slug === model);
   const [blocks, setBlocks] = useState<RenderBlock[]>([]);
+  const [compaction, setCompaction] = useState<CompactionInfo | null>(null);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -191,15 +195,17 @@ export function ChatSurface({
     lastLoadedRef.current = threadId;
     let cancelled = false;
     void getRemoteThreadMessages(threadId)
-      .then((msgs) => {
+      .then((history) => {
         if (cancelled) return;
-        setBlocks(historyToBlocks(msgs));
+        setBlocks(historyToBlocks(history.messages));
+        setCompaction(history.compaction);
       })
       .catch(() => {
         // 404 (deleted from another device) / network — leave blocks
         // empty; the user can still send a fresh turn.
         if (cancelled) return;
         setBlocks([]);
+        setCompaction(null);
       });
     return () => {
       cancelled = true;
@@ -420,6 +426,12 @@ export function ChatSurface({
             />
           ) : (
             <div className="flex flex-col gap-5">
+              {compaction && (
+                <CompactionIndicator
+                  summary={compaction.summary}
+                  summarizedThroughSeq={compaction.summarizedThroughSeq}
+                />
+              )}
               {blocks.map((b, i) => (
                 <BlockRow
                   key={i}
@@ -828,6 +840,37 @@ function UsagePill({
       )}
       <span className="opacity-50">·</span>
       <span>{(durationMs / 1000).toFixed(1)}s</span>
+    </div>
+  );
+}
+
+function CompactionIndicator({
+  summary,
+  summarizedThroughSeq,
+}: {
+  summary: string;
+  summarizedThroughSeq: number;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="self-start rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-[11.5px] text-muted-foreground">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1.5 hover:text-foreground"
+      >
+        <BookOpen className="h-3 w-3" />
+        <span>
+          {summarizedThroughSeq.toLocaleString()} earlier turns auto-summarized
+        </span>
+        <span className="text-muted-foreground/60">
+          {open ? '· hide' : '· view'}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border/40 bg-background/60 p-2 text-[11px] leading-relaxed text-foreground/85">
+          {summary}
+        </div>
+      )}
     </div>
   );
 }
