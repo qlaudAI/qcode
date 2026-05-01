@@ -79,14 +79,69 @@ jobs:
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
         with:
+          # Two flavors of artifact go into every release:
+          #
+          # 1. Human-install assets — what users click on a fresh
+          #    machine. .dmg / .msi / .exe / .AppImage / .deb.
+          #
+          # 2. Updater bundles + their detached signatures — what
+          #    the in-app auto-updater fetches. The qlaud.ai
+          #    release-channels route reads these by Tauri's
+          #    naming convention:
+          #      darwin → *.app.tar.gz (+ .sig)
+          #      linux  → *.AppImage.tar.gz (+ .sig)
+          #      win    → *.nsis.zip (+ .sig)
+          #    Without the .sig sibling the updater route 204s
+          #    deliberately — we never ship an unverifiable update.
           files: |
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.app.tar.gz
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.app.tar.gz.sig
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage.tar.gz
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage.tar.gz.sig
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.nsis.zip
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.nsis.zip.sig
 
-# Required secrets:
+# ─── First-release checklist ──────────────────────────────────────
+#
+# 1. Generate a Tauri signing key pair on your machine:
+#      pnpm tauri signer generate -w ~/.tauri/qcode.key
+#    Print the public key:
+#      cat ~/.tauri/qcode.key.pub
+#    Replace the "REPLACE_WITH_TAURI_GENERATED_PUBKEY" placeholder in
+#    src-tauri/tauri.conf.json's plugins.updater.pubkey field.
+#
+# 2. Add the secrets below to the qcode repo
+#    (Settings → Secrets and variables → Actions).
+#
+# 3. Apple Developer cert: export your "Developer ID Application"
+#    cert from Keychain.app as a .p12, then base64-encode:
+#      base64 -i Certificates.p12 -o cert.b64
+#    Paste the contents of cert.b64 into APPLE_CERTIFICATE.
+#
+# 4. Apple app-specific password: appleid.apple.com → Sign-in &
+#    Security → App-Specific Passwords → Generate. Pase into
+#    APPLE_PASSWORD.
+#
+# 5. Tag a release: `git tag v0.1.0-alpha.5 && git push --tags`.
+#    The workflow runs on every v* tag.
+#
+# 6. The qlaud.ai/qcode/release-channels/... route picks up the new
+#    GitHub Release automatically (5-min edge cache). Existing
+#    qcode installs prompt to update on next launch.
+#
+# Until the secrets land the workflow still runs — but it ships
+# unsigned dev artifacts only. Tauri's bundler skips signing when
+# the env vars are empty rather than failing the build, so partial
+# setups still produce installable .dmg/.exe (just not auto-update
+# capable).
+#
+# ─── Required secrets ─────────────────────────────────────────────
+#
 #   APPLE_CERTIFICATE                — base64 .p12 from Apple Developer
 #   APPLE_CERTIFICATE_PASSWORD       — password used when exporting
 #   APPLE_SIGNING_IDENTITY           — "Developer ID Application: ..."
