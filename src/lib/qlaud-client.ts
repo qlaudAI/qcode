@@ -1,41 +1,69 @@
-// Thin qlaud client used by the chat surface. Phase 1 surface only:
-// non-agentic streaming chat against /v1/messages. The full agentic
-// loop (tools, file edits, sub-agents) lands when we embed opencode's
-// core in Phase 1 wrap-up.
+// Streaming client for qlaud's /v1/messages endpoint (Anthropic shape).
 //
-// All requests use the user's qlaud key from auth.ts. We default to
-// https://api.qlaud.ai but the env var lets a dev point at a local
-// edge worker.
+// Two layers:
+//   - streamMessage()    parses SSE → callbacks for text, tool_use,
+//                        message_start (with usage), and message_stop.
+//                        Used by the agent loop. Stateful per-call.
+//   - The agent loop (lib/agent.ts) sits on top, executing tool calls
+//     and re-invoking streamMessage() until stop_reason !== 'tool_use'.
+//
+// We intentionally don't depend on the @anthropic-ai/sdk — it bundles
+// node polyfills and adds 200KB+ to the desktop binary. Our needs are
+// narrow: stream parsing + a strict subset of the message shape.
 
 import { getKey } from './auth';
+import type { ToolDef } from './tools';
 
 const BASE = (import.meta.env.VITE_QLAUD_BASE as string | undefined) ?? 'https://api.qlaud.ai';
 
-export type StreamMessageOpts = {
-  model: string;
-  history: Array<{ role: 'user' | 'assistant'; text: string }>;
-  /** Called with each new chunk of assistant text as it arrives. */
-  onDelta: (chunk: string) => void;
-  /** Called once with final usage info (input/output tokens, cost). */
-  onComplete?: (info: {
-    inputTokens?: number;
-    outputTokens?: number;
-    costMicros?: number;
-  }) => void;
-  /** Aborts an in-flight request. */
-  signal?: AbortSignal;
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: unknown }
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
+
+export type Message = {
+  role: 'user' | 'assistant';
+  content: ContentBlock[];
 };
 
-export async function streamMessage(opts: StreamMessageOpts): Promise<void> {
+export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence';
+
+export type StreamHandlers = {
+  /** Fires once per output chunk that's part of a text block. */
+  onTextDelta: (chunk: string) => void;
+  /** Fires once when the model decides to call a tool (input fully arrived). */
+  onToolUse: (block: { id: string; name: string; input: unknown }) => void;
+  /** Fires once at the start of the response with input-token count. */
+  onMessageStart?: (info: { inputTokens?: number }) => void;
+  /** Fires once at message_stop with stop reason + final usage. */
+  onMessageStop: (info: {
+    stopReason?: StopReason;
+    outputTokens?: number;
+  }) => void;
+};
+
+export type StreamOpts = StreamHandlers & {
+  model: string;
+  messages: Message[];
+  tools?: ToolDef[];
+  /** Optional system prompt. The agent loop injects qcode's persona. */
+  system?: string;
+  signal?: AbortSignal;
+  maxTokens?: number;
+};
+
+export async function streamMessage(opts: StreamOpts): Promise<void> {
   const key = getKey();
   if (!key) throw new Error('not_authed');
 
-  // Convert internal history to Anthropic-shape messages. The last
-  // entry is always the new user turn.
-  const messages = opts.history.map((m) => ({
-    role: m.role,
-    content: [{ type: 'text', text: m.text }],
-  }));
+  const body: Record<string, unknown> = {
+    model: opts.model,
+    max_tokens: opts.maxTokens ?? 4096,
+    stream: true,
+    messages: opts.messages,
+  };
+  if (opts.system) body.system = opts.system;
+  if (opts.tools && opts.tools.length > 0) body.tools = opts.tools;
 
   const res = await fetch(`${BASE}/v1/messages`, {
     method: 'POST',
@@ -43,32 +71,29 @@ export async function streamMessage(opts: StreamMessageOpts): Promise<void> {
       'x-api-key': key,
       'content-type': 'application/json',
     },
-    body: JSON.stringify({
-      model: opts.model,
-      max_tokens: 4096,
-      stream: true,
-      messages,
-    }),
+    body: JSON.stringify(body),
     signal: opts.signal,
   });
 
   if (res.status === 401) throw new Error('unauthorized');
   if (res.status === 402) throw new Error('cap_hit');
   if (!res.ok || !res.body) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`upstream_${res.status}:${body.slice(0, 200)}`);
+    const txt = await res.text().catch(() => '');
+    throw new Error(`upstream_${res.status}:${txt.slice(0, 200)}`);
   }
 
-  // Anthropic-shape SSE. Events look like:
-  //   data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}
-  //   data: {"type":"message_delta","usage":{"output_tokens":7}}
-  //   data: {"type":"message_stop"}
-  // We only care about text_delta + message_delta usage.
+  // Per-block accumulator: a tool_use block streams its `input` JSON
+  // across multiple input_json_delta events. We concatenate by index
+  // and parse once content_block_stop arrives.
+  type ToolUseAccum = { id: string; name: string; jsonText: string };
+  const toolAccum = new Map<number, ToolUseAccum>();
+
+  let stopReason: StopReason | undefined;
+  let finalOutputTokens: number | undefined;
+
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let inputTokens: number | undefined;
-  let outputTokens: number | undefined;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -82,26 +107,108 @@ export async function streamMessage(opts: StreamMessageOpts): Promise<void> {
       if (!line.startsWith('data: ')) continue;
       const payload = line.slice(6);
       if (payload === '[DONE]') continue;
+
+      let ev: AnthropicStreamEvent;
       try {
-        const ev = JSON.parse(payload) as {
-          type?: string;
-          delta?: { type?: string; text?: string };
-          message?: { usage?: { input_tokens?: number; output_tokens?: number } };
-          usage?: { input_tokens?: number; output_tokens?: number };
-        };
-        if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
-          opts.onDelta(ev.delta.text);
-        } else if (ev.type === 'message_start' && ev.message?.usage) {
-          inputTokens = ev.message.usage.input_tokens;
-        } else if (ev.type === 'message_delta' && ev.usage?.output_tokens != null) {
-          outputTokens = ev.usage.output_tokens;
-        }
+        ev = JSON.parse(payload) as AnthropicStreamEvent;
       } catch {
-        // Skip malformed lines silently — Anthropic occasionally sends
-        // ping events with non-JSON shapes, and we shouldn't blow up.
+        continue; // ping events, malformed lines — skip silently
+      }
+
+      switch (ev.type) {
+        case 'message_start':
+          opts.onMessageStart?.({ inputTokens: ev.message?.usage?.input_tokens });
+          break;
+
+        case 'content_block_start':
+          if (ev.content_block?.type === 'tool_use' && ev.index != null) {
+            toolAccum.set(ev.index, {
+              id: ev.content_block.id,
+              name: ev.content_block.name,
+              jsonText: '',
+            });
+          }
+          break;
+
+        case 'content_block_delta': {
+          if (!ev.delta) break;
+          if (ev.delta.type === 'text_delta' && ev.delta.text) {
+            opts.onTextDelta(ev.delta.text);
+          } else if (
+            ev.delta.type === 'input_json_delta' &&
+            ev.index != null &&
+            typeof ev.delta.partial_json === 'string'
+          ) {
+            const acc = toolAccum.get(ev.index);
+            if (acc) acc.jsonText += ev.delta.partial_json;
+          }
+          break;
+        }
+
+        case 'content_block_stop': {
+          if (ev.index == null) break;
+          const acc = toolAccum.get(ev.index);
+          if (acc) {
+            let input: unknown = {};
+            try {
+              input = acc.jsonText ? JSON.parse(acc.jsonText) : {};
+            } catch {
+              input = { _raw: acc.jsonText };
+            }
+            opts.onToolUse({ id: acc.id, name: acc.name, input });
+            toolAccum.delete(ev.index);
+          }
+          break;
+        }
+
+        case 'message_delta':
+          if (ev.delta?.stop_reason) {
+            stopReason = ev.delta.stop_reason as StopReason;
+          }
+          if (ev.usage?.output_tokens != null) {
+            finalOutputTokens = ev.usage.output_tokens;
+          }
+          break;
+
+        case 'message_stop':
+          opts.onMessageStop({
+            stopReason,
+            outputTokens: finalOutputTokens,
+          });
+          break;
+
+        default:
+          // ping, error, unknown — ignore
+          break;
       }
     }
   }
-
-  opts.onComplete?.({ inputTokens, outputTokens });
 }
+
+// ─── Anthropic streaming-event shapes (the subset we care about) ───
+
+type AnthropicStreamEvent =
+  | { type: 'message_start'; message?: { usage?: { input_tokens?: number } } }
+  | {
+      type: 'content_block_start';
+      index?: number;
+      content_block?:
+        | { type: 'text'; text: string }
+        | { type: 'tool_use'; id: string; name: string; input?: unknown };
+    }
+  | {
+      type: 'content_block_delta';
+      index?: number;
+      delta?:
+        | { type: 'text_delta'; text?: string }
+        | { type: 'input_json_delta'; partial_json?: string };
+    }
+  | { type: 'content_block_stop'; index?: number }
+  | {
+      type: 'message_delta';
+      delta?: { stop_reason?: string; stop_sequence?: string | null };
+      usage?: { output_tokens?: number };
+    }
+  | { type: 'message_stop' }
+  | { type: 'ping' }
+  | { type: 'error'; error?: { type?: string; message?: string } };

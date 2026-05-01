@@ -3,74 +3,78 @@
 Read this first if you're picking up qcode where the last commit left off.
 The README is the marketing-facing pitch; this file is the engineering one.
 
-## What's actually shipped (`v0.1.0-alpha.1`)
+## What's actually shipped (`v0.1.0-alpha.2`)
 
-- **Tauri 2.x desktop shell** — Mac/Win/Linux targets, `qcode://` URL scheme, deep-link plugin wired
-- **React + Vite + Tailwind UI** — sign-in gate, title bar with model picker + spend bar, sidebar stub, chat surface
-- **Real streaming chat** against `https://api.qlaud.ai/v1/messages` — Anthropic-shape SSE parser, abort signal, error mapping (`cap_hit`, `unauthorized`, etc.)
-- **End-to-end auth flow**: app → browser → `qlaud.ai/cli-auth` → Clerk → mints `qlk_live_…` → deep-links back via `qcode://auth?k=…` → React captures + persists
-- **Cross-platform release CI** — scaffolded; signing secrets not yet provisioned (alpha ships unsigned)
+- **Tauri 2.x desktop shell** — Mac/Win/Linux targets, `qcode://` URL scheme
+- **Native chrome** — macOS HudWindow vibrancy, Windows acrylic, native menu bar (File / Edit / View / Window / Help) with platform shortcuts, transparent-with-blur title bar
+- **OS-native credential storage** — Apple Keychain / Windows Credential Manager / libsecret via `keyring` crate; localStorage fallback only in vite-dev
+- **Workspace + file tree** — native folder picker, MRU recent list, lazy-expanding file tree with sensible hidden-folder filter
+- **End-to-end auth** — app → browser → qlaud.ai/cli-auth → Clerk → mints CLI key → deep-links back to `qcode://auth?k=…` → React captures + persists to keychain
+- **Agentic loop with READ-ONLY tools** — list_files, read_file. Multi-turn execution, tool calls render as inline cards with status (running/done/error), abortable mid-stream
+- **Cross-platform release CI** — scaffolded; signing secrets not yet provisioned
 
 ```
 src/
-├── App.tsx              app shell — title bar, sidebar, chat
-├── main.tsx             react root
-├── styles.css           tailwind + tauri-specific drag rules
+├── App.tsx               app shell — title bar, sidebar, chat
+├── main.tsx              react root + auth hydration
+├── styles.css            tailwind + tauri drag/transparent helpers
 ├── lib/
-│   ├── auth.ts          localStorage v0 (keychain comes next)
-│   ├── deep-link.ts     tauri event listener for qcode://auth
-│   ├── qlaud-client.ts  /v1/messages streamer
-│   ├── models.ts        curated model list (snapshot of /v1/catalog)
-│   └── cn.ts            twMerge helper
+│   ├── auth.ts           keychain (Tauri) / localStorage (browser-mode)
+│   ├── deep-link.ts      qcode://auth callback handler
+│   ├── tauri.ts          runtime detection + dynamic-import wrappers
+│   ├── workspace.ts      open folder, MRU, readDir
+│   ├── shortcuts.ts      ⌘N/⌘O/⌘,/⌘K/⌘M cross-platform + native menu bridge
+│   ├── tools.ts          tool defs + read-only executors (read_file, list_files)
+│   ├── qlaud-client.ts   /v1/messages streamer with full tool_use protocol
+│   ├── agent.ts          send → receive tool_use → execute → repeat
+│   ├── models.ts         curated model list (snapshot of /v1/catalog)
+│   └── cn.ts             twMerge helper
 └── ui/
-    ├── ChatSurface.tsx  composer, bubbles, typing dots, sample prompts
-    ├── ModelPicker.tsx  provider-grouped dropdown
-    └── SignInGate.tsx   first-launch onboarding card
+    ├── ChatSurface.tsx   composer, bubbles, agent event router, stop button
+    ├── ToolCallCard.tsx  per-tool inline card with collapsible output
+    ├── FileTree.tsx      lazy-expanding tree
+    ├── ModelPicker.tsx   provider-grouped dropdown
+    └── SignInGate.tsx    first-launch onboarding card
 
 src-tauri/
-├── Cargo.toml           tauri + plugins (deep-link, fs, dialog, os, shell, updater)
-├── src/main.rs          windows-subsystem entry
-├── src/lib.rs           plugin wiring + deep-link → "qcode://deep-link" event
-└── tauri.conf.json      window config, csp, qcode:// scheme, updater endpoint
+├── Cargo.toml            tauri + plugins + keyring + window-vibrancy
+├── src/main.rs           windows-subsystem entry
+├── src/lib.rs            plugin wiring, deep-link handler, native effects
+├── src/menu.rs           File/Edit/View/Window/Help menu + dispatcher
+├── src/secret.rs         secret_set / secret_get / secret_del commands
+└── tauri.conf.json       transparent + macOSPrivateApi window config
 ```
 
 ## What's NOT done — pick up here
 
 ### Phase 1 wrap-up (priority order)
 
-1. **OS-keychain credential storage.** `lib/auth.ts` uses `localStorage` today; that's fine for vite-dev but bad for the packaged app (any other web content the webview loads could read it). Swap to [`tauri-plugin-keyring`](https://crates.io/crates/tauri-plugin-keyring) or `keytar`-equivalent.
+1. **Approval-gated write tools.** The agent currently can only READ. To match Claude Code we need:
+   - `write_file` — create/overwrite a file. UI: show full text in a diff viewer, "Apply" / "Reject" buttons.
+   - `edit_file` — string-replacement edit. UI: unified diff with hunk-by-hunk approval. Suggest CodeMirror's `@codemirror/merge` or Monaco's diff editor; prefer CodeMirror (smaller bundle, native feel).
+   - `bash` — execute a shell command. UI: show command + working directory + "Run" / "Skip" buttons. Pipe stdout/stderr live into the tool card. Use `tauri-plugin-shell::Command::new` with explicit `current_dir(workspace)` and a deny-list (`rm -rf /`, `:(){:|:&};:`, etc.).
+   - `glob` — pattern match. Read-only, can ship without approval.
+   - `grep` — content search. Read-only. Use ripgrep via Tauri's shell plugin if available, fallback to JS-side iteration.
+   
+   Architecture: extend `agent.ts` to emit `tool_call_pending_approval` events; `ChatSurface` halts the loop and shows the approval UI; user clicks → agent loop continues with the result. The protocol is the same, just an interstitial state.
 
-2. **Embed the opencode core.** This is the big one. `sst/opencode` is the reference; we need to:
-   - Either bundle `bun` + opencode in the Tauri sidecar dir and spawn it as a subprocess (`tauri-plugin-shell::Command`) on app launch
-   - Or compile opencode's agent loop into a Rust crate (probably weeks of work; not recommended for v0)
-   - Bridge via stdin/stdout JSON-lines or opencode's WebSocket server mode (preferred — opencode 0.x exposes `--server` flag)
-   - Forward UI events to the agent: tool approvals, model selection, abort
-   - Forward agent events to UI: tool calls, file diffs, sub-agent spawns
-   - Replace `lib/qlaud-client.ts` direct calls with opencode-as-the-router; opencode itself talks to qlaud
+2. **Auto-updater backend Worker.** `tauri.conf.json` references `https://qlaud.ai/qcode/release-channels/{{target}}/{{arch}}/{{current_version}}` — this endpoint doesn't exist yet. Build a Cloudflare Worker that reads from the GitHub releases API and returns the Tauri update manifest format. ~50 lines.
 
-3. **File workspace.** Today the app has no concept of "open folder". Add:
-   - `tauri-plugin-dialog` `open()` for the folder picker (already imported in Cargo.toml; not wired in UI)
-   - Workspace state in localStorage: most-recently-opened folders
-   - File-tree sidebar component (replace the "Recent" stub)
-   - Basic file operations through Tauri's fs plugin
-
-4. **Code-signing + notarization.**
+3. **Code signing + notarization.**
    - Mac: Apple Developer cert, `productbuild`, notarize via `xcrun notarytool`
    - Win: Authenticode cert + `signtool`
    - Linux: skip (most users tolerate unsigned)
    - Wire all 3 into `.github/workflows/release.yml` — secrets list at the bottom of the file
 
-5. **Auto-updater backend.** `tauri.conf.json` references `https://qlaud.ai/qcode/release-channels/{{target}}/{{arch}}/{{current_version}}` — this endpoint doesn't exist yet. Build a Cloudflare Worker that reads from the GitHub releases API and returns the Tauri update manifest format. ~50 lines.
-
 ### Phase 2 — polished GUI (~4 weeks)
 
-- Diff preview pane (CodeMirror or Monaco)
-- File tree sidebar with workspace persistence
-- Multi-thread switcher (sidebar list, ⌘N for new)
+- Diff preview pane (likely CodeMirror's merge view) — needed for write_file/edit_file approval
+- Multi-thread switcher (sidebar list, ⌘N for new, persist to disk per-workspace)
 - Live spend bar in title bar (poll `api.qlaud.ai/v1/billing/balance` every 15s)
 - Per-task model defaults (e.g. Claude for plan, DeepSeek for code)
 - Settings UI: tools, permissions, working directory, telemetry opt-out
 - First-launch onboarding tour
+- Command palette (⌘K) — fuzzy-find files, switch model, run common actions
 
 ### Phase 3 — power features (open-ended)
 
@@ -85,10 +89,9 @@ src-tauri/
 ## Conventions
 
 - **TypeScript strict** — no `any` without a comment explaining why
-- **No JSDoc on small one-liners** — name the function clearly instead
 - **Comments explain WHY, not WHAT** — the code already says what it does
 - **2-space indent**, single quotes, trailing commas on multi-line
-- **lucide-react** for icons; if the icon doesn't exist there, draw inline SVG
+- **lucide-react** for icons; if it's not there, draw inline SVG
 - **Tailwind only** for styles — no styled-components, no CSS modules
 - **Don't add libraries casually** — bundle size matters for desktop apps
 - **Commits**: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `perf:`. No emojis in commits.
@@ -102,22 +105,26 @@ pnpm install
 pnpm tauri:dev
 ```
 
-Sign in via the in-app button — it'll open `qlaud.ai/cli-auth` in your browser, you sign into qlaud, browser deep-links back to the app.
+Sign in via the in-app button — opens `qlaud.ai/cli-auth` in your browser, you sign into qlaud, browser deep-links back to the app, key gets written to your OS keychain.
 
 For UI iteration without the Tauri shell:
 
 ```bash
 pnpm dev
 # open http://localhost:1420
-# Note: deep-link won't work in browser-mode; use ?k=qlk_live_xxx
-# in localStorage to bypass auth for visual review
 ```
+
+Browser-mode bypasses Tauri features:
+- Auth: localStorage instead of keychain
+- Folder picker: prompts for a path string
+- File tree: shows a stub
+- Tool execution: returns "[browser-mode stub: would …]" instead of touching disk
 
 ## qlaud-side dependencies
 
 The desktop app talks to two qlaud surfaces:
 
 - **`https://qlaud.ai/cli-auth?cb=qcode://auth&app=qcode`** — Clerk-gated, mints CLI key. Source: `apps/dashboard-next/src/app/cli-auth/page.tsx` in the qlaud-router monorepo.
-- **`https://api.qlaud.ai/v1/messages`** — streaming chat endpoint (Anthropic shape). Source: `apps/edge/src/routes/messages.ts`.
+- **`https://api.qlaud.ai/v1/messages`** — streaming chat endpoint (Anthropic shape, with full tool_use protocol). Source: `apps/edge/src/routes/messages.ts`.
 
 If you're working on qcode + qlaud together, clone both repos.
