@@ -12,6 +12,7 @@
 //      when the user clicks Allow or Reject
 //   4. Executor runs (or skips) based on the decision
 
+import { getProjectMemory, memorySystemSection } from './memory';
 import {
   streamMessage,
   type ContentBlock,
@@ -126,7 +127,15 @@ export type RunAgentOpts = {
 export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
   const messages: Message[] = [...opts.history];
   const planMode = opts.mode === 'plan';
-  const systemPrompt = planMode ? SYSTEM_PROMPT_PLAN : SYSTEM_PROMPT_AGENT;
+  const basePrompt = planMode ? SYSTEM_PROMPT_PLAN : SYSTEM_PROMPT_AGENT;
+  // Project memory (qcode.md / CLAUDE.md) is appended to the base
+  // persona so the model picks up project conventions on every turn.
+  // Cached per workspace inside getProjectMemory — only one fs read
+  // per session unless the user clears the cache via /init.
+  const memory = opts.workspace
+    ? await getProjectMemory(opts.workspace)
+    : null;
+  const systemPrompt = basePrompt + memorySystemSection(memory);
   const tools = opts.workspace
     ? planMode
       ? READ_TOOLS

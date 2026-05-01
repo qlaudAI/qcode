@@ -4,6 +4,7 @@
 // Tauri's fs plugin on demand; we don't cache them here.
 
 import { buildMatcher, type IgnoreMatcher } from './gitignore';
+import { getProjectMemory } from './memory';
 import { isTauri, pickFolder } from './tauri';
 
 const CURRENT_KEY = 'qcode.workspace.current';
@@ -65,9 +66,10 @@ export async function openFolderPicker(): Promise<Workspace | null> {
   const name = path.split(/[/\\]/).filter(Boolean).pop() ?? path;
   const w = { path, name };
   setCurrentWorkspace(w);
-  // Pre-warm the matcher so the first walk after open doesn't pay
-  // an extra .gitignore round-trip.
+  // Pre-warm the matcher and project memory so the first walk +
+  // first agent turn don't pay extra fs round-trips.
   void getMatcher(path);
+  void getProjectMemory(path);
   return w;
 }
 

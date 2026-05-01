@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowUp,
+  BookOpen,
   FileText,
   RotateCcw,
   Sparkles,
@@ -19,6 +20,7 @@ import {
   readImageFile,
   type AttachedImage,
 } from '../lib/images';
+import { getProjectMemory, type ProjectMemory } from '../lib/memory';
 import { MODELS } from '../lib/models';
 import type { ContentBlock, Message } from '../lib/qlaud-client';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
@@ -101,6 +103,7 @@ export function ChatSurface({
   const [attached, setAttached] = useState<string[]>([]);
   const [images, setImages] = useState<AttachedImage[]>([]);
   const [files, setFiles] = useState<string[]>([]);
+  const [memory, setMemory] = useState<ProjectMemory | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const approvalsRef = useRef<Map<string, PendingResolver>>(new Map());
@@ -126,6 +129,23 @@ export function ChatSurface({
       behavior: 'smooth',
     });
   }, [blocks]);
+
+  // Load project memory (qcode.md / CLAUDE.md) once per workspace so
+  // the empty state can show what context the model will pick up.
+  useEffect(() => {
+    const ws = getCurrentWorkspace();
+    if (!ws) {
+      setMemory(null);
+      return;
+    }
+    let cancelled = false;
+    void getProjectMemory(ws.path).then((m) => {
+      if (!cancelled) setMemory(m);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(
     () => () => {
@@ -330,6 +350,7 @@ export function ChatSurface({
             <EmptyState
               modelLabel={m?.label ?? model}
               provider={m?.provider}
+              memory={memory}
               onPick={(s) => setInput(s)}
             />
           ) : (
@@ -755,10 +776,12 @@ function formatTokens(n: number): string {
 function EmptyState({
   modelLabel,
   provider,
+  memory,
   onPick,
 }: {
   modelLabel: string;
   provider?: string;
+  memory: ProjectMemory | null;
   onPick: (s: string) => void;
 }) {
   return (
@@ -774,6 +797,21 @@ function EmptyState({
         <span className="font-medium text-foreground">{modelLabel}</span>
         {provider ? ` · ${provider}` : ''}
       </p>
+      {memory && (
+        <div
+          className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-background/70 px-2.5 py-0.5 text-[11px] text-muted-foreground"
+          title={`Loaded ${memory.text.length.toLocaleString()} chars of project context from ${memory.source}`}
+        >
+          <BookOpen className="h-3 w-3" />
+          <span>
+            Using{' '}
+            <span className="font-mono text-foreground/80">
+              {memory.source}
+            </span>{' '}
+            as project context
+          </span>
+        </div>
+      )}
       <div className="mt-10 grid w-full max-w-2xl gap-2 text-left">
         {SAMPLE_PROMPTS.map((s) => (
           <button
