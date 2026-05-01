@@ -3,13 +3,23 @@ import {
   AlertCircle,
   Check,
   ChevronRight,
-  FolderTree,
+  FilePlus,
+  FileSearch,
   FileText,
+  FolderTree,
   Loader2,
+  Pencil,
+  Search,
+  Terminal,
   Wrench,
 } from 'lucide-react';
 
 import { cn } from '../lib/cn';
+import { BashView } from './tool-output/BashView';
+import { GlobView } from './tool-output/GlobView';
+import { GrepView } from './tool-output/GrepView';
+import { ListFilesView } from './tool-output/ListFilesView';
+import { ReadFileView } from './tool-output/ReadFileView';
 
 type Status = 'running' | 'done' | 'error';
 
@@ -25,6 +35,11 @@ export type ToolCallView = {
 const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   list_files: FolderTree,
   read_file: FileText,
+  glob: FileSearch,
+  grep: Search,
+  write_file: FilePlus,
+  edit_file: Pencil,
+  bash: Terminal,
 };
 
 export function ToolCallCard({ call }: { call: ToolCallView }) {
@@ -36,7 +51,7 @@ export function ToolCallCard({ call }: { call: ToolCallView }) {
   return (
     <div
       className={cn(
-        'rounded-lg border bg-background/70 backdrop-blur-sm transition-colors',
+        'overflow-hidden rounded-lg border bg-background/70 backdrop-blur-sm transition-colors',
         call.status === 'error'
           ? 'border-primary/30 bg-primary/5'
           : 'border-border/60',
@@ -73,13 +88,50 @@ export function ToolCallCard({ call }: { call: ToolCallView }) {
         )}
       </button>
       {open && hasOutput && (
-        <pre className="m-0 max-h-72 overflow-auto border-t border-border/40 bg-muted/30 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground/90">
-          {call.output}
-        </pre>
+        <div className="border-t border-border/40 bg-muted/20">
+          <Output call={call} />
+        </div>
       )}
     </div>
   );
 }
+
+// ─── Output dispatcher ─────────────────────────────────────────────
+
+function Output({ call }: { call: ToolCallView }) {
+  const output = call.output ?? '';
+  const input = (call.input ?? {}) as Record<string, unknown>;
+  switch (call.name) {
+    case 'list_files':
+      return <ListFilesView output={output} />;
+    case 'read_file':
+      return (
+        <ReadFileView
+          path={typeof input.path === 'string' ? input.path : undefined}
+          output={output}
+        />
+      );
+    case 'glob':
+      return <GlobView output={output} />;
+    case 'grep':
+      return (
+        <GrepView
+          output={output}
+          pattern={typeof input.pattern === 'string' ? input.pattern : undefined}
+        />
+      );
+    case 'bash':
+      return <BashView output={output} isError={call.status === 'error'} />;
+    default:
+      return (
+        <pre className="m-0 max-h-72 overflow-auto px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground/90">
+          {output}
+        </pre>
+      );
+  }
+}
+
+// ─── Status pip ────────────────────────────────────────────────────
 
 function StatusIcon({ status }: { status: Status }) {
   if (status === 'running') {
@@ -93,14 +145,26 @@ function StatusIcon({ status }: { status: Status }) {
   return <Check className="h-3.5 w-3.5 shrink-0 text-foreground/70" />;
 }
 
+// ─── Per-tool one-line summary in the header ──────────────────────
+
 function summarize(call: ToolCallView): string {
   const input = (call.input ?? {}) as Record<string, unknown>;
   switch (call.name) {
     case 'list_files':
     case 'read_file':
+    case 'write_file':
+    case 'edit_file':
       return typeof input.path === 'string' ? input.path : '…';
+    case 'glob':
+      return typeof input.pattern === 'string' ? input.pattern : '…';
+    case 'grep': {
+      const p = typeof input.pattern === 'string' ? input.pattern : '…';
+      const path = typeof input.path === 'string' ? ` in ${input.path}` : '';
+      return p + path;
+    }
+    case 'bash':
+      return typeof input.command === 'string' ? input.command : '…';
     default:
-      // Generic fallback — show the first non-trivial input value.
       for (const [, v] of Object.entries(input)) {
         if (typeof v === 'string' && v.length > 0)
           return v.length > 60 ? v.slice(0, 57) + '…' : v;
