@@ -10,7 +10,7 @@
 
 use tauri::{
     menu::{AboutMetadataBuilder, Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
-    AppHandle, Emitter, Runtime,
+    AppHandle, Emitter, Manager, Runtime,
 };
 
 const MENU_EVENT: &str = "qcode://menu";

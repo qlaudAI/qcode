@@ -144,6 +144,42 @@ export const READ_TOOLS: ToolDef[] = [
   },
 ];
 
+// `task` belongs to neither READ_TOOLS nor WRITE_TOOLS — it's a
+// meta-tool that delegates work to a child agent. The child runs
+// with the same workspace + tools (minus task itself, no recursion)
+// and returns a single text summary. Use cases:
+//   - Investigations the parent doesn't want to read raw output for
+//     ("find every reference to X" → child returns a summary)
+//   - Fan-out: parent kicks off 3 task() calls, each handles a slice
+//   - Plan-then-execute: parent plans, dispatches a task to do the
+//     heavy edit work, gets a final report
+//
+// Implementation: client-dispatched. agent.ts intercepts the tool
+// dispatch and runs streamThreadMessage against a fresh remote
+// thread instead of executeTool. Approval prompts from the child
+// surface in the same UI so the user always sees + approves writes.
+export const TASK_TOOL: ToolDef = {
+  name: 'task',
+  description:
+    "Spawn a sub-agent to handle a focused investigation or self-contained sub-task. The sub-agent has the same workspace and tools as you do (except it can't recurse — no nested tasks), but starts with empty context: it sees only the prompt you write. Use when:\n- The task needs extensive exploration whose intermediate output would bloat your context (\"find auth files\", \"map the routing layer\")\n- You want to fan out parallel investigations across the codebase\n- A self-contained refactor that's clearer with a fresh agent (\"replace deprecated imports across these files\")\n\nThe sub-agent's prompt must stand alone — include file paths, what to look for, and what success looks like. Returns the sub-agent's final text response. Don't use for one-shot tools like a single read_file or grep — call those directly.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      description: {
+        type: 'string',
+        description:
+          'Short 3-7 word noun phrase shown to the user (e.g. "Audit auth flow", "Find dead exports"). Imperative.',
+      },
+      prompt: {
+        type: 'string',
+        description:
+          "Self-contained prompt for the sub-agent. The sub-agent doesn't see this conversation; everything it needs has to be here.",
+      },
+    },
+    required: ['description', 'prompt'],
+  },
+};
+
 export const WRITE_TOOLS: ToolDef[] = [
   {
     name: 'write_file',
