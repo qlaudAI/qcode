@@ -65,7 +65,7 @@
       "endpoints": [
         "https://qlaud.ai/qcode/release-channels/{{target}}/{{arch}}/{{current_version}}"
       ],
-      "pubkey": "REPLACE_WITH_TAURI_GENERATED_PUBKEY"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCQTkzM0M3OTlFMzkwNDgKUldSSWtPT1p4ek9wcS95QVVpZlFCSGxNYm56SUFTdEZPU3NFUDBMZ2RBdnFvbGs1a2JrRnhhdGMK"
     }
   }
 }
