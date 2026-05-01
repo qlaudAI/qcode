@@ -101,9 +101,50 @@ export function setProfile(p: Profile): void {
   localStorage.setItem(PROFILE_STORAGE, JSON.stringify(p));
 }
 
-/** Open the qlaud CLI-auth flow in the user's browser. */
+/** Open the qlaud CLI-auth flow.
+ *  - Tauri: uses `qcode://auth` as the callback so the OS dispatches
+ *    the result back to the desktop app via the deep-link plugin.
+ *  - Browser (qcode.qlaud.ai or vite dev): uses the current origin's
+ *    `/auth` path so qlaud.ai can redirect the user back into the
+ *    web app, where consumeAuthCallback() picks up the `k` query
+ *    param and stores it in localStorage. */
 export async function startSignIn(): Promise<void> {
-  const cb = 'qcode://auth';
+  const cb = isTauri()
+    ? 'qcode://auth'
+    : `${window.location.origin}/auth`;
   const url = `https://qlaud.ai/cli-auth?cb=${encodeURIComponent(cb)}&app=qcode`;
-  await openExternal(url);
+  if (isTauri()) {
+    await openExternal(url);
+  } else {
+    // Browser: same-tab redirect feels more like the OAuth flows
+    // users are used to. After qlaud.ai authorizes, they land back
+    // on /auth with the key as a query param.
+    window.location.href = url;
+  }
+}
+
+/** Browser-mode callback handler. Called once at app boot (main.tsx)
+ *  to capture `?k=<key>` from the URL after a redirect from qlaud.ai
+ *  /cli-auth. Persists the key, scrubs it from the URL bar, and
+ *  resolves true so the caller can show a "signed in" state.
+ *  No-op in Tauri (deep-link plugin handles that flow). */
+export async function consumeAuthCallback(): Promise<boolean> {
+  if (isTauri()) return false;
+  if (typeof window === 'undefined') return false;
+  // Match either /auth?k= (intended path) or any page receiving ?k=
+  // (defensive — qlaud may redirect to / with the param in some
+  // configurations, and we shouldn't lose the key over that).
+  const url = new URL(window.location.href);
+  const k = url.searchParams.get('k');
+  if (!k) return false;
+  await setKey(decodeURIComponent(k));
+  // Scrub the key from the URL bar before any user-visible render —
+  // we don't want it sitting in browser history or screenshots.
+  url.searchParams.delete('k');
+  url.searchParams.delete('app');
+  // /auth is just the landing path for the redirect; bring the user
+  // home now that we've consumed the callback.
+  if (url.pathname === '/auth') url.pathname = '/';
+  window.history.replaceState({}, '', url.toString());
+  return true;
 }

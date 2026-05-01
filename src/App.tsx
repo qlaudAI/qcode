@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { FolderOpen, Plus, Settings, Sparkles, Wallet } from 'lucide-react';
+import { FolderOpen, Plus, Settings, Wallet } from 'lucide-react';
+import { QlaudMark } from './ui/QlaudMark';
 
 import {
   clearAuth,
@@ -400,9 +401,9 @@ function Titlebar({
     <header className="titlebar flex h-11 items-center justify-between border-b border-border/40 bg-background/40 px-3 backdrop-blur-md">
       {/* pl-16 leaves clearance for macOS traffic-light buttons. */}
       <div className="flex items-center gap-2 pl-16">
-        <div className="grid h-5 w-5 place-items-center rounded bg-primary text-primary-foreground shadow-sm">
-          <Sparkles className="h-3 w-3" />
-        </div>
+        {/* Canonical qlaud monogram — dark q with red period accent.
+            Same source as qlaud.ai/icon.svg. */}
+        <QlaudMark className="h-5 w-5 rounded shadow-sm" />
         <span className="text-sm font-semibold tracking-tight">qcode</span>
         <span className="ml-1 rounded-full border border-primary/30 bg-primary/5 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
           alpha

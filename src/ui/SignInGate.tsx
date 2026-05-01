@@ -1,5 +1,7 @@
 import { Sparkles, ArrowRight, ShieldCheck } from 'lucide-react';
 
+import { QlaudMark } from './QlaudMark';
+
 export function SignInGate({ onSignIn }: { onSignIn: () => void }) {
   return (
     <div className="flex h-dvh flex-col">
@@ -7,9 +9,8 @@ export function SignInGate({ onSignIn }: { onSignIn: () => void }) {
 
       <div className="flex flex-1 items-center justify-center px-6">
         <div className="w-full max-w-md text-center">
-          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
-            <Sparkles className="h-5 w-5" />
-          </div>
+          <QlaudMark className="mx-auto h-12 w-12 rounded-2xl shadow-sm" />
+
           <h1 className="mt-6 text-3xl font-semibold tracking-tight">
             Welcome to qcode
           </h1>

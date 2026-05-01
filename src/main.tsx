@@ -2,7 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 
 import { App } from './App';
-import { hydrateAuth } from './lib/auth';
+import { consumeAuthCallback, hydrateAuth } from './lib/auth';
 import { isTauri } from './lib/tauri';
 import './styles.css';
 
@@ -13,12 +13,21 @@ if (isTauri()) {
   document.documentElement.dataset.tauri = '1';
 }
 
-// Block on the OS-keychain read so React's first render gets an
-// accurate authed/not-authed state.
-hydrateAuth().then(() => {
+// Boot sequence:
+//   1. consumeAuthCallback() — browser-only; if we just got
+//      redirected from qlaud.ai/cli-auth with `?k=`, capture and
+//      store the key BEFORE hydrateAuth so the cached key is right
+//      on first render. No-op in Tauri (deep-link plugin handles it).
+//   2. hydrateAuth() — block on the keychain (Tauri) / localStorage
+//      (browser) read so React's first render decides authed vs
+//      sign-in gate accurately.
+async function boot() {
+  await consumeAuthCallback();
+  await hydrateAuth();
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
       <App />
     </React.StrictMode>,
   );
-});
+}
+void boot();

@@ -30,6 +30,7 @@ import {
   getRemoteThreadMessages,
   type CompactionInfo,
 } from '../lib/threads';
+import { QlaudMark } from './QlaudMark';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
 import {
   getCurrentWorkspace,
@@ -1029,9 +1030,7 @@ function EmptyState({
   if (!hasWorkspace) {
     return (
       <div className="flex flex-col items-center pt-12 text-center">
-        <div className="grid h-12 w-12 place-items-center rounded-2xl bg-primary/10 text-primary">
-          <Sparkles className="h-5 w-5" />
-        </div>
+        <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
         <h2 className="mt-6 text-2xl font-semibold tracking-tight">
           Welcome to qcode
         </h2>
