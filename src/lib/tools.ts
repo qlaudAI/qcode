@@ -18,6 +18,7 @@
 
 import { computeDiff, type DiffLine } from './diff';
 import type { IgnoreMatcher } from './gitignore';
+import { hasRipgrep, rgGlob, rgGrep } from './ripgrep';
 import { isTauri } from './tauri';
 import { getMatcher } from './workspace';
 
@@ -327,6 +328,27 @@ async function runGlob(
   if (!isTauri()) {
     return ok(call.id, `[browser-mode stub: would glob ${pattern}]`);
   }
+
+  // Fast path: ripgrep --files -g <pattern>. Respects .gitignore
+  // automatically, ~10-50× faster than the JS walker on big repos.
+  // Falls back to the walker on detection or runtime failure so
+  // a busted rg install doesn't break the tool.
+  if (await hasRipgrep()) {
+    try {
+      const result = await rgGlob({
+        workspace: opts.workspace,
+        pattern,
+        max: MAX_GLOB_MATCHES,
+      });
+      const trailer = result.truncated
+        ? `\n…(more matches truncated; narrow your pattern)`
+        : '';
+      return ok(call.id, result.files.join('\n') + trailer || '(no matches)');
+    } catch {
+      // Fall through to the walker.
+    }
+  }
+
   const re = globToRegex(pattern);
   const matches: string[] = [];
   const matcher = await getMatcher(opts.workspace);
@@ -367,6 +389,33 @@ async function runGrep(
   }
   if (!isTauri()) {
     return ok(call.id, `[browser-mode stub: would grep ${pattern} in ${root}]`);
+  }
+
+  // Fast path: ripgrep. Same line:content output shape as the walker
+  // so the model never sees the boundary. Bails to the walker on
+  // detection or runtime failure.
+  if (await hasRipgrep()) {
+    try {
+      const rootRel = relativizePath(root, opts.workspace) || '.';
+      const result = await rgGrep({
+        workspace: opts.workspace,
+        rootRel,
+        pattern,
+        fileGlob,
+        caseInsensitive: ci,
+        max: MAX_GREP_MATCHES,
+        maxFileBytes: MAX_FILE_BYTES,
+      });
+      const lines = result.hits.map(
+        (h) => `${h.path}:${h.line}:${h.content}`,
+      );
+      const trailer = result.truncated
+        ? `\n…(${MAX_GREP_MATCHES} match cap reached; narrow your pattern)`
+        : '';
+      return ok(call.id, lines.join('\n') + trailer || '(no matches)');
+    } catch {
+      // Fall through to the walker.
+    }
   }
 
   const fileGlobRe = fileGlob ? globToRegex(fileGlob) : null;
