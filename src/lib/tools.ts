@@ -230,6 +230,11 @@ export type ExecuteOpts = {
   /** Approval gate. Required for write_file / edit_file / bash; the
    *  executor returns an error if a dangerous tool is called without one. */
   requestApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
+  /** Live progress callback. Currently only bash uses this — emits
+   *  the full accumulated stdout/stderr-formatted text on every chunk
+   *  so the UI can render it as the command runs. The agent still gets
+   *  the final consolidated result via the returned ToolResult. */
+  onPartial?: (text: string) => void;
 };
 
 export async function executeTool(
@@ -568,19 +573,63 @@ async function runBash(
   }
   const { Command } = await import('@tauri-apps/plugin-shell');
   const child = Command.create('sh', ['-c', command], { cwd: opts.workspace });
-  const timeoutPromise = new Promise<{ timeout: true }>((resolve) =>
-    setTimeout(() => resolve({ timeout: true }), BASH_TIMEOUT_MS),
+
+  // Stream stdout / stderr as they arrive. Each chunk grows the
+  // accumulators below; we ship the full re-built BashView-formatted
+  // text to opts.onPartial on every event so the UI can render
+  // progressively without us having to track per-stream offsets.
+  let stdoutBuf = '';
+  let stderrBuf = '';
+  const emit = (codeSoFar: number | null) => {
+    if (!opts.onPartial) return;
+    const exitLine = codeSoFar == null ? 'exit running…' : `exit ${codeSoFar}`;
+    const text =
+      `${exitLine}\n` +
+      (stdoutBuf ? `--- stdout ---\n${stdoutBuf}\n` : '') +
+      (stderrBuf ? `--- stderr ---\n${stderrBuf}\n` : '');
+    opts.onPartial(text);
+  };
+  child.stdout.on('data', (line: string) => {
+    stdoutBuf += line.endsWith('\n') ? line : line + '\n';
+    emit(null);
+  });
+  child.stderr.on('data', (line: string) => {
+    stderrBuf += line.endsWith('\n') ? line : line + '\n';
+    emit(null);
+  });
+
+  const finish = new Promise<{ code: number; signal: number | null }>(
+    (resolve) => {
+      child.on('close', (data) => {
+        // Tauri 2's plugin-shell event payload: { code, signal }.
+        const code = (data as { code?: number }).code ?? 0;
+        const signal = (data as { signal?: number | null }).signal ?? null;
+        resolve({ code, signal });
+      });
+    },
   );
-  const runPromise = child.execute();
-  const winner = await Promise.race([runPromise, timeoutPromise]);
-  if ('timeout' in winner) {
-    return err(call.id, `Command exceeded the ${BASH_TIMEOUT_MS / 1000}s timeout.`);
+
+  const childProc = await child.spawn();
+  const timeout = new Promise<'timeout'>((resolve) =>
+    setTimeout(() => resolve('timeout'), BASH_TIMEOUT_MS),
+  );
+  const winner = await Promise.race([finish, timeout]);
+  if (winner === 'timeout') {
+    try {
+      await childProc.kill();
+    } catch {
+      // process may have just exited — ignore
+    }
+    return err(
+      call.id,
+      `Command exceeded the ${BASH_TIMEOUT_MS / 1000}s timeout. Partial output:\n${stdoutBuf}${stderrBuf ? '\n[stderr]\n' + stderrBuf : ''}`,
+    );
   }
-  const { stdout, stderr, code } = winner;
+  const { code } = winner;
   const out =
     `exit ${code}\n` +
-    (stdout ? `--- stdout ---\n${stdout}\n` : '') +
-    (stderr ? `--- stderr ---\n${stderr}\n` : '');
+    (stdoutBuf ? `--- stdout ---\n${stdoutBuf}` : '') +
+    (stderrBuf ? `--- stderr ---\n${stderrBuf}` : '');
   return code === 0
     ? ok(call.id, out)
     : { tool_use_id: call.id, content: out, is_error: true };

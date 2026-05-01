@@ -242,6 +242,17 @@ function handleEvent(
           };
         });
 
+      case 'tool_progress':
+        // Live update: replace the tool block's output mid-flight.
+        // Status stays 'running' until tool_done fires.
+        return blocks.map((b) => {
+          if (b.type !== 'tool' || b.call.id !== e.id) return b;
+          return {
+            type: 'tool',
+            call: { ...b.call, output: e.partial },
+          };
+        });
+
       case 'approval_pending':
         return [
           ...blocks,

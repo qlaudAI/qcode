@@ -66,6 +66,14 @@ export type AgentEvent =
       decision: ApprovalDecision;
     }
   | {
+      type: 'tool_progress';
+      id: string;
+      /** Full accumulated output text — replaces what was rendered
+       *  before, doesn't append. Lets the UI re-format from scratch
+       *  on each chunk without having to track per-stream offsets. */
+      partial: string;
+    }
+  | {
       type: 'tool_done';
       id: string;
       content: string;
@@ -189,6 +197,9 @@ export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
           const decision = await opts.onApproval(tu.id, req);
           opts.onEvent({ type: 'approval_resolved', id: tu.id, decision });
           return decision;
+        },
+        onPartial: (partial) => {
+          opts.onEvent({ type: 'tool_progress', id: tu.id, partial });
         },
       });
       opts.onEvent({

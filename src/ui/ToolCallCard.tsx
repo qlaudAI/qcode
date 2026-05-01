@@ -43,10 +43,21 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
 };
 
 export function ToolCallCard({ call }: { call: ToolCallView }) {
-  const [open, setOpen] = useState(false);
+  const [userToggled, setUserToggled] = useState(false);
+  const [open, setOpenState] = useState(false);
   const Icon = ICONS[call.name] ?? Wrench;
   const summary = summarize(call);
-  const hasOutput = call.status !== 'running' && (call.output?.length ?? 0) > 0;
+  // Show the output panel as soon as there's output, even mid-stream.
+  // Auto-expand on the first chunk while running so the user sees
+  // bash progress without clicking; stop auto-managing once the user
+  // toggles it themselves.
+  const hasOutput = (call.output?.length ?? 0) > 0;
+  const streaming = call.status === 'running' && hasOutput;
+  const effectivelyOpen = userToggled ? open : streaming || open;
+  function setOpen(next: boolean) {
+    setUserToggled(true);
+    setOpenState(next);
+  }
 
   return (
     <div
@@ -58,7 +69,7 @@ export function ToolCallCard({ call }: { call: ToolCallView }) {
       )}
     >
       <button
-        onClick={() => hasOutput && setOpen((v) => !v)}
+        onClick={() => hasOutput && setOpen(!effectivelyOpen)}
         disabled={!hasOutput}
         className={cn(
           'flex w-full items-center gap-2.5 px-3 py-2 text-left',
@@ -76,18 +87,23 @@ export function ToolCallCard({ call }: { call: ToolCallView }) {
             <span className="truncate text-[11px] font-mono text-muted-foreground">
               {summary}
             </span>
+            {streaming && (
+              <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+                live
+              </span>
+            )}
           </div>
         </div>
         {hasOutput && (
           <ChevronRight
             className={cn(
               'h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform',
-              open && 'rotate-90',
+              effectivelyOpen && 'rotate-90',
             )}
           />
         )}
       </button>
-      {open && hasOutput && (
+      {effectivelyOpen && hasOutput && (
         <div className="border-t border-border/40 bg-muted/20">
           <Output call={call} />
         </div>
