@@ -11,7 +11,7 @@ import {
 } from './lib/auth';
 import { fetchBalance } from './lib/billing';
 import { startDeepLinkListener } from './lib/deep-link';
-import { DEFAULT_MODEL } from './lib/models';
+import { getSettings, patchSettings } from './lib/settings';
 import { useShortcuts, type MenuId } from './lib/shortcuts';
 import {
   createThread,
@@ -31,16 +31,37 @@ import type { Message } from './lib/qlaud-client';
 import { ChatSurface } from './ui/ChatSurface';
 import { FileTree } from './ui/FileTree';
 import { ModelPicker } from './ui/ModelPicker';
+import { SettingsDrawer } from './ui/SettingsDrawer';
 import { SignInGate } from './ui/SignInGate';
 import { ThreadList } from './ui/ThreadList';
 
 export function App() {
   const [authed, setAuthed] = useState<boolean>(() => Boolean(getKey()));
   const [profile, setProfile] = useState<Profile | null>(() => getProfile());
-  const [model, setModel] = useState<string>(DEFAULT_MODEL);
+  const [model, setModel] = useState<string>(() => getSettings().defaultModel);
   const [workspace, setWorkspace] = useState<Workspace | null>(() =>
     getCurrentWorkspace(),
   );
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Persist when the user picks a new default. We update the user's
+  // current view immediately (setModel) and stash the choice as the
+  // default for future "New chat" sessions. The title-bar dropdown
+  // doubles as both per-session switcher and global default-setter
+  // — picking a model is a strong signal of intent.
+  const onModelChange = useCallback((slug: string) => {
+    setModel(slug);
+    patchSettings({ defaultModel: slug });
+  }, []);
+
+  const handleSignOut = useCallback(async () => {
+    await clearAuth();
+    setCurrentWorkspace(null);
+    setAuthed(false);
+    setProfile(null);
+    setWorkspace(null);
+    setSettingsOpen(false);
+  }, []);
 
   // Threads. The sidebar lists summaries; the chat surface gets the
   // active thread's full history. Switching threads remounts
@@ -156,9 +177,7 @@ export function App() {
           break;
         }
         case 'preferences':
-          // TODO(phase-2): in-app settings drawer. For now, surface
-          // the dashboard as the closest equivalent.
-          window.open('https://qlaud.ai/dashboard', '_blank', 'noopener');
+          setSettingsOpen(true);
           break;
         case 'sign_out':
           await clearAuth();
@@ -189,17 +208,11 @@ export function App() {
     <div className="flex h-dvh flex-col text-foreground">
       <Titlebar
         model={model}
-        onModelChange={setModel}
+        onModelChange={onModelChange}
         profile={profile}
         workspaceName={workspace?.name}
         onRefreshBalance={refreshBalance}
-        onSignOut={async () => {
-          await clearAuth();
-          setCurrentWorkspace(null);
-          setAuthed(false);
-          setProfile(null);
-          setWorkspace(null);
-        }}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -237,6 +250,14 @@ export function App() {
           />
         </main>
       </div>
+
+      <SettingsDrawer
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        email={profile?.email ?? null}
+        onSignOut={handleSignOut}
+        onClearedThreads={refreshThreads}
+      />
     </div>
   );
 }
@@ -249,14 +270,14 @@ function Titlebar({
   profile,
   workspaceName,
   onRefreshBalance,
-  onSignOut,
+  onOpenSettings,
 }: {
   model: string;
   onModelChange: (slug: string) => void;
   onRefreshBalance: () => void;
   profile: Profile | null;
   workspaceName?: string;
-  onSignOut: () => void;
+  onOpenSettings: () => void;
 }) {
   return (
     <header className="titlebar flex h-11 items-center justify-between border-b border-border/40 bg-background/40 px-3 backdrop-blur-md">
@@ -285,8 +306,8 @@ function Titlebar({
         <button
           aria-label="Settings"
           className="grid h-7 w-7 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          onClick={onSignOut}
-          title={profile?.email ? `${profile.email} — click to sign out` : 'Sign out'}
+          onClick={onOpenSettings}
+          title={profile?.email ? `Settings · signed in as ${profile.email}` : 'Settings'}
         >
           <Settings className="h-3.5 w-3.5" />
         </button>
