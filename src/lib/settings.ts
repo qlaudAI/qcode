@@ -22,12 +22,20 @@ export type Settings = {
   /** agent — full tool kit including write_file/edit_file/bash.
    *  plan  — read tools only; model proposes changes in prose. */
   mode: AgentMode;
+  /** When on, qcode passes `tools_mode: 'dynamic'` to qlaud so the
+   *  model gets the 4 meta-tools (qlaud_search_tools, etc.) for
+   *  discovering and calling MCP tools the user connected on the
+   *  qlaud dashboard. Coexists with the 7 local tools — they ride
+   *  alongside the meta-tools in the same request. Off by default
+   *  because most users don't have connectors configured yet. */
+  enableConnectors: boolean;
 };
 
 const DEFAULTS: Settings = {
   defaultModel: DEFAULT_MODEL,
   autoUpdate: true,
   mode: 'agent',
+  enableConnectors: false,
 };
 
 export function getSettings(): Settings {

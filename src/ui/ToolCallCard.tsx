@@ -9,7 +9,10 @@ import {
   FolderTree,
   Loader2,
   Pencil,
+  Plug,
+  Play,
   Search,
+  Sparkles,
   Terminal,
   Wrench,
 } from 'lucide-react';
@@ -19,6 +22,7 @@ import { BashView } from './tool-output/BashView';
 import { GlobView } from './tool-output/GlobView';
 import { GrepView } from './tool-output/GrepView';
 import { ListFilesView } from './tool-output/ListFilesView';
+import { MetaToolView } from './tool-output/MetaToolView';
 import { ReadFileView } from './tool-output/ReadFileView';
 
 type Status = 'running' | 'done' | 'error';
@@ -40,6 +44,13 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   write_file: FilePlus,
   edit_file: Pencil,
   bash: Terminal,
+  // qlaud meta-tools — surfaced when tools_mode='dynamic' is on for
+  // the request. Sparkles for "discover something new" actions, plug
+  // for the credential connection flow, play for the executor.
+  qlaud_search_tools: Sparkles,
+  qlaud_get_tool_schemas: Wrench,
+  qlaud_multi_execute: Play,
+  qlaud_manage_connections: Plug,
 };
 
 export function ToolCallCard({ call }: { call: ToolCallView }) {
@@ -138,6 +149,18 @@ function Output({ call }: { call: ToolCallView }) {
       );
     case 'bash':
       return <BashView output={output} isError={call.status === 'error'} />;
+    case 'qlaud_search_tools':
+    case 'qlaud_get_tool_schemas':
+    case 'qlaud_multi_execute':
+    case 'qlaud_manage_connections':
+      return (
+        <MetaToolView
+          name={call.name}
+          input={call.input}
+          output={output}
+          isError={call.status === 'error'}
+        />
+      );
     default:
       return (
         <pre className="m-0 max-h-72 overflow-auto px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground/90">
@@ -180,6 +203,30 @@ function summarize(call: ToolCallView): string {
     }
     case 'bash':
       return typeof input.command === 'string' ? input.command : '…';
+    case 'qlaud_search_tools':
+      return typeof input.intent === 'string' ? input.intent : '…';
+    case 'qlaud_get_tool_schemas': {
+      const tools = Array.isArray(input.tools) ? input.tools : [];
+      return tools.filter((t) => typeof t === 'string').join(', ') || '…';
+    }
+    case 'qlaud_multi_execute': {
+      const calls = Array.isArray(input.calls) ? input.calls : [];
+      const names = calls
+        .map((c) =>
+          c && typeof c === 'object' && 'tool' in c
+            ? (c as Record<string, unknown>).tool
+            : null,
+        )
+        .filter((n): n is string => typeof n === 'string');
+      return names.length > 0
+        ? `${names.length} tool${names.length === 1 ? '' : 's'}: ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}`
+        : '…';
+    }
+    case 'qlaud_manage_connections': {
+      const action = typeof input.action === 'string' ? input.action : '?';
+      const tool = typeof input.tool === 'string' ? input.tool : '';
+      return tool ? `${action} ${tool}` : action;
+    }
     default:
       for (const [, v] of Object.entries(input)) {
         if (typeof v === 'string' && v.length > 0)

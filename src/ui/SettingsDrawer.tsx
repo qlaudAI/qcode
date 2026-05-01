@@ -160,6 +160,29 @@ export function SettingsDrawer({
             </p>
           </Section>
 
+          <Section title="Connectors">
+            <Toggle
+              label="Use qlaud connectors (MCP)"
+              checked={settings.enableConnectors}
+              onChange={(v) => update('enableConnectors', v)}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Lets the model discover + call MCP servers you connected on{' '}
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  void openExternal('https://qlaud.ai/tools');
+                }}
+                className="text-foreground/85 underline decoration-border hover:decoration-foreground/60"
+              >
+                qlaud.ai/tools
+              </a>
+              . When enabled, qcode adds 4 discovery tools alongside the
+              7 local ones — same approval flow for any write action.
+            </p>
+          </Section>
+
           <Section title="Conversations">
             <DangerButton
               icon={<Trash2 className="h-3.5 w-3.5" />}

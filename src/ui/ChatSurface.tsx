@@ -22,6 +22,7 @@ import {
 } from '../lib/images';
 import { getProjectMemory, type ProjectMemory } from '../lib/memory';
 import { MODELS } from '../lib/models';
+import { getSettings } from '../lib/settings';
 import type { ContentBlock, Message } from '../lib/qlaud-client';
 import { getRemoteThreadMessages } from '../lib/threads';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
@@ -326,6 +327,9 @@ export function ChatSurface({
         mode,
         workspace: workspace?.path ?? null,
         content: userContent,
+        // Read at send time so toggling the setting takes effect on
+        // the very next turn without a remount.
+        enableConnectors: getSettings().enableConnectors,
         signal: abortRef.current.signal,
         onEvent: (e) => {
           if (e.type === 'finished') lastUsage = e.usage;
