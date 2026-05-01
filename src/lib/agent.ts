@@ -1,15 +1,16 @@
 // qcode's agent loop.
 //
 // Sends the user's turn, streams the model's response, executes any
-// tool calls in qcode (read_file, list_files), feeds tool_results
-// back, and repeats until the model returns a non-tool stop_reason
-// or we hit the safety cap (MAX_LOOPS).
+// tool calls in qcode (read or write, depending on tier), feeds
+// tool_results back, and repeats until the model returns a non-tool
+// stop_reason or we hit the safety cap (MAX_LOOPS).
 //
-// The chat surface drives this via runAgent(); each callback fires
-// during streaming so the UI updates token-by-token, tool-by-tool.
-//
-// Approval-gated tools (write_file, bash, run_command) are NOT
-// included in v0. They land next sprint behind a confirm UI.
+// Approval flow for write_file / edit_file / bash:
+//   1. Tool executor builds an ApprovalRequest (diff, command, etc.)
+//   2. Calls back into runAgent's `onApproval` handler
+//   3. ChatSurface renders an approval card and resolves the promise
+//      when the user clicks Allow or Reject
+//   4. Executor runs (or skips) based on the decision
 
 import {
   streamMessage,
@@ -17,8 +18,10 @@ import {
   type Message,
 } from './qlaud-client';
 import {
+  ALL_TOOLS,
   executeTool,
-  READ_TOOLS,
+  type ApprovalDecision,
+  type ApprovalRequest,
   type ToolCall,
   type ToolResult,
 } from './tools';
@@ -27,15 +30,20 @@ const SYSTEM_PROMPT = `You are qcode, a multi-model coding agent running on the 
 
 Style:
 - Be direct. Show, don't tell. Match the user's terseness.
-- When the user asks about their code, use list_files first to understand the structure, then read_file to examine specifics. Don't guess at file contents.
-- When proposing changes, describe them in plain prose with concrete file paths and approximate line ranges. (File-write tools aren't available yet — that's the next release.)
-- Never invent file paths or function names. If you need to know something, use the read tools.
+- Investigate before changing: list_files / glob to discover, grep / read_file to confirm, then act.
+- Never invent file paths or function names. If you're unsure, look first.
+
+Tools:
+- list_files / read_file / glob / grep run without asking — use them freely.
+- write_file / edit_file / bash require user approval each time. The user sees a diff (for writes/edits) or the full command (for bash) before approving. Don't ask the user to approve in chat — qcode shows the prompt automatically.
+- Prefer edit_file over write_file when modifying an existing file. Make old_string unique by including surrounding context.
 
 Safety:
-- You can only READ the user's filesystem. Writes, edits, and shell commands are not yet supported in this version.
-- If the user asks for something that requires writing, explain what you would do and offer to dictate the edits for them to apply manually.`;
+- Stay inside the user's open workspace. Tool calls outside it will fail.
+- Don't run destructive commands without good reason. The bash tool has a deny-list, but it isn't exhaustive.
+- If the user rejects an approval, don't immediately retry the same change — propose a different approach or ask what they'd prefer.`;
 
-const MAX_LOOPS = 8; // hard ceiling; protects against pathological agent behavior
+const MAX_LOOPS = 16; // hard ceiling; with write tools, real tasks need more turns
 
 export type AgentEvent =
   | { type: 'turn_start'; turn: number }
@@ -46,6 +54,16 @@ export type AgentEvent =
       name: string;
       input: unknown;
       status: 'running';
+    }
+  | {
+      type: 'approval_pending';
+      id: string;
+      request: ApprovalRequest;
+    }
+  | {
+      type: 'approval_resolved';
+      id: string;
+      decision: ApprovalDecision;
     }
   | {
       type: 'tool_done';
@@ -67,23 +85,22 @@ export type RunAgentOpts = {
   history: Message[];
   signal?: AbortSignal;
   onEvent: (e: AgentEvent) => void;
+  /** Resolves to allow/reject for a write/edit/bash tool. The UI
+   *  surfaces the request via the `approval_pending` event and
+   *  fulfills this promise when the user clicks. */
+  onApproval: (
+    toolUseId: string,
+    request: ApprovalRequest,
+  ) => Promise<ApprovalDecision>;
 };
 
-/** Run a full agent turn. Streams events until stop_reason !== "tool_use". */
 export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
-  // The conversation grows as tools are executed; we mutate `messages`
-  // and return the final list to the caller.
   const messages: Message[] = [...opts.history];
-  // Without a workspace, tools can't resolve paths — degrade
-  // gracefully to a tools-disabled chat.
-  const tools = opts.workspace ? READ_TOOLS : undefined;
+  const tools = opts.workspace ? ALL_TOOLS : undefined;
 
   for (let turn = 0; turn < MAX_LOOPS; turn++) {
     opts.onEvent({ type: 'turn_start', turn });
 
-    // Buffer this turn's assistant content blocks so we can append
-    // a single, well-formed assistant message to history at the end
-    // of the turn (Anthropic requires assistant message be one entry).
     const assistantBlocks: ContentBlock[] = [];
     let currentText = '';
     let stopReason: string | undefined;
@@ -100,7 +117,6 @@ export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
           opts.onEvent({ type: 'text', text: chunk });
         },
         onToolUse: (block) => {
-          // The text block (if any) ends here logically; finalize it.
           if (currentText) {
             assistantBlocks.push({ type: 'text', text: currentText });
             currentText = '';
@@ -135,45 +151,46 @@ export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
 
     messages.push({ role: 'assistant', content: assistantBlocks });
 
-    // If the model didn't request a tool call, we're done.
     if (stopReason !== 'tool_use') {
       opts.onEvent({ type: 'finished', stopReason, turns: turn + 1 });
       return messages;
     }
 
-    // Execute every tool_use block from this turn, in order.
     const toolUseBlocks = assistantBlocks.filter(
       (b): b is Extract<ContentBlock, { type: 'tool_use' }> =>
         b.type === 'tool_use',
     );
     const toolResults: ContentBlock[] = [];
+
     for (const tu of toolUseBlocks) {
-      // Enforce the workspace invariant — without one, every read
-      // tool will fail. Surface an explicit error result so the
-      // model can adjust rather than retry the same call.
       if (!opts.workspace) {
-        const result: ToolResult = {
-          tool_use_id: tu.id,
-          content:
-            'No workspace is open. The user must open a folder before file tools work. Tell them to use ⌘O / "Open Folder".',
-          is_error: true,
-        };
+        const content =
+          'No workspace is open. The user must open a folder (⌘O) before file tools work. Tell them to do that.';
         opts.onEvent({
           type: 'tool_done',
           id: tu.id,
-          content: result.content,
+          content,
           isError: true,
         });
         toolResults.push({
           type: 'tool_result',
           tool_use_id: tu.id,
-          content: result.content,
+          content,
           is_error: true,
         });
         continue;
       }
+
       const call: ToolCall = { id: tu.id, name: tu.name, input: tu.input };
-      const result = await executeTool(call, { workspace: opts.workspace });
+      const result: ToolResult = await executeTool(call, {
+        workspace: opts.workspace,
+        requestApproval: async (req) => {
+          opts.onEvent({ type: 'approval_pending', id: tu.id, request: req });
+          const decision = await opts.onApproval(tu.id, req);
+          opts.onEvent({ type: 'approval_resolved', id: tu.id, decision });
+          return decision;
+        },
+      });
       opts.onEvent({
         type: 'tool_done',
         id: tu.id,
@@ -189,13 +206,11 @@ export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
     }
 
     messages.push({ role: 'user', content: toolResults });
-    // Loop continues — model gets the tool results and decides what to
-    // say next.
   }
 
   opts.onEvent({
     type: 'error',
-    message: `Agent hit the ${MAX_LOOPS}-turn safety limit. Try a more focused question, or break the task into smaller steps.`,
+    message: `Agent hit the ${MAX_LOOPS}-turn safety limit. Break the task into smaller steps.`,
   });
   return messages;
 }

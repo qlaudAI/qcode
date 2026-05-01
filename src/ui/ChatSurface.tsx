@@ -5,17 +5,29 @@ import { cn } from '../lib/cn';
 import { MODELS } from '../lib/models';
 import { runAgent, type AgentEvent } from '../lib/agent';
 import type { Message } from '../lib/qlaud-client';
+import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
 import { getCurrentWorkspace } from '../lib/workspace';
+import { ApprovalCard } from './ApprovalCard';
 import { ToolCallCard, type ToolCallView } from './ToolCallCard';
 
 // Each "block" rendered in the chat is the smallest UI unit:
-// either the full user message, an assistant text run, or a tool
-// call card. The agent loop emits a stream of events that
-// `handleEvent` translates into block mutations.
+// either the full user message, an assistant text run, a tool
+// call card, or an approval card. The agent loop emits a stream
+// of events that `handleEvent` translates into block mutations.
 type RenderBlock =
   | { type: 'user_text'; text: string }
   | { type: 'assistant_text'; text: string }
-  | { type: 'tool'; call: ToolCallView };
+  | { type: 'tool'; call: ToolCallView }
+  | {
+      type: 'approval';
+      id: string;
+      request: ApprovalRequest;
+      resolved?: 'allow' | 'reject';
+    };
+
+// Pending approval resolvers, keyed by tool_use id. The agent loop
+// awaits one of these promises; the UI fulfills it on click.
+type PendingResolver = (decision: ApprovalDecision) => void;
 
 const SAMPLE_PROMPTS = [
   'List the files in this project',
@@ -33,6 +45,7 @@ export function ChatSurface({ model }: { model: string }) {
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const approvalsRef = useRef<Map<string, PendingResolver>>(new Map());
 
   // Auto-scroll to bottom on any block change.
   useEffect(() => {
@@ -42,7 +55,28 @@ export function ChatSurface({ model }: { model: string }) {
     });
   }, [blocks]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+      // Resolve any in-flight approvals as 'reject' so the loop can
+      // unwind cleanly when the user navigates away.
+      for (const resolve of approvalsRef.current.values()) resolve('reject');
+      approvalsRef.current.clear();
+    },
+    [],
+  );
+
+  function decide(id: string, decision: ApprovalDecision) {
+    const resolve = approvalsRef.current.get(id);
+    if (!resolve) return;
+    approvalsRef.current.delete(id);
+    setBlocks((bs) =>
+      bs.map((b) =>
+        b.type === 'approval' && b.id === id ? { ...b, resolved: decision } : b,
+      ),
+    );
+    resolve(decision);
+  }
 
   async function send(text: string) {
     const userMsg = text.trim();
@@ -67,6 +101,10 @@ export function ChatSurface({ model }: { model: string }) {
         history: nextHistory,
         signal: abortRef.current.signal,
         onEvent: (e) => handleEvent(e, setBlocks),
+        onApproval: (toolUseId, _request) =>
+          new Promise<ApprovalDecision>((resolve) => {
+            approvalsRef.current.set(toolUseId, resolve);
+          }),
       });
       setHistory(finalHistory);
     } catch (e) {
@@ -75,11 +113,17 @@ export function ChatSurface({ model }: { model: string }) {
     } finally {
       setBusy(false);
       abortRef.current = null;
+      // Drop any leftover resolvers — covers the case where streaming
+      // bails before the loop reaches the awaiting Promise.
+      for (const resolve of approvalsRef.current.values()) resolve('reject');
+      approvalsRef.current.clear();
     }
   }
 
   function stop() {
     abortRef.current?.abort();
+    for (const resolve of approvalsRef.current.values()) resolve('reject');
+    approvalsRef.current.clear();
   }
 
   const empty = blocks.length === 0;
@@ -101,6 +145,12 @@ export function ChatSurface({ model }: { model: string }) {
                   key={i}
                   block={b}
                   busy={busy && i === blocks.length - 1}
+                  onAllow={() =>
+                    b.type === 'approval' ? decide(b.id, 'allow') : undefined
+                  }
+                  onReject={() =>
+                    b.type === 'approval' ? decide(b.id, 'reject') : undefined
+                  }
                 />
               ))}
             </div>
@@ -178,6 +228,19 @@ function handleEvent(
           };
         });
 
+      case 'approval_pending':
+        return [
+          ...blocks,
+          { type: 'approval', id: e.id, request: e.request },
+        ];
+
+      case 'approval_resolved':
+        return blocks.map((b) =>
+          b.type === 'approval' && b.id === e.id
+            ? { ...b, resolved: e.decision }
+            : b,
+        );
+
       case 'finished':
       case 'error':
       default:
@@ -203,7 +266,17 @@ function mapError(code: string): string {
 
 // ─── Render rows ───────────────────────────────────────────────────
 
-function BlockRow({ block, busy }: { block: RenderBlock; busy: boolean }) {
+function BlockRow({
+  block,
+  busy,
+  onAllow,
+  onReject,
+}: {
+  block: RenderBlock;
+  busy: boolean;
+  onAllow?: () => void;
+  onReject?: () => void;
+}) {
   if (block.type === 'user_text') {
     return (
       <div className="flex justify-end">
@@ -218,6 +291,20 @@ function BlockRow({ block, busy }: { block: RenderBlock; busy: boolean }) {
       <div className="flex pl-10">
         <div className="flex-1">
           <ToolCallCard call={block.call} />
+        </div>
+      </div>
+    );
+  }
+  if (block.type === 'approval') {
+    return (
+      <div className="flex pl-10">
+        <div className="flex-1">
+          <ApprovalCard
+            request={block.request}
+            resolved={block.resolved}
+            onAllow={() => onAllow?.()}
+            onReject={() => onReject?.()}
+          />
         </div>
       </div>
     );

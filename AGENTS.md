@@ -3,14 +3,16 @@
 Read this first if you're picking up qcode where the last commit left off.
 The README is the marketing-facing pitch; this file is the engineering one.
 
-## What's actually shipped (`v0.1.0-alpha.2`)
+## What's actually shipped (`v0.1.0-alpha.3`)
 
 - **Tauri 2.x desktop shell** — Mac/Win/Linux targets, `qcode://` URL scheme
 - **Native chrome** — macOS HudWindow vibrancy, Windows acrylic, native menu bar (File / Edit / View / Window / Help) with platform shortcuts, transparent-with-blur title bar
 - **OS-native credential storage** — Apple Keychain / Windows Credential Manager / libsecret via `keyring` crate; localStorage fallback only in vite-dev
 - **Workspace + file tree** — native folder picker, MRU recent list, lazy-expanding file tree with sensible hidden-folder filter
 - **End-to-end auth** — app → browser → qlaud.ai/cli-auth → Clerk → mints CLI key → deep-links back to `qcode://auth?k=…` → React captures + persists to keychain
-- **Agentic loop with READ-ONLY tools** — list_files, read_file. Multi-turn execution, tool calls render as inline cards with status (running/done/error), abortable mid-stream
+- **Full agentic loop** — multi-turn tool execution, abortable mid-stream
+- **Read-only tools** — `list_files`, `read_file`, `glob`, `grep` (run without approval)
+- **Approval-gated tools** — `write_file`, `edit_file`, `bash`. Each shows the user a card with a unified diff (writes/edits) or full command (bash) and Allow/Reject buttons before any side-effect runs. Path-jail to the workspace, deny-list on bash (`rm -rf /`, `sudo`, `curl|sh`, fork bombs, etc.), 60s bash timeout
 - **Cross-platform release CI** — scaffolded; signing secrets not yet provisioned
 
 ```
