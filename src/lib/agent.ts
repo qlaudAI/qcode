@@ -15,6 +15,8 @@
 import { getProjectMemory, memorySystemSection } from './memory';
 import {
   streamMessage,
+  streamThreadMessage,
+  type ClientToolDef,
   type ContentBlock,
   type Message,
 } from './qlaud-client';
@@ -27,6 +29,7 @@ import {
   type ToolCall,
   type ToolResult,
 } from './tools';
+import { submitToolResult } from './tool-results';
 
 const SYSTEM_PROMPT_AGENT = `You are qcode, a multi-model coding agent running on the user's desktop.
 
@@ -274,4 +277,219 @@ export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
     message: `Agent hit the ${MAX_LOOPS}-turn safety limit. Break the task into smaller steps.`,
   });
   return messages;
+}
+
+// ─── Thread agent: server-side tool loop, client_dispatch tools ───
+//
+// Sprint C entrypoint. Replaces the multi-iteration runAgent loop
+// with a single streamThreadMessage call. qlaud-edge runs the
+// model + tool-loop server-side; qcode just dispatches tool calls
+// for our 7 local tools (file ops, bash) when qlaud parks on the
+// per-thread Durable Object.
+//
+// Why split from runAgent instead of refactoring it: the two have
+// fundamentally different shapes — runAgent maintains history
+// client-side and re-sends it every turn; runThreadAgent sends
+// one turn and streams the entire multi-iteration response. Trying
+// to share the loop body makes both worse. App.tsx + ChatSurface
+// pick which one to use; the legacy runAgent stays around in
+// Sprint C-1 so we can flip the switch in C-2 without bleeding
+// regressions across the same commit.
+
+export type RunThreadAgentOpts = {
+  threadId: string;
+  model: string;
+  workspace: string | null;
+  /** New user turn — Anthropic content blocks (text, image, etc.). */
+  content: ContentBlock[];
+  mode?: 'agent' | 'plan';
+  /** When true, also pass tools_mode='dynamic' so qlaud injects the
+   *  4 meta-tools (qlaud_search_tools, etc.) for connector access. */
+  enableConnectors?: boolean;
+  signal?: AbortSignal;
+  onEvent: (e: AgentEvent) => void;
+  onApproval: (
+    toolUseId: string,
+    request: ApprovalRequest,
+  ) => Promise<ApprovalDecision>;
+};
+
+/** Anthropic-shape tool defs → the inline ClientToolDef the qlaud
+ *  /v1/threads/:id/messages endpoint expects in `client_tools`. */
+function toClientTools(tools: typeof ALL_TOOLS): ClientToolDef[] {
+  return tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.input_schema as Record<string, unknown>,
+  }));
+}
+
+export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
+  const planMode = opts.mode === 'plan';
+  const basePrompt = planMode ? SYSTEM_PROMPT_PLAN : SYSTEM_PROMPT_AGENT;
+  const memory = opts.workspace
+    ? await getProjectMemory(opts.workspace)
+    : null;
+  const systemPrompt = basePrompt + memorySystemSection(memory);
+  const clientTools = opts.workspace
+    ? toClientTools(planMode ? READ_TOOLS : ALL_TOOLS)
+    : [];
+
+  // Stash tool inputs as they stream in (onToolUse) so we have them
+  // when qlaud asks us to dispatch (onToolDispatchStart). Cleared on
+  // dispatch_done. tool_use_id is the join key — emitted on the
+  // tool_use content block AND the qlaud.tool_dispatch_* events.
+  type PendingToolUse = { name: string; input: unknown };
+  const pending = new Map<string, PendingToolUse>();
+
+  let totalInput = 0;
+  let totalOutput = 0;
+  let currentIteration = 1;
+
+  // The first turn always exists; iteration_start fires for #2+.
+  opts.onEvent({ type: 'turn_start', turn: 0 });
+
+  try {
+    await streamThreadMessage({
+      threadId: opts.threadId,
+      model: opts.model,
+      content: opts.content,
+      system: systemPrompt,
+      clientTools,
+      toolsMode: opts.enableConnectors ? 'dynamic' : undefined,
+      signal: opts.signal,
+      onTextDelta: (chunk) => opts.onEvent({ type: 'text', text: chunk }),
+      onToolUse: (block) => {
+        pending.set(block.id, { name: block.name, input: block.input });
+        opts.onEvent({
+          type: 'tool_call',
+          id: block.id,
+          name: block.name,
+          input: block.input,
+          status: 'running',
+        });
+      },
+      onMessageStart: (info) => {
+        if (info.inputTokens != null) totalInput += info.inputTokens;
+      },
+      onMessageStop: (info) => {
+        if (info.outputTokens != null) totalOutput += info.outputTokens;
+      },
+      onIterationStart: (info) => {
+        currentIteration = info.iteration;
+        opts.onEvent({ type: 'turn_start', turn: info.iteration - 1 });
+      },
+      onToolDispatchStart: async (info) => {
+        // Run the tool locally, then POST the result. Failures here
+        // (workspace missing, executor crash, network) get surfaced
+        // back to the parked dispatcher as is_error=true so the
+        // model can decide how to react.
+        if (!opts.workspace) {
+          await safeSubmit(opts.threadId, info.toolUseId, {
+            output:
+              'No workspace is open. The user must open a folder (⌘O) before file tools work.',
+            isError: true,
+          });
+          return;
+        }
+        const stash = pending.get(info.toolUseId);
+        if (!stash) {
+          // tool_use block came through but we lost it somehow — shouldn't
+          // happen given the SSE ordering, but better to surface than hang.
+          await safeSubmit(opts.threadId, info.toolUseId, {
+            output: `qcode lost the tool input for ${info.name}. Internal error; retry.`,
+            isError: true,
+          });
+          return;
+        }
+        const call: ToolCall = {
+          id: info.toolUseId,
+          name: stash.name,
+          input: stash.input,
+        };
+        try {
+          const result: ToolResult = await executeTool(call, {
+            workspace: opts.workspace,
+            requestApproval: async (req) => {
+              opts.onEvent({
+                type: 'approval_pending',
+                id: info.toolUseId,
+                request: req,
+              });
+              const decision = await opts.onApproval(info.toolUseId, req);
+              opts.onEvent({
+                type: 'approval_resolved',
+                id: info.toolUseId,
+                decision,
+              });
+              return decision;
+            },
+            onPartial: (partial) => {
+              opts.onEvent({
+                type: 'tool_progress',
+                id: info.toolUseId,
+                partial,
+              });
+            },
+          });
+          await safeSubmit(opts.threadId, info.toolUseId, {
+            output: result.content,
+            isError: !!result.is_error,
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'tool execution failed';
+          await safeSubmit(opts.threadId, info.toolUseId, {
+            output: msg,
+            isError: true,
+          });
+        }
+      },
+      onToolDispatchDone: (info) => {
+        pending.delete(info.toolUseId);
+        opts.onEvent({
+          type: 'tool_done',
+          id: info.toolUseId,
+          content:
+            typeof info.output === 'string'
+              ? info.output
+              : JSON.stringify(info.output),
+          isError: info.isError,
+        });
+      },
+      onQlaudError: (info) => {
+        opts.onEvent({ type: 'error', message: info.message });
+      },
+      onDone: (info) => {
+        opts.onEvent({
+          type: 'finished',
+          stopReason: info.hitMaxIterations ? 'max_loops' : 'end_turn',
+          turns: info.iterations,
+          usage: { inputTokens: totalInput, outputTokens: totalOutput },
+        });
+      },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'unknown';
+    opts.onEvent({ type: 'error', message: msg });
+  }
+
+  // Drop any leftover approval handles — covers abort mid-tool.
+  void currentIteration; // currently informational; UI may use later
+}
+
+/** Wrap submitToolResult so a network blip on the result-POST never
+ *  throws into the SSE event handler. The dispatcher times out at
+ *  60s on the qlaud side anyway — if we couldn't deliver, the
+ *  model will see a timeout error from qlaud's side, which is the
+ *  cleanest failure mode. */
+async function safeSubmit(
+  threadId: string,
+  toolUseId: string,
+  payload: { output: unknown; isError: boolean },
+): Promise<void> {
+  try {
+    await submitToolResult(threadId, toolUseId, payload);
+  } catch {
+    // Swallowed deliberately — see comment above.
+  }
 }

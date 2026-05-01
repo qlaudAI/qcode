@@ -12,7 +12,12 @@
 // stay O(1) per turn even when the user has hundreds of threads,
 // and a corrupted single thread doesn't take down the whole list.
 
-import type { Message } from './qlaud-client';
+import { getKey } from './auth';
+import type { ContentBlock, Message } from './qlaud-client';
+
+const BASE =
+  (import.meta.env.VITE_QLAUD_BASE as string | undefined) ??
+  'https://api.qlaud.ai';
 
 export type Thread = {
   id: string;
@@ -158,3 +163,181 @@ function deriveTitle(history: Message[]): string | null {
   }
   return null;
 }
+
+// ─── Remote thread API ─────────────────────────────────────────────
+//
+// Server-side thread storage at /v1/threads. qlaud owns the canonical
+// history; localStorage now only caches the summary list for the
+// sidebar (id, title, model, timestamps) so it can render before the
+// network round-trip lands. The remote always wins on conflict.
+
+export type RemoteThread = {
+  id: string;
+  end_user_id: string | null;
+  metadata: unknown;
+  created_at: number;
+  last_active_at: number;
+};
+
+export type RemoteThreadMessage = {
+  seq: number;
+  role: 'user' | 'assistant';
+  content: ContentBlock[] | string;
+  request_id: string | null;
+  created_at: number;
+};
+
+async function api<T>(
+  path: string,
+  init: RequestInit & { signal?: AbortSignal } = {},
+): Promise<T> {
+  const key = getKey();
+  if (!key) throw new Error('not_authed');
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers: {
+      'x-api-key': key,
+      'content-type': 'application/json',
+      ...(init.headers ?? {}),
+    },
+  });
+  if (res.status === 401) throw new Error('unauthorized');
+  if (res.status === 404) throw new Error('not_found');
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`upstream_${res.status}:${txt.slice(0, 200)}`);
+  }
+  return (await res.json()) as T;
+}
+
+/** Create a fresh thread on qlaud. Returns the canonical id qcode
+ *  will use for every subsequent message + tool-result POST on this
+ *  conversation. Optional metadata stays on the qlaud row — surfaced
+ *  back via getRemoteThread / listRemoteThreads. */
+export async function createRemoteThread(opts?: {
+  metadata?: Record<string, unknown>;
+}): Promise<RemoteThread> {
+  return api<RemoteThread>('/v1/threads', {
+    method: 'POST',
+    body: JSON.stringify({ metadata: opts?.metadata ?? null }),
+  });
+}
+
+/** Newest-first list of the caller's threads. Up to `limit` rows. */
+export async function listRemoteThreads(
+  limit = 20,
+  signal?: AbortSignal,
+): Promise<RemoteThread[]> {
+  const data = await api<{ data: RemoteThread[] }>(
+    `/v1/threads?limit=${limit}`,
+    { signal },
+  );
+  return data.data;
+}
+
+/** Soft-delete a thread on qlaud. Idempotent — already-deleted
+ *  rows return 404 which we map to a no-throw resolution so the
+ *  sidebar can prune optimistically without retry loops. */
+export async function deleteRemoteThread(id: string): Promise<void> {
+  try {
+    await api<unknown>(`/v1/threads/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  } catch (e) {
+    if (e instanceof Error && e.message === 'not_found') return;
+    throw e;
+  }
+}
+
+/** Load the conversation history for a thread, oldest-first. Returns
+ *  Anthropic-shape Messages so ChatSurface can re-render with the
+ *  same renderer it uses for live turns. Tool-result blocks pair
+ *  back with their tool_use blocks via tool_use_id (the model loop
+ *  already enforced that ordering). */
+export async function getRemoteThreadMessages(
+  id: string,
+  signal?: AbortSignal,
+): Promise<Message[]> {
+  const data = await api<{ data: RemoteThreadMessage[] }>(
+    `/v1/threads/${encodeURIComponent(id)}/messages?limit=200&order=asc`,
+    { signal },
+  );
+  return data.data.map((m) => ({
+    role: m.role,
+    content: normalizeContent(m.content),
+  }));
+}
+
+function normalizeContent(c: ContentBlock[] | string): ContentBlock[] {
+  if (typeof c === 'string') return [{ type: 'text', text: c }];
+  return c;
+}
+
+// ─── Sidebar summary cache (localStorage) ───────────────────────────
+//
+// qcode wants instant "list my threads" even before the network round-
+// trip lands, especially on cold app start. We cache the summary
+// fields locally and reconcile in the background. The remote `id`
+// is authoritative — we never invent ids on the client now that
+// qlaud generates them on POST /v1/threads.
+
+const SUMMARY_INDEX_KEY = 'qcode.threads.summaries.v2';
+
+export type RemoteThreadSummary = {
+  id: string;
+  title: string;
+  model: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export function loadCachedSummaries(): RemoteThreadSummary[] {
+  if (typeof localStorage === 'undefined') return [];
+  const raw = localStorage.getItem(SUMMARY_INDEX_KEY);
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? (v as RemoteThreadSummary[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveCachedSummaries(rows: RemoteThreadSummary[]): void {
+  if (typeof localStorage === 'undefined') return;
+  localStorage.setItem(SUMMARY_INDEX_KEY, JSON.stringify(rows));
+}
+
+/** Update one summary in the local cache. Used after the user sends
+ *  a turn (updates updatedAt + maybe the auto-derived title). */
+export function patchCachedSummary(
+  id: string,
+  patch: Partial<RemoteThreadSummary>,
+): RemoteThreadSummary[] {
+  const all = loadCachedSummaries();
+  const idx = all.findIndex((s) => s.id === id);
+  if (idx === -1) return all;
+  const next = { ...all[idx]!, ...patch };
+  const out = [next, ...all.filter((s) => s.id !== id)];
+  saveCachedSummaries(out);
+  return out;
+}
+
+/** Used when a remote thread is created or first observed locally —
+ *  prepends to the cache so the sidebar shows it immediately. */
+export function upsertCachedSummary(s: RemoteThreadSummary): RemoteThreadSummary[] {
+  const all = loadCachedSummaries().filter((x) => x.id !== s.id);
+  const out = [s, ...all];
+  saveCachedSummaries(out);
+  return out;
+}
+
+export function removeCachedSummary(id: string): RemoteThreadSummary[] {
+  const out = loadCachedSummaries().filter((s) => s.id !== id);
+  saveCachedSummaries(out);
+  return out;
+}
+
+/** Re-export deriveTitle for callers that need to seed a summary
+ *  from the user's first message. */
+export { deriveTitle };
