@@ -19,7 +19,18 @@ const BASE = (import.meta.env.VITE_QLAUD_BASE as string | undefined) ?? 'https:/
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+  | {
+      type: 'image';
+      source: {
+        type: 'base64';
+        /** image/png, image/jpeg, image/gif, image/webp. qlaud
+         *  passes this through to Claude/GPT/Gemini which all
+         *  speak the same multimodal shape via the gateway. */
+        media_type: string;
+        data: string;
+      };
+    };
 
 export type Message = {
   role: 'user' | 'assistant';

@@ -5,8 +5,14 @@ import { runAgent, type AgentEvent } from '../lib/agent';
 import { buildAttachmentContext } from '../lib/attachments';
 import { fetchBalance } from '../lib/billing';
 import { cn } from '../lib/cn';
+import {
+  imagesFromDrop,
+  imagesFromPaste,
+  readImageFile,
+  type AttachedImage,
+} from '../lib/images';
 import { MODELS } from '../lib/models';
-import type { Message } from '../lib/qlaud-client';
+import type { ContentBlock, Message } from '../lib/qlaud-client';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
 import {
   getCurrentWorkspace,
@@ -21,7 +27,7 @@ import { ToolCallCard, type ToolCallView } from './ToolCallCard';
 // agent loop emits a stream of events that `handleEvent` translates
 // into block mutations.
 type RenderBlock =
-  | { type: 'user_text'; text: string }
+  | { type: 'user_text'; text: string; images?: AttachedImage[] }
   | { type: 'assistant_text'; text: string }
   | { type: 'tool'; call: ToolCallView }
   | {
@@ -73,6 +79,7 @@ export function ChatSurface({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [attached, setAttached] = useState<string[]>([]);
+  const [images, setImages] = useState<AttachedImage[]>([]);
   const [files, setFiles] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -125,24 +132,21 @@ export function ChatSurface({
 
   async function send(text: string) {
     const userMsg = text.trim();
-    if (!userMsg || busy) return;
+    // Allow send when there are attachments even with empty text
+    // (e.g. dropping a screenshot with the implicit "what's wrong
+    // here?" intent). Block when nothing at all is queued.
+    if (!userMsg && images.length === 0 && attached.length === 0) return;
+    if (busy) return;
     setInput('');
     setError(null);
 
     const workspace = getCurrentWorkspace();
-    // If the user @-mentioned files, read them now and prepend a
-    // single context block before the user's actual question. We
-    // build this once-per-send instead of in the agent loop so the
-    // model sees stable files even if they change on disk later.
-    let modelText = userMsg;
+    let modelText = userMsg || 'Please look at the attached.';
     let displayText = userMsg;
     if (workspace && attached.length > 0) {
       const ctx = await buildAttachmentContext(workspace.path, attached);
       if (ctx.contextBlock) {
-        modelText = `${ctx.contextBlock}\n\n${userMsg}`;
-        // Don't dump the file contents in the rendered user bubble
-        // — show a compact "with N files" annotation instead so the
-        // chat stays scannable.
+        modelText = `${ctx.contextBlock}\n\n${modelText}`;
         const files = ctx.loaded.map((l) => l.path).join(', ');
         displayText =
           ctx.loaded.length > 0
@@ -152,12 +156,35 @@ export function ChatSurface({
       setAttached([]);
     }
 
+    // Build the model-side content blocks: image blocks first
+    // (Anthropic best practice — vision content before the text
+    // referring to it), then the text. Display-side bubble gets a
+    // thumbnail row + the user's prose underneath.
+    const userContent: ContentBlock[] = [];
+    for (const img of images) {
+      userContent.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: img.mediaType,
+          data: img.base64,
+        },
+      });
+    }
+    userContent.push({ type: 'text', text: modelText });
+
     const nextHistory: Message[] = [
       ...history,
-      { role: 'user', content: [{ type: 'text', text: modelText }] },
+      { role: 'user', content: userContent },
     ];
 
-    setBlocks((b) => [...b, { type: 'user_text', text: displayText }]);
+    const sentImages = images.length > 0 ? images : undefined;
+    setImages([]);
+
+    setBlocks((b) => [
+      ...b,
+      { type: 'user_text', text: displayText, images: sentImages },
+    ]);
     setBusy(true);
     abortRef.current = new AbortController();
 
@@ -273,12 +300,18 @@ export function ChatSurface({
         onStop={stop}
         busy={busy}
         attached={attached}
+        images={images}
         files={files}
         onLoadFiles={loadFiles}
         onAttach={(p) =>
           setAttached((prev) => (prev.includes(p) ? prev : [...prev, p]))
         }
         onDetach={(p) => setAttached((prev) => prev.filter((x) => x !== p))}
+        onAttachImage={(img) => setImages((prev) => [...prev, img])}
+        onDetachImage={(id) =>
+          setImages((prev) => prev.filter((x) => x.id !== id))
+        }
+        onImageError={(msg) => setError(msg)}
       />
     </div>
   );
@@ -398,7 +431,33 @@ function historyToBlocks(history: Message[]): RenderBlock[] {
         .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
         .map((b) => b.text)
         .join('\n');
-      if (text) blocks.push({ type: 'user_text', text });
+      // Reconstruct attached images from the persisted content
+      // blocks. Synthesize a fresh in-memory id (the original
+      // session's id wasn't persisted) and rebuild the data URL
+      // from media_type + base64.
+      const imgs: AttachedImage[] = [];
+      for (const block of msg.content) {
+        if (block.type !== 'image') continue;
+        const id =
+          'img_replay_' +
+          Math.random().toString(36).slice(2, 10) +
+          Date.now().toString(36);
+        imgs.push({
+          id,
+          name: 'attachment',
+          mediaType: block.source.media_type,
+          base64: block.source.data,
+          thumbUrl: `data:${block.source.media_type};base64,${block.source.data}`,
+          bytes: 0,
+        });
+      }
+      if (text || imgs.length > 0) {
+        blocks.push({
+          type: 'user_text',
+          text,
+          images: imgs.length > 0 ? imgs : undefined,
+        });
+      }
     } else {
       for (const block of msg.content) {
         if (block.type === 'text') {
@@ -453,8 +512,24 @@ function BlockRow({
   if (block.type === 'user_text') {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground shadow-sm">
-          <p className="whitespace-pre-wrap">{block.text}</p>
+        <div className="flex max-w-[80%] flex-col items-end gap-2">
+          {block.images && block.images.length > 0 && (
+            <div className="flex flex-wrap justify-end gap-1.5">
+              {block.images.map((img) => (
+                <img
+                  key={img.id}
+                  src={img.thumbUrl}
+                  alt={img.name}
+                  className="max-h-48 max-w-[180px] rounded-xl border border-border/40 object-cover shadow-sm"
+                />
+              ))}
+            </div>
+          )}
+          {block.text && (
+            <div className="rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground shadow-sm">
+              <p className="whitespace-pre-wrap">{block.text}</p>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -632,10 +707,14 @@ function Composer({
   onStop,
   busy,
   attached,
+  images,
   files,
   onLoadFiles,
   onAttach,
   onDetach,
+  onAttachImage,
+  onDetachImage,
+  onImageError,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -644,11 +723,42 @@ function Composer({
   onStop: () => void;
   busy: boolean;
   attached: string[];
+  images: AttachedImage[];
   files: string[];
   onLoadFiles: () => void;
   onAttach: (path: string) => void;
   onDetach: (path: string) => void;
+  onAttachImage: (img: AttachedImage) => void;
+  onDetachImage: (id: string) => void;
+  onImageError: (message: string) => void;
 }) {
+  const [dragging, setDragging] = useState(false);
+
+  async function ingestImageFiles(list: File[]) {
+    for (const f of list) {
+      const result = await readImageFile(f);
+      if ('reason' in result) {
+        onImageError(result.message);
+        return;
+      }
+      onAttachImage(result);
+    }
+  }
+
+  function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const list = imagesFromPaste(e.nativeEvent);
+    if (list.length === 0) return;
+    e.preventDefault();
+    void ingestImageFiles(list);
+  }
+
+  function onDrop(e: React.DragEvent) {
+    setDragging(false);
+    const list = imagesFromDrop(e.nativeEvent);
+    if (list.length === 0) return;
+    e.preventDefault();
+    void ingestImageFiles(list);
+  }
   // The mention-token at-or-before the cursor, or null when there's
   // no active @-mention. Tracked on every change.
   const [mention, setMention] = useState<{
@@ -757,13 +867,50 @@ function Composer({
             />
           )}
           <div
+            onDragEnter={(e) => {
+              e.preventDefault();
+              if (e.dataTransfer?.types?.includes('Files')) setDragging(true);
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+            }}
+            onDragLeave={(e) => {
+              if (e.currentTarget === e.target) setDragging(false);
+            }}
+            onDrop={onDrop}
             className={cn(
-              'rounded-2xl border border-border bg-background shadow-sm transition-shadow',
-              'focus-within:border-foreground/20 focus-within:shadow-md',
+              'rounded-2xl border bg-background shadow-sm transition-shadow',
+              'focus-within:shadow-md',
+              dragging
+                ? 'border-primary/40 ring-2 ring-primary/20'
+                : 'border-border focus-within:border-foreground/20',
             )}
           >
-            {attached.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 border-b border-border/40 px-3 py-2">
+            {(attached.length > 0 || images.length > 0) && (
+              <div className="flex flex-wrap items-center gap-1.5 border-b border-border/40 px-3 py-2">
+                {images.map((img) => (
+                  <span
+                    key={img.id}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-muted/60 p-0.5 pr-1 text-[11px]"
+                  >
+                    <img
+                      src={img.thumbUrl}
+                      alt={img.name}
+                      className="h-6 w-6 rounded-sm border border-border/40 object-cover"
+                    />
+                    <span className="max-w-[140px] truncate font-mono text-foreground/85">
+                      {img.name}
+                    </span>
+                    <button
+                      onClick={() => onDetachImage(img.id)}
+                      className="grid h-4 w-4 place-items-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                      aria-label={`Remove ${img.name}`}
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </span>
+                ))}
                 {attached.map((p) => (
                   <span
                     key={p}
@@ -786,6 +933,7 @@ function Composer({
               value={value}
               onChange={onTextChange}
               onKeyDown={onKeyDown}
+              onPaste={onPaste}
               onFocus={onLoadFiles}
               placeholder="Ask qcode about your code… type @ to attach a file"
               rows={2}
@@ -794,7 +942,9 @@ function Composer({
             />
             <div className="flex items-center justify-between border-t border-border/40 px-3 py-2">
               <span className="text-[11px] text-muted-foreground">
-                {modelLabel} · ⏎ to send · ⇧⏎ for newline · @ to attach
+                {dragging
+                  ? 'Drop image to attach'
+                  : `${modelLabel} · ⏎ to send · @ files · paste/drop images`}
               </span>
               {busy ? (
                 <button
@@ -808,7 +958,9 @@ function Composer({
               ) : (
                 <button
                   onClick={() => onSend(value)}
-                  disabled={!value.trim() && attached.length === 0}
+                  disabled={
+                    !value.trim() && attached.length === 0 && images.length === 0
+                  }
                   className="grid h-7 w-7 place-items-center rounded-md bg-primary text-primary-foreground transition-all hover:bg-primary/90 active:scale-95 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
                   aria-label="Send"
                 >
