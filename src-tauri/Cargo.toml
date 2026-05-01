@@ -1,11 +1,19 @@
 [package]
 name = "qcode"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 description = "qcode — multi-model coding agent powered by qlaud"
 authors = ["qlaud <support@qlaud.ai>"]
 license = "MIT"
 edition = "2021"
 rust-version = "1.77"
+
+# Tauri 2.x convention: lib.rs becomes the library `qcode_lib` and
+# main.rs is a thin shim that calls qcode_lib::run(). The mobile
+# build needs the cdylib/staticlib types; rlib is what the desktop
+# bin links against.
+[lib]
+name = "qcode_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
