@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Sparkles, Plus, ArrowUp, Settings, Wallet } from 'lucide-react';
+import { Sparkles, Plus, Settings, Wallet } from 'lucide-react';
 
-import { cn } from './lib/cn';
-import { DEFAULT_MODEL, MODELS } from './lib/models';
+import { DEFAULT_MODEL } from './lib/models';
 import {
   clearAuth,
   getKey,
@@ -10,6 +9,8 @@ import {
   startSignIn,
   type Profile,
 } from './lib/auth';
+import { startDeepLinkListener } from './lib/deep-link';
+import { ChatSurface } from './ui/ChatSurface';
 import { ModelPicker } from './ui/ModelPicker';
 import { SignInGate } from './ui/SignInGate';
 
@@ -18,8 +19,22 @@ export function App() {
   const [profile, setProfile] = useState<Profile | null>(() => getProfile());
   const [model, setModel] = useState<string>(DEFAULT_MODEL);
 
-  // Watch storage events so the deep-link callback (writes to local
-  // storage from a sibling window/process) flips us into authed state.
+  // Tauri deep-link listener. When the qlaud sign-in page redirects
+  // back to qcode://auth?k=…, the host emits an event that we
+  // capture here, persist to localStorage, and flip into authed.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    startDeepLinkListener(() => {
+      setAuthed(true);
+      setProfile(getProfile());
+    }).then((u) => {
+      unlisten = u;
+    });
+    return () => unlisten?.();
+  }, []);
+
+  // Cross-window storage sync: useful in vite-dev mode when the
+  // sign-in callback lands in a sibling tab.
   useEffect(() => {
     function onStorage() {
       setAuthed(Boolean(getKey()));
@@ -72,7 +87,6 @@ function Titlebar({
   return (
     <header className="titlebar flex h-11 items-center justify-between border-b border-border/60 px-3">
       <div className="flex items-center gap-2 pl-16">
-        {/* The pl-16 leaves room for macOS traffic-light buttons. */}
         <div className="grid h-5 w-5 place-items-center rounded bg-primary text-primary-foreground">
           <Sparkles className="h-3 w-3" />
         </div>
@@ -112,7 +126,7 @@ function SpendBar({ profile }: { profile: Profile | null }) {
   );
 }
 
-// ─── Sidebar (thread switcher) ─────────────────────────────────────
+// ─── Sidebar (thread switcher, stub) ───────────────────────────────
 
 function Sidebar() {
   return (
@@ -131,113 +145,14 @@ function Sidebar() {
         <div className="px-2 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
           Recent
         </div>
-        <div className="mt-2 space-y-1">
-          {[].map((_t, i) => (
-            <button
-              key={i}
-              className="block w-full truncate rounded px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-            />
-          ))}
-          <p className="px-2 py-3 text-xs text-muted-foreground">
-            No conversations yet.
-          </p>
-        </div>
+        <p className="mt-2 px-2 py-3 text-xs text-muted-foreground">
+          No conversations yet.
+        </p>
       </div>
 
       <div className="border-t border-border/60 px-3 py-2 text-[10px] text-muted-foreground">
         v0.1.0-alpha · powered by qlaud
       </div>
     </aside>
-  );
-}
-
-// ─── Chat surface ──────────────────────────────────────────────────
-
-function ChatSurface({ model }: { model: string }) {
-  const m = MODELS.find((x) => x.slug === model);
-  const [input, setInput] = useState('');
-
-  return (
-    <div className="flex flex-1 flex-col">
-      <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
-        <div className="grid h-12 w-12 place-items-center rounded-2xl bg-primary/10 text-primary">
-          <Sparkles className="h-5 w-5" />
-        </div>
-        <h2 className="mt-6 text-2xl font-semibold tracking-tight">
-          What should we build?
-        </h2>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Connected to{' '}
-          <span className="font-medium text-foreground">
-            {m?.label ?? model}
-          </span>
-          {' · '}
-          {m?.provider}
-        </p>
-
-        <div className="mt-10 grid w-full max-w-2xl gap-2 text-left">
-          {[
-            'Open the qcode repo and explain the agentic loop',
-            'Refactor the auth flow into a hook',
-            'Find and fix any flaky tests',
-            'Run the test suite and triage failures',
-          ].map((s) => (
-            <button
-              key={s}
-              onClick={() => setInput(s)}
-              className="rounded-lg border border-border bg-background px-4 py-3 text-sm text-muted-foreground transition-colors hover:border-foreground/20 hover:text-foreground"
-            >
-              {s}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <Composer value={input} onChange={setInput} model={model} />
-    </div>
-  );
-}
-
-function Composer({
-  value,
-  onChange,
-  model,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  model: string;
-}) {
-  const m = MODELS.find((x) => x.slug === model);
-  return (
-    <div className="border-t border-border/60 px-4 py-4">
-      <div className="mx-auto max-w-3xl">
-        <div
-          className={cn(
-            'rounded-2xl border border-border bg-background shadow-sm transition-shadow',
-            'focus-within:border-foreground/20 focus-within:shadow-md',
-          )}
-        >
-          <textarea
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder="Describe what you want to build…"
-            rows={2}
-            className="block w-full resize-none rounded-2xl bg-transparent px-4 py-3 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground"
-          />
-          <div className="flex items-center justify-between border-t border-border/40 px-3 py-2">
-            <span className="text-[11px] text-muted-foreground">
-              {m?.label ?? model} · ⌘↵ to send
-            </span>
-            <button
-              disabled={!value.trim()}
-              className="grid h-7 w-7 place-items-center rounded-md bg-primary text-primary-foreground transition-all hover:bg-primary/90 active:scale-95 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
-              aria-label="Send"
-            >
-              <ArrowUp className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
   );
 }
