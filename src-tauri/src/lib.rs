@@ -1,4 +1,6 @@
-// qcode Tauri host. Phase 1 surface:
+// qcode Tauri host. The Rust side stays deliberately thin —
+// everything user-visible lives in the webview, and the host only
+// exists to do what JS can't:
 //
 //   - Boot the webview window with native chrome polish (vibrancy on
 //     macOS, acrylic blur on Windows, plain on Linux).
@@ -11,9 +13,9 @@
 //     the qlaud key never lives in the webview's localStorage.
 //   - Plugin wiring: shell, fs, dialog, os, updater, deep-link.
 //
-// Phase 1 wrap-up will add:
-//   - Sidecar opencode subprocess + IPC bridge
-//   - Auto-updater backend at qlaud.ai/qcode/release-channels/...
+// All the agent loop, tool execution, streaming, diff/approval flow,
+// and UI rendering happens in src/. The Rust binary is the chrome,
+// not the brain.
 
 mod menu;
 mod secret;
