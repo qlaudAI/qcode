@@ -4,6 +4,7 @@
 // Tauri's fs plugin on demand; we don't cache them here.
 
 import { killBashSession } from './bash-session';
+import { probeEnv } from './env-probe';
 import { buildMatcher, type IgnoreMatcher } from './gitignore';
 import { getProjectMemory } from './memory';
 import { isTauri, pickFolder } from './tauri';
@@ -76,10 +77,14 @@ export async function openFolderPicker(): Promise<Workspace | null> {
   const name = path.split(/[/\\]/).filter(Boolean).pop() ?? path;
   const w = { path, name };
   setCurrentWorkspace(w);
-  // Pre-warm the matcher and project memory so the first walk +
-  // first agent turn don't pay extra fs round-trips.
+  // Pre-warm the matcher, project memory, and environment probe so
+  // the first walk + first agent turn don't pay extra round-trips.
+  // probeEnv runs `node --version` etc. through the persistent shell
+  // which spawns lazily — kicking it off now lets the bash session
+  // come up while the user is still typing.
   void getMatcher(path);
   void getProjectMemory(path);
+  void probeEnv(path);
   return w;
 }
 

@@ -12,6 +12,7 @@
 //      when the user clicks Allow or Reject
 //   4. Executor runs (or skips) based on the decision
 
+import { envSystemSection, probeEnv } from './env-probe';
 import { getProjectMemory, memorySystemSection } from './memory';
 import {
   streamMessage,
@@ -362,10 +363,17 @@ function toClientTools(tools: typeof ALL_TOOLS): ClientToolDef[] {
 export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
   const planMode = opts.mode === 'plan';
   const basePrompt = planMode ? SYSTEM_PROMPT_PLAN : SYSTEM_PROMPT_AGENT;
-  const memory = opts.workspace
-    ? await getProjectMemory(opts.workspace)
-    : null;
-  const systemPrompt = basePrompt + memorySystemSection(memory);
+  // Memory + env probe pulled in parallel — they're both cached so
+  // hot turns pay nothing here, and on a cold workspace the two
+  // round-trips happen at the same time instead of sequentially.
+  const [memory, env] = opts.workspace
+    ? await Promise.all([
+        getProjectMemory(opts.workspace),
+        probeEnv(opts.workspace),
+      ])
+    : [null, null];
+  const systemPrompt =
+    basePrompt + memorySystemSection(memory) + envSystemSection(env);
   // Subagent runs strip `task` from the tool list (depth-1 cap)
   // and stick to read-only tools when the parent is in plan mode
   // — the subagent inherits the parent's safety posture.
