@@ -1,14 +1,19 @@
-import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, Sparkles, Square } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowUp, FileText, Sparkles, Square, X } from 'lucide-react';
 
+import { runAgent, type AgentEvent } from '../lib/agent';
+import { buildAttachmentContext } from '../lib/attachments';
 import { cn } from '../lib/cn';
 import { MODELS } from '../lib/models';
-import { runAgent, type AgentEvent } from '../lib/agent';
 import type { Message } from '../lib/qlaud-client';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
-import { getCurrentWorkspace } from '../lib/workspace';
+import {
+  getCurrentWorkspace,
+  listAllFiles,
+} from '../lib/workspace';
 import { ApprovalCard } from './ApprovalCard';
 import { Markdown } from './Markdown';
+import { MentionMenu, getMentionResults } from './MentionMenu';
 import { ToolCallCard, type ToolCallView } from './ToolCallCard';
 
 // Each "block" rendered in the chat is the smallest UI unit:
@@ -56,9 +61,25 @@ export function ChatSurface({
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [attached, setAttached] = useState<string[]>([]);
+  const [files, setFiles] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const approvalsRef = useRef<Map<string, PendingResolver>>(new Map());
+
+  // Lazy-load the workspace file index on first focus into the
+  // composer. Cheaper than indexing on mount when the user might
+  // never @-mention; still fast enough that the first '@' has the
+  // list ready.
+  const loadFiles = useMemo(
+    () => () => {
+      if (files.length > 0) return;
+      const ws = getCurrentWorkspace();
+      if (!ws) return;
+      void listAllFiles(ws.path).then(setFiles);
+    },
+    [files.length],
+  );
 
   // Auto-scroll to bottom on any block change.
   useEffect(() => {
@@ -98,12 +119,34 @@ export function ChatSurface({
     setError(null);
 
     const workspace = getCurrentWorkspace();
+    // If the user @-mentioned files, read them now and prepend a
+    // single context block before the user's actual question. We
+    // build this once-per-send instead of in the agent loop so the
+    // model sees stable files even if they change on disk later.
+    let modelText = userMsg;
+    let displayText = userMsg;
+    if (workspace && attached.length > 0) {
+      const ctx = await buildAttachmentContext(workspace.path, attached);
+      if (ctx.contextBlock) {
+        modelText = `${ctx.contextBlock}\n\n${userMsg}`;
+        // Don't dump the file contents in the rendered user bubble
+        // — show a compact "with N files" annotation instead so the
+        // chat stays scannable.
+        const files = ctx.loaded.map((l) => l.path).join(', ');
+        displayText =
+          ctx.loaded.length > 0
+            ? `${userMsg}\n\n_with ${ctx.loaded.length} file${ctx.loaded.length === 1 ? '' : 's'}: ${files}_`
+            : userMsg;
+      }
+      setAttached([]);
+    }
+
     const nextHistory: Message[] = [
       ...history,
-      { role: 'user', content: [{ type: 'text', text: userMsg }] },
+      { role: 'user', content: [{ type: 'text', text: modelText }] },
     ];
 
-    setBlocks((b) => [...b, { type: 'user_text', text: userMsg }]);
+    setBlocks((b) => [...b, { type: 'user_text', text: displayText }]);
     setBusy(true);
     abortRef.current = new AbortController();
 
@@ -185,6 +228,13 @@ export function ChatSurface({
         onSend={send}
         onStop={stop}
         busy={busy}
+        attached={attached}
+        files={files}
+        onLoadFiles={loadFiles}
+        onAttach={(p) =>
+          setAttached((prev) => (prev.includes(p) ? prev : [...prev, p]))
+        }
+        onDetach={(p) => setAttached((prev) => prev.filter((x) => x !== p))}
       />
     </div>
   );
@@ -474,6 +524,11 @@ function Composer({
   onSend,
   onStop,
   busy,
+  attached,
+  files,
+  onLoadFiles,
+  onAttach,
+  onDetach,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -481,54 +536,179 @@ function Composer({
   onSend: (v: string) => void;
   onStop: () => void;
   busy: boolean;
+  attached: string[];
+  files: string[];
+  onLoadFiles: () => void;
+  onAttach: (path: string) => void;
+  onDetach: (path: string) => void;
 }) {
+  // The mention-token at-or-before the cursor, or null when there's
+  // no active @-mention. Tracked on every change.
+  const [mention, setMention] = useState<{
+    query: string;
+    /** Char index of the leading '@' so we can replace it on pick. */
+    start: number;
+  } | null>(null);
+  const [mentionActive, setMentionActive] = useState(0);
+
+  function findMention(text: string, caret: number): typeof mention {
+    // Walk backwards from the caret looking for the most recent '@'.
+    // Bail if we cross whitespace (mentions don't span words) or hit
+    // 32 chars without finding one.
+    let i = caret - 1;
+    let bound = Math.max(0, caret - 64);
+    while (i >= bound) {
+      const ch = text[i] ?? '';
+      if (ch === '@') {
+        const before = text[i - 1] ?? ' ';
+        // '@' must be at start-of-string or after whitespace.
+        if (before === ' ' || before === '\n' || before === '' || i === 0) {
+          return { query: text.slice(i + 1, caret), start: i };
+        }
+        return null;
+      }
+      if (ch === ' ' || ch === '\n') return null;
+      i--;
+    }
+    return null;
+  }
+
+  function onTextChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    const next = e.target.value;
+    onChange(next);
+    const caret = e.target.selectionStart ?? next.length;
+    const m = findMention(next, caret);
+    setMention(m);
+    setMentionActive(0);
+    if (m) onLoadFiles();
+  }
+
+  function pickMention(path: string) {
+    if (!mention) return;
+    const before = value.slice(0, mention.start);
+    const after = value.slice(mention.start + 1 + mention.query.length);
+    // Replace `@query` with `` (empty) — the file goes in the chip
+    // tray instead of the input. Less visual noise.
+    const next = before + after;
+    onChange(next);
+    setMention(null);
+    onAttach(path);
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Mention nav: arrows + Enter consumed if menu is showing.
+    if (mention) {
+      const results = getMentionResults(files, mention.query);
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMention(null);
+        return;
+      }
+      if (results.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setMentionActive((a) => Math.min(results.length - 1, a + 1));
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setMentionActive((a) => Math.max(0, a - 1));
+          return;
+        }
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          const pick = results[mentionActive] ?? results[0];
+          if (pick) pickMention(pick);
+          return;
+        }
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          const pick = results[mentionActive] ?? results[0];
+          if (pick) pickMention(pick);
+          return;
+        }
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       onSend(value);
     }
   }
+
   return (
     <div className="border-t border-border/40 bg-background/70 px-4 py-4 backdrop-blur-md">
       <div className="mx-auto max-w-3xl">
-        <div
-          className={cn(
-            'rounded-2xl border border-border bg-background shadow-sm transition-shadow',
-            'focus-within:border-foreground/20 focus-within:shadow-md',
+        <div className="relative">
+          {mention && (
+            <MentionMenu
+              files={files}
+              query={mention.query}
+              active={mentionActive}
+              onPick={pickMention}
+              onHover={setMentionActive}
+            />
           )}
-        >
-          <textarea
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="Ask qcode about your code…"
-            rows={2}
-            disabled={busy}
-            className="block w-full resize-none rounded-2xl bg-transparent px-4 py-3 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60"
-          />
-          <div className="flex items-center justify-between border-t border-border/40 px-3 py-2">
-            <span className="text-[11px] text-muted-foreground">
-              {modelLabel} · ⏎ to send · ⇧⏎ for newline
-            </span>
-            {busy ? (
-              <button
-                onClick={onStop}
-                className="grid h-7 w-7 place-items-center rounded-md border border-border bg-background text-foreground/70 transition-colors hover:border-foreground/30 hover:text-foreground"
-                aria-label="Stop"
-                title="Stop"
-              >
-                <Square className="h-3 w-3 fill-current" />
-              </button>
-            ) : (
-              <button
-                onClick={() => onSend(value)}
-                disabled={!value.trim()}
-                className="grid h-7 w-7 place-items-center rounded-md bg-primary text-primary-foreground transition-all hover:bg-primary/90 active:scale-95 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
-                aria-label="Send"
-              >
-                <ArrowUp className="h-3.5 w-3.5" />
-              </button>
+          <div
+            className={cn(
+              'rounded-2xl border border-border bg-background shadow-sm transition-shadow',
+              'focus-within:border-foreground/20 focus-within:shadow-md',
             )}
+          >
+            {attached.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 border-b border-border/40 px-3 py-2">
+                {attached.map((p) => (
+                  <span
+                    key={p}
+                    className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/60 py-0.5 pl-1.5 pr-1 text-[11px]"
+                  >
+                    <FileText className="h-3 w-3 text-muted-foreground" />
+                    <span className="font-mono text-foreground/85">{p}</span>
+                    <button
+                      onClick={() => onDetach(p)}
+                      className="grid h-4 w-4 place-items-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                      aria-label={`Remove ${p}`}
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <textarea
+              value={value}
+              onChange={onTextChange}
+              onKeyDown={onKeyDown}
+              onFocus={onLoadFiles}
+              placeholder="Ask qcode about your code… type @ to attach a file"
+              rows={2}
+              disabled={busy}
+              className="block w-full resize-none rounded-2xl bg-transparent px-4 py-3 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60"
+            />
+            <div className="flex items-center justify-between border-t border-border/40 px-3 py-2">
+              <span className="text-[11px] text-muted-foreground">
+                {modelLabel} · ⏎ to send · ⇧⏎ for newline · @ to attach
+              </span>
+              {busy ? (
+                <button
+                  onClick={onStop}
+                  className="grid h-7 w-7 place-items-center rounded-md border border-border bg-background text-foreground/70 transition-colors hover:border-foreground/30 hover:text-foreground"
+                  aria-label="Stop"
+                  title="Stop"
+                >
+                  <Square className="h-3 w-3 fill-current" />
+                </button>
+              ) : (
+                <button
+                  onClick={() => onSend(value)}
+                  disabled={!value.trim() && attached.length === 0}
+                  className="grid h-7 w-7 place-items-center rounded-md bg-primary text-primary-foreground transition-all hover:bg-primary/90 active:scale-95 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+                  aria-label="Send"
+                >
+                  <ArrowUp className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
