@@ -1,0 +1,23 @@
+# Build outputs
+node_modules
+dist
+.DS_Store
+*.log
+
+# Rust / Tauri
+src-tauri/target
+src-tauri/Cargo.lock
+src-tauri/gen
+src-tauri/WixTools
+
+# Editor / OS
+.idea
+.vscode/*
+!.vscode/extensions.json
+.env
+.env.local
+.env*.local
+
+# Tauri signing
+*.pem
+*.key

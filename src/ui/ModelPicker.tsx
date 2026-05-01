@@ -1,0 +1,103 @@
+import { useState } from 'react';
+import { ChevronDown, Check } from 'lucide-react';
+
+import { cn } from '../lib/cn';
+import { MODELS } from '../lib/models';
+
+export function ModelPicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (slug: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const current = MODELS.find((m) => m.slug === value) ?? MODELS[0];
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 rounded border border-border/60 bg-background px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:border-foreground/30"
+      >
+        <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-primary">
+          {current.provider}
+        </span>
+        <span>{current.label}</span>
+        <ChevronDown className="h-3 w-3 text-muted-foreground" />
+      </button>
+
+      {open && (
+        <>
+          <div
+            className="fixed inset-0 z-30"
+            onClick={() => setOpen(false)}
+            aria-hidden
+          />
+          <ul
+            role="listbox"
+            className="absolute right-0 z-40 mt-1.5 max-h-96 w-80 overflow-y-auto rounded-lg border border-border bg-background shadow-lg"
+          >
+            {GROUPED_PROVIDERS.map((group) => (
+              <li key={group.provider}>
+                <div className="sticky top-0 z-10 border-b border-border/40 bg-muted/40 px-3 py-1.5 text-[10px] font-medium uppercase tracking-widest text-muted-foreground backdrop-blur">
+                  {group.provider}
+                </div>
+                <ul>
+                  {group.models.map((m) => (
+                    <li key={m.slug}>
+                      <button
+                        role="option"
+                        aria-selected={m.slug === value}
+                        onClick={() => {
+                          onChange(m.slug);
+                          setOpen(false);
+                        }}
+                        className={cn(
+                          'flex w-full items-start gap-2 px-3 py-2 text-left transition-colors hover:bg-muted',
+                          m.slug === value && 'bg-muted/60',
+                        )}
+                      >
+                        <Check
+                          className={cn(
+                            'mt-0.5 h-3.5 w-3.5 shrink-0',
+                            m.slug === value ? 'text-primary' : 'opacity-0',
+                          )}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="text-xs font-medium">
+                              {m.label}
+                            </span>
+                            <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+                              {m.tier}
+                            </span>
+                          </div>
+                          <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+                            {m.blurb}
+                          </p>
+                        </div>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
+const GROUPED_PROVIDERS = (() => {
+  const map = new Map<string, typeof MODELS>();
+  for (const m of MODELS) {
+    if (!map.has(m.provider)) map.set(m.provider, []);
+    map.get(m.provider)!.push(m);
+  }
+  return Array.from(map.entries()).map(([provider, models]) => ({
+    provider,
+    models,
+  }));
+})();

@@ -1,0 +1,97 @@
+name: release
+
+# Skeleton workflow — fires on a v* tag, builds Mac (arm64 + x86_64),
+# Windows (x86_64), and Linux (x86_64). Code signing is wired but
+# REQUIRES the secrets listed at the bottom of this file before it
+# will produce a fully-signed release. Until those secrets exist the
+# workflow ships unsigned dev artifacts (good enough for alpha).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            arch: arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            arch: x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            arch: x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            arch: x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 10
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Build Tauri release
+        env:
+          # Mac signing secrets (set in repo settings):
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Tauri updater (set after running `pnpm tauri signer generate`):
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build --target ${{ matrix.target }}
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
+
+# Required secrets:
+#   APPLE_CERTIFICATE                — base64 .p12 from Apple Developer
+#   APPLE_CERTIFICATE_PASSWORD       — password used when exporting
+#   APPLE_SIGNING_IDENTITY           — "Developer ID Application: ..."
+#   APPLE_ID                         — Apple ID for notarization
+#   APPLE_PASSWORD                   — app-specific password
+#   APPLE_TEAM_ID                    — 10-char Apple team identifier
+#   TAURI_SIGNING_PRIVATE_KEY        — generated with `pnpm tauri signer generate`
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD
