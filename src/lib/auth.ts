@@ -1,18 +1,32 @@
-// Minimal auth state. Tauri-less by design so the same code can run in
-// `vite dev` (browser) for UI iteration and in the packaged app.
+// Auth state. In the packaged Tauri app, the qlaud key lives in the
+// OS-native keychain (Apple Keychain / Windows Credential Manager /
+// libsecret) via Rust commands defined in src-tauri/src/secret.rs.
+// In vite-dev (no Tauri host) we fall back to localStorage so the UI
+// stays iterable without the desktop shell.
 //
-// On the packaged app the qlaud API key lives in the OS keychain via
-// the @tauri-apps/api keyring (added later); here we use localStorage
-// as the fallback for browser-mode dev.
+// Profile (email, balance) stays in localStorage either way — it's
+// non-sensitive and we don't want to round-trip the keychain on every
+// render.
 //
-// Auth flow (Phase 1):
+// Auth flow:
 //   1. User clicks "Sign in with qlaud" → opens https://qlaud.ai/cli-auth
 //   2. qlaud.ai mints a CLI key, deep-links back to qcode://auth?k=...
 //   3. Tauri's deep-link plugin captures the URL → posts the key into
 //      this module → it's persisted to keychain.
 
-const KEY_STORAGE = 'qcode.qlaud_key';
+import { invoke, isTauri, openExternal } from './tauri';
+
+const SERVICE = 'ai.qlaud.qcode';
+const ACCOUNT = 'qlaud_key';
 const PROFILE_STORAGE = 'qcode.profile';
+// Browser-mode fallback only. Never read this in the packaged app.
+const FALLBACK_STORAGE = 'qcode.qlaud_key';
+
+// Keychain reads are async, but the rest of the app expects a sync
+// snapshot for React's initial render. We hydrate this cache once at
+// startup via hydrateAuth() and keep it in sync on writes.
+let cachedKey: string | null = null;
+let hydrated = false;
 
 export type Profile = {
   email: string;
@@ -20,17 +34,55 @@ export type Profile = {
   balance_usd?: number;
 };
 
+/** Block on the first keychain read so React's initial render can
+ *  decide whether to show the sign-in gate. Idempotent. */
+export async function hydrateAuth(): Promise<void> {
+  if (hydrated) return;
+  hydrated = true;
+  if (isTauri()) {
+    try {
+      const v = await invoke<string | null>('secret_get', {
+        service: SERVICE,
+        account: ACCOUNT,
+      });
+      cachedKey = typeof v === 'string' ? v : null;
+    } catch {
+      cachedKey = null;
+    }
+  } else {
+    cachedKey = localStorage.getItem(FALLBACK_STORAGE);
+  }
+}
+
 export function getKey(): string | null {
-  if (typeof localStorage === 'undefined') return null;
-  return localStorage.getItem(KEY_STORAGE);
+  return cachedKey;
 }
 
-export function setKey(k: string): void {
-  localStorage.setItem(KEY_STORAGE, k);
+export async function setKey(k: string): Promise<void> {
+  cachedKey = k;
+  if (isTauri()) {
+    await invoke('secret_set', {
+      service: SERVICE,
+      account: ACCOUNT,
+      value: k,
+    });
+  } else {
+    localStorage.setItem(FALLBACK_STORAGE, k);
+  }
 }
 
-export function clearAuth(): void {
-  localStorage.removeItem(KEY_STORAGE);
+export async function clearAuth(): Promise<void> {
+  cachedKey = null;
+  if (isTauri()) {
+    try {
+      await invoke('secret_del', { service: SERVICE, account: ACCOUNT });
+    } catch {
+      // Sign-out shouldn't fail loudly if the keychain entry was
+      // already gone.
+    }
+  } else {
+    localStorage.removeItem(FALLBACK_STORAGE);
+  }
   localStorage.removeItem(PROFILE_STORAGE);
 }
 
@@ -49,15 +101,9 @@ export function setProfile(p: Profile): void {
   localStorage.setItem(PROFILE_STORAGE, JSON.stringify(p));
 }
 
-/** Open the qlaud CLI-auth flow. Tauri-mode opens via plugin-shell;
- *  browser-mode opens a new tab. */
+/** Open the qlaud CLI-auth flow in the user's browser. */
 export async function startSignIn(): Promise<void> {
-  const cbScheme = 'qcode://auth';
-  const url = `https://qlaud.ai/cli-auth?cb=${encodeURIComponent(cbScheme)}&app=qcode`;
-  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-    const { open } = await import('@tauri-apps/plugin-shell');
-    await open(url);
-  } else {
-    window.open(url, '_blank', 'noopener,noreferrer');
-  }
+  const cb = 'qcode://auth';
+  const url = `https://qlaud.ai/cli-auth?cb=${encodeURIComponent(cb)}&app=qcode`;
+  await openExternal(url);
 }

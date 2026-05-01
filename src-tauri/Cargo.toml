@@ -11,13 +11,23 @@ rust-version = "1.77"
 tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
-tauri = { version = "2.1", features = [] }
+tauri = { version = "2.1", features = ["macos-private-api"] }
 tauri-plugin-deep-link = "2.0"
 tauri-plugin-dialog = "2.0"
 tauri-plugin-fs = "2.0"
 tauri-plugin-os = "2.0"
 tauri-plugin-shell = "2.0"
 tauri-plugin-updater = "2.0"
+# OS-native credential storage. Uses Apple Keychain on macOS,
+# Credential Manager on Windows, libsecret/Secret Service on Linux.
+# Single API; the right backend is picked per platform at compile time.
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }
+# macOS vibrancy + Windows acrylic blur for the title bar. No-op on Linux.
+window-vibrancy = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

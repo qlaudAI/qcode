@@ -9,11 +9,18 @@
     text-rendering: optimizeLegibility;
   }
   body {
-    @apply bg-background text-foreground font-sans;
+    @apply text-foreground font-sans;
+    /* Transparent body so OS-native vibrancy/acrylic shows through.
+     * Surfaces that need solid backgrounds (chat bubbles, composer,
+     * sidebar inner) paint their own. */
+    background: rgba(255, 255, 255, 0.6);
     overflow: hidden;
-    /* Tauri title-bar drag region. We layer this on the chrome only. */
     -webkit-user-select: none;
     user-select: none;
+  }
+  /* Browser-mode (vite dev, no Tauri vibrancy backdrop). */
+  html:not([data-tauri='1']) body {
+    background: hsl(0 0% 100%);
   }
   input,
   textarea,

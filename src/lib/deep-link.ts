@@ -25,21 +25,21 @@ export async function startDeepLinkListener(
 
   const { listen } = await import('@tauri-apps/api/event');
 
-  const unlisten = await listen<DeepLinkPayload>('qcode://deep-link', (event) => {
+  const unlisten = await listen<DeepLinkPayload>('qcode://deep-link', async (event) => {
     for (const url of event.payload ?? []) {
-      const handled = handleAuthUrl(url);
+      const handled = await handleAuthUrl(url);
       if (handled) onAuth();
     }
   });
 
-  // Also catch the cold-start case: macOS hands the launch URL to the
-  // app at boot. Tauri's deep-link plugin exposes it via getCurrent().
+  // Cold-start: macOS hands the launch URL to the app at boot.
+  // Tauri's deep-link plugin exposes it via getCurrent().
   try {
     const dl = await import('@tauri-apps/plugin-deep-link');
     const initial = await dl.getCurrent();
     if (initial) {
       for (const url of initial) {
-        const handled = handleAuthUrl(url.toString());
+        const handled = await handleAuthUrl(url.toString());
         if (handled) onAuth();
       }
     }
@@ -50,7 +50,7 @@ export async function startDeepLinkListener(
   return unlisten;
 }
 
-function handleAuthUrl(rawUrl: string): boolean {
+async function handleAuthUrl(rawUrl: string): Promise<boolean> {
   if (!rawUrl.startsWith('qcode://auth')) return false;
   let url: URL;
   try {
@@ -62,6 +62,6 @@ function handleAuthUrl(rawUrl: string): boolean {
   if (!k) return false;
   // The qlaud /cli-auth page URL-encodes the key; decode it before
   // persisting so it matches the format every other consumer expects.
-  setKey(decodeURIComponent(k));
+  await setKey(decodeURIComponent(k));
   return true;
 }
