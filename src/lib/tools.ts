@@ -239,7 +239,15 @@ export const WRITE_TOOLS: ToolDef[] = [
   },
 ];
 
-export const ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS];
+export const ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS, TASK_TOOL];
+
+/** Subagent-mode tool list. The child agent gets every tool the
+ *  parent has EXCEPT `task` itself — recursive subagent spawning
+ *  is too easy a footgun (cost runaway, confused-deputy patterns)
+ *  and we have a depth-1 cap baked in by simply not exposing the
+ *  tool. Read-mode subagents drop write tools too, mirroring Plan. */
+export const SUBAGENT_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS];
+export const SUBAGENT_READ_TOOLS = [...READ_TOOLS];
 
 // ─── Executor ───────────────────────────────────────────────────────
 

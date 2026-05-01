@@ -72,6 +72,16 @@ type RenderBlock =
        *  once the user has retried (or sent a new turn) so we don't
        *  show a stale Retry. */
       retry: { text: string; images: AttachedImage[]; attached: string[] } | null;
+    }
+  | {
+      type: 'subagent';
+      /** Tool-use id of the parent's `task` call that spawned this. */
+      parentToolUseId: string;
+      /** User-facing description from the parent's task input. */
+      description: string;
+      status: 'running' | 'done' | 'error';
+      /** Final text the subagent returned. Populated on subagent_done. */
+      summary: string | null;
     };
 
 // Pending approval resolvers, keyed by tool_use id. The agent loop
@@ -560,12 +570,44 @@ function handleEvent(
             : b,
         );
 
+      case 'subagent_start':
+        return [
+          ...blocks,
+          {
+            type: 'subagent',
+            parentToolUseId: e.parentToolUseId,
+            description: e.description,
+            status: 'running',
+            summary: null,
+          },
+        ];
+
+      case 'subagent_done':
+        return blocks.map((b) =>
+          b.type === 'subagent' && b.parentToolUseId === e.parentToolUseId
+            ? {
+                ...b,
+                status: e.isError ? 'error' : 'done',
+                summary: e.summary,
+              }
+            : b,
+        );
+
       case 'finished':
       case 'error':
       default:
         return blocks;
     }
   });
+
+  // subagent_event lives outside the setBlocks closure: it recurses
+  // by calling handleEvent again on the inner event, which fires its
+  // own setBlocks. Done this way (rather than inside the switch) so
+  // each inner event is its own state transition — feels exactly like
+  // the parent's event handling, just with a Subagent header above.
+  if (e.type === 'subagent_event') {
+    handleEvent(e.inner, setBlocks);
+  }
 }
 
 // Convert a persisted Anthropic-shape conversation back into the
@@ -760,6 +802,9 @@ function BlockRow({
       </div>
     );
   }
+  if (block.type === 'subagent') {
+    return <SubagentBlock block={block} />;
+  }
   // assistant_text
   if (!block.text && busy) {
     return (
@@ -840,6 +885,73 @@ function UsagePill({
       )}
       <span className="opacity-50">·</span>
       <span>{(durationMs / 1000).toFixed(1)}s</span>
+    </div>
+  );
+}
+
+// Visible bracket around a subagent's run. The card itself shows the
+// task description + final status; the subagent's tool calls and
+// approval cards render INLINE below as if they were the parent's
+// — handleEvent unwraps subagent_event so the user can see + approve
+// every action the child takes. The done-state card displays the
+// child's final text summary (which is also what the parent model
+// sees as its tool_result).
+function SubagentBlock({
+  block,
+}: {
+  block: Extract<RenderBlock, { type: 'subagent' }>;
+}) {
+  const [open, setOpen] = useState(false);
+  const isRunning = block.status === 'running';
+  const isError = block.status === 'error';
+  const summaryText = block.summary ?? '';
+  return (
+    <div className="flex pl-10">
+      <div
+        className={cn(
+          'flex-1 rounded-lg border px-3 py-2',
+          isError
+            ? 'border-primary/30 bg-primary/5'
+            : 'border-border/60 bg-muted/30',
+        )}
+      >
+        <div className="flex items-center gap-2">
+          <span
+            className={cn(
+              'inline-block h-1.5 w-1.5 shrink-0 rounded-full',
+              isRunning
+                ? 'animate-pulse bg-primary'
+                : isError
+                  ? 'bg-primary'
+                  : 'bg-emerald-500',
+            )}
+          />
+          <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            Subagent
+          </span>
+          <span className="text-[12px] font-medium text-foreground">
+            {block.description || '(no description)'}
+          </span>
+          {isRunning && (
+            <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+              running
+            </span>
+          )}
+          {!isRunning && summaryText && (
+            <button
+              onClick={() => setOpen((o) => !o)}
+              className="ml-auto text-[10.5px] text-muted-foreground hover:text-foreground"
+            >
+              {open ? 'hide summary' : 'view summary'}
+            </button>
+          )}
+        </div>
+        {open && summaryText && (
+          <div className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border/40 bg-background/60 p-2 text-[11px] leading-relaxed text-foreground/85">
+            {summaryText}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

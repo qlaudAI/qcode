@@ -23,6 +23,8 @@ import {
 import {
   ALL_TOOLS,
   READ_TOOLS,
+  SUBAGENT_READ_TOOLS,
+  SUBAGENT_TOOLS,
   executeTool,
   type ApprovalDecision,
   type ApprovalRequest,
@@ -30,6 +32,7 @@ import {
   type ToolResult,
 } from './tools';
 import { submitToolResult } from './tool-results';
+import { createRemoteThread } from './threads';
 
 const SYSTEM_PROMPT_AGENT = `You are qcode, a multi-model coding agent running on the user's desktop.
 
@@ -106,7 +109,32 @@ export type AgentEvent =
        *  by the UI to show a per-turn cost/token pill. */
       usage: { inputTokens: number; outputTokens: number };
     }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  // ─── Subagent (`task` tool) events ──────────────────────────────
+  // Fired by the parent runThreadAgent when a `task` tool dispatch
+  // is intercepted. The UI uses these to render a single "Subagent:
+  // <description>" card with collapsed inner events; subagent_event
+  // wraps every event the child emits so the UI can attribute them
+  // back to the parent task call instead of mixing them inline.
+  | {
+      type: 'subagent_start';
+      parentToolUseId: string;
+      description: string;
+    }
+  | {
+      type: 'subagent_event';
+      parentToolUseId: string;
+      /** Underlying agent event the child produced. The same shape
+       *  the parent uses; consumers can choose to render or ignore
+       *  per-tool. */
+      inner: AgentEvent;
+    }
+  | {
+      type: 'subagent_done';
+      parentToolUseId: string;
+      isError: boolean;
+      summary: string;
+    };
 
 export type RunAgentOpts = {
   model: string;
@@ -306,6 +334,13 @@ export type RunThreadAgentOpts = {
   /** When true, also pass tools_mode='dynamic' so qlaud injects the
    *  4 meta-tools (qlaud_search_tools, etc.) for connector access. */
   enableConnectors?: boolean;
+  /** When true, this is a subagent run spawned by the `task` tool.
+   *  We strip `task` from the client_tools list (no recursive
+   *  spawning) and skip the parent's onIterationStart pulse so the
+   *  subagent's iterations don't pollute the parent UI's turn
+   *  divider. Approvals and tool cards still bubble up — the user
+   *  needs to see + approve every write the subagent attempts. */
+  isSubagent?: boolean;
   signal?: AbortSignal;
   onEvent: (e: AgentEvent) => void;
   onApproval: (
@@ -331,9 +366,17 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
     ? await getProjectMemory(opts.workspace)
     : null;
   const systemPrompt = basePrompt + memorySystemSection(memory);
-  const clientTools = opts.workspace
-    ? toClientTools(planMode ? READ_TOOLS : ALL_TOOLS)
-    : [];
+  // Subagent runs strip `task` from the tool list (depth-1 cap)
+  // and stick to read-only tools when the parent is in plan mode
+  // — the subagent inherits the parent's safety posture.
+  const baseTools = opts.isSubagent
+    ? planMode
+      ? SUBAGENT_READ_TOOLS
+      : SUBAGENT_TOOLS
+    : planMode
+      ? READ_TOOLS
+      : ALL_TOOLS;
+  const clientTools = opts.workspace ? toClientTools(baseTools) : [];
 
   // Stash tool inputs as they stream in (onToolUse) so we have them
   // when qlaud asks us to dispatch (onToolDispatchStart). Cleared on
@@ -380,6 +423,31 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
         opts.onEvent({ type: 'turn_start', turn: info.iteration - 1 });
       },
       onToolDispatchStart: async (info) => {
+        // `task` short-circuits: instead of executing locally, we
+        // spawn a subagent in a fresh remote thread and treat its
+        // final text as the tool result. Same approval/dispatch
+        // path is reused for the child's own tool calls (read_file,
+        // bash, etc.) — those bubble up to the same UI via opts.onEvent.
+        if (info.name === 'task' && !opts.isSubagent) {
+          const stash = pending.get(info.toolUseId);
+          const inputObj =
+            (stash?.input as { description?: string; prompt?: string }) ?? {};
+          await runSubagentForTask({
+            parentThreadId: opts.threadId,
+            parentToolUseId: info.toolUseId,
+            description: inputObj.description ?? '',
+            prompt: inputObj.prompt ?? '',
+            model: opts.model,
+            mode: opts.mode,
+            workspace: opts.workspace,
+            enableConnectors: opts.enableConnectors,
+            signal: opts.signal,
+            onEvent: opts.onEvent,
+            onApproval: opts.onApproval,
+          });
+          return;
+        }
+
         // Run the tool locally, then POST the result. Failures here
         // (workspace missing, executor crash, network) get surfaced
         // back to the parked dispatcher as is_error=true so the
@@ -492,4 +560,127 @@ async function safeSubmit(
   } catch {
     // Swallowed deliberately — see comment above.
   }
+}
+
+/** Run a subagent in service of a parent's `task` tool call.
+ *
+ *  Architecture:
+ *  - Mint a fresh remote thread tagged with parent_thread_id +
+ *    parent_tool_use_id metadata so the subagent's history is
+ *    inspectable later (and qlaud-side analytics can follow the
+ *    parent→child relationship).
+ *  - Run runThreadAgent against that thread with isSubagent=true,
+ *    which strips `task` from client_tools (no recursion).
+ *  - Capture every text delta into a buffer; the final buffer is
+ *    what we POST as the parent's tool_result.
+ *  - Tool calls inside the subagent (read_file, bash, etc.) flow
+ *    through the same parent.onEvent handler so the user sees +
+ *    approves them in the same UI as the rest of the conversation.
+ *    They're tagged with a "subagent" marker via a wrapper event so
+ *    the UI can visually nest them under the parent task card.
+ */
+async function runSubagentForTask(args: {
+  parentThreadId: string;
+  parentToolUseId: string;
+  description: string;
+  prompt: string;
+  model: string;
+  mode?: 'agent' | 'plan';
+  workspace: string | null;
+  enableConnectors?: boolean;
+  signal?: AbortSignal;
+  onEvent: (e: AgentEvent) => void;
+  onApproval: (
+    toolUseId: string,
+    request: ApprovalRequest,
+  ) => Promise<ApprovalDecision>;
+}): Promise<void> {
+  // Tell the parent UI a subagent is starting so it can render a
+  // "Subagent: <description>" card. The corresponding subagent_done
+  // event fires below.
+  args.onEvent({
+    type: 'subagent_start',
+    parentToolUseId: args.parentToolUseId,
+    description: args.description,
+  });
+
+  let childThreadId: string;
+  try {
+    const child = await createRemoteThread({
+      metadata: {
+        parent_thread_id: args.parentThreadId,
+        parent_tool_use_id: args.parentToolUseId,
+        kind: 'subagent',
+        description: args.description,
+      },
+    });
+    childThreadId = child.id;
+  } catch (e) {
+    const msg =
+      e instanceof Error ? e.message : 'failed to create subagent thread';
+    args.onEvent({
+      type: 'subagent_done',
+      parentToolUseId: args.parentToolUseId,
+      isError: true,
+      summary: msg,
+    });
+    await safeSubmit(args.parentThreadId, args.parentToolUseId, {
+      output: `Subagent failed to start: ${msg}`,
+      isError: true,
+    });
+    return;
+  }
+
+  let buffer = '';
+  let childIsError = false;
+
+  try {
+    await runThreadAgent({
+      threadId: childThreadId,
+      model: args.model,
+      workspace: args.workspace,
+      content: [{ type: 'text', text: args.prompt }],
+      mode: args.mode,
+      enableConnectors: args.enableConnectors,
+      isSubagent: true,
+      signal: args.signal,
+      onApproval: args.onApproval,
+      onEvent: (e) => {
+        // Stream the child's events into the parent UI, tagged so
+        // the chat surface can render them nested under the parent's
+        // task card. Text deltas also feed into the result buffer
+        // we'll send back to the parent loop.
+        if (e.type === 'text') {
+          buffer += e.text;
+        }
+        if (e.type === 'error') {
+          childIsError = true;
+        }
+        args.onEvent({
+          type: 'subagent_event',
+          parentToolUseId: args.parentToolUseId,
+          inner: e,
+        });
+      },
+    });
+  } catch (e) {
+    childIsError = true;
+    buffer +=
+      '\n\n[subagent crashed: ' +
+      (e instanceof Error ? e.message : 'unknown') +
+      ']';
+  }
+
+  const summary = buffer.trim() || '(subagent produced no text)';
+  args.onEvent({
+    type: 'subagent_done',
+    parentToolUseId: args.parentToolUseId,
+    isError: childIsError,
+    summary,
+  });
+
+  await safeSubmit(args.parentThreadId, args.parentToolUseId, {
+    output: summary,
+    isError: childIsError,
+  });
 }
