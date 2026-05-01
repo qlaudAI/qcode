@@ -292,3 +292,129 @@ function renderPartial(
     (stderr ? `--- stderr ---\n${stderr}` : '')
   );
 }
+
+// ─── Background jobs ──────────────────────────────────────────────
+//
+// `bash` with run_in_background:true returns a job_id immediately
+// instead of waiting. The command runs in a detached subshell with
+// its output piped to a workspace-local file (`.qcode/bg/<id>.out`)
+// and exit code recorded to `.qcode/bg/<id>.exit` once it finishes.
+// The model later calls `bash_status` to drain new output and check
+// whether the job is still running. Useful for kicking off `pnpm dev`
+// or a long-running test suite while the agent continues working.
+
+export type BgJob = {
+  jobId: string;
+  pid: number;
+  outFile: string;
+  exitFile: string;
+  startedAt: number;
+};
+
+const bgJobs = new Map<string, BgJob>();
+
+export async function runBashBackground(opts: {
+  workspace: string;
+  command: string;
+}): Promise<{ jobId: string; pid: number }> {
+  const jobId = `bg-${Math.random().toString(36).slice(2, 10)}`;
+  const outFile = `${opts.workspace}/.qcode/bg/${jobId}.out`;
+  const exitFile = `${opts.workspace}/.qcode/bg/${jobId}.exit`;
+
+  // Wrapper:
+  //   1. mkdir -p the bg dir
+  //   2. spawn a subshell that runs the user's command, pipes
+  //      stdout+stderr to outFile, then writes exit status to
+  //      exitFile after the command exits
+  //   3. echo JOB:<pid> so we know the bg subshell's PID
+  // The outer command itself completes fast (just spawning + echo)
+  // so the persistent shell's sentinel fires quickly.
+  const escaped = opts.command.replace(/'/g, "'\\''");
+  const wrapper = [
+    `mkdir -p ${shellQuote(opts.workspace + '/.qcode/bg')}`,
+    `( { sh -c '${escaped}' > ${shellQuote(outFile)} 2>&1 ; echo $? > ${shellQuote(exitFile)} ; } < /dev/null ) &`,
+    `echo "JOB:$!"`,
+  ].join('\n');
+
+  const result = await runBashSession({
+    workspace: opts.workspace,
+    command: wrapper,
+    timeoutMs: 10_000,
+  });
+  const match = result.stdout.match(/JOB:(\d+)/);
+  if (!match) {
+    throw new Error(
+      `failed to launch background job — wrapper stdout: ${result.stdout || '(empty)'}`,
+    );
+  }
+  const pid = Number.parseInt(match[1] ?? '0', 10);
+  const job: BgJob = { jobId, pid, outFile, exitFile, startedAt: Date.now() };
+  bgJobs.set(jobId, job);
+  return { jobId, pid };
+}
+
+export async function checkBgJob(opts: {
+  jobId: string;
+  workspace: string;
+  /** Don't return the same output twice — the model calls
+   *  bash_status repeatedly and only wants what's new since last check. */
+  sinceOffset?: number;
+}): Promise<{
+  stdout: string;
+  /** Total stdout length after this read; pass back as sinceOffset
+   *  on the next call. */
+  totalOffset: number;
+  stillRunning: boolean;
+  /** Exit code, only set once the job has finished. */
+  exitCode: number | null;
+}> {
+  const job = bgJobs.get(opts.jobId);
+  if (!job) {
+    throw new Error(`unknown bg job ${opts.jobId}`);
+  }
+  if (!isTauri()) {
+    return {
+      stdout: '[browser-mode stub: bg jobs not supported]',
+      totalOffset: 0,
+      stillRunning: false,
+      exitCode: 0,
+    };
+  }
+
+  // Liveness — kill -0 succeeds iff the PID exists. Same persistent
+  // shell, very cheap; no shell spawn.
+  const aliveCheck = await runBashSession({
+    workspace: opts.workspace,
+    command: `kill -0 ${job.pid} 2>/dev/null && echo alive || echo dead`,
+    timeoutMs: 5_000,
+  });
+  const stillRunning = /alive/.test(aliveCheck.stdout);
+
+  // Drain output from the file, slicing past whatever the caller
+  // already consumed. Tauri's readTextFile returns the whole thing;
+  // for huge logs we'd want a streaming read, but bg jobs are
+  // typically test/build/server output measured in KBs, not GBs.
+  const { readTextFile, exists } = await import('@tauri-apps/plugin-fs');
+  let full = '';
+  if (await exists(job.outFile)) {
+    full = await readTextFile(job.outFile);
+  }
+  const sinceOffset = opts.sinceOffset ?? 0;
+  const stdout = full.length > sinceOffset ? full.slice(sinceOffset) : '';
+
+  let exitCode: number | null = null;
+  if (!stillRunning && (await exists(job.exitFile))) {
+    const txt = await readTextFile(job.exitFile);
+    const n = Number.parseInt(txt.trim(), 10);
+    if (Number.isFinite(n)) exitCode = n;
+  }
+
+  return { stdout, totalOffset: full.length, stillRunning, exitCode };
+}
+
+/** Used in shell wrappers — wraps a path in single quotes and
+ *  escapes any single quotes inside (workspace paths with apostrophes
+ *  are rare but legal). */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}

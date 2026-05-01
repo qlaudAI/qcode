@@ -16,7 +16,7 @@
 // dangerous tool also has its own per-tool defense (deny-list for
 // bash, expected-replacements check for edit_file, etc.).
 
-import { runBashSession } from './bash-session';
+import { checkBgJob, runBashBackground, runBashSession } from './bash-session';
 import { computeDiff, type DiffLine } from './diff';
 import type { IgnoreMatcher } from './gitignore';
 import { runHook } from './hooks';
@@ -225,7 +225,7 @@ export const WRITE_TOOLS: ToolDef[] = [
   {
     name: 'bash',
     description:
-      "Run a shell command. Persistent session: cwd, env vars, and shell state (sourced venvs, exported variables) survive across calls in the same conversation, so `cd packages/foo` followed by `pytest` works as you'd expect. Requires user approval. Output streams in. 60s per-call timeout (the shell stays alive on timeout — env preserved for the next call). Deny-list catches obviously-dangerous commands (rm -rf /, fork bombs, sudo, curl|sh).",
+      "Run a shell command. Persistent session: cwd, env vars, and shell state (sourced venvs, exported variables) survive across calls in the same conversation, so `cd packages/foo` followed by `pytest` works as you'd expect. Requires user approval. Output streams in. Default 6-minute per-call timeout (the shell stays alive on timeout — env preserved for the next call). Deny-list catches obviously-dangerous commands (rm -rf /, fork bombs, sudo, curl|sh).\n\nFor long-running processes that should keep going while you work — dev servers, watch builds, file watchers — set run_in_background:true. The call returns immediately with a job_id; use bash_status to drain output and check whether the job has finished.",
     input_schema: {
       type: 'object',
       properties: {
@@ -235,8 +235,28 @@ export const WRITE_TOOLS: ToolDef[] = [
           description:
             'One-line plain-English summary of why you want to run this. Shown to the user in the approval dialog.',
         },
+        run_in_background: {
+          type: 'boolean',
+          description:
+            'Spawn the command in a detached background process and return a job_id immediately instead of waiting. Use for `pnpm dev`, `cargo watch`, anything you want running while you keep iterating. Default false. Output is captured to a file; retrieve it with bash_status({job_id}).',
+        },
       },
       required: ['command', 'description'],
+    },
+  },
+  {
+    name: 'bash_status',
+    description:
+      'Drain new output from a background bash job and check if it has finished. Returns stdout produced since the previous bash_status call (or since the job started if first call), whether the job is still running, and the exit code (only when finished). Use after a bash with run_in_background:true. The job_id you pass came from that call.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        job_id: {
+          type: 'string',
+          description: 'The job_id returned by a prior bash {run_in_background: true} call.',
+        },
+      },
+      required: ['job_id'],
     },
   },
 ];
@@ -257,7 +277,7 @@ const MAX_FILE_BYTES = 200 * 1024;
 const MAX_LIST_ENTRIES = 200;
 const MAX_GLOB_MATCHES = 500;
 const MAX_GREP_MATCHES = 200;
-const BASH_TIMEOUT_MS = 60_000;
+const BASH_TIMEOUT_MS = 360_000; // 6 min — covers most real builds + test suites
 
 // Patterns we refuse to run regardless of approval. Belt-and-suspenders
 // with the workspace cwd jail; catches the most obvious foot-guns even
@@ -306,6 +326,8 @@ export async function executeTool(
         return await runEditFile(call, opts);
       case 'bash':
         return await runBash(call, opts);
+      case 'bash_status':
+        return await runBashStatus(call, opts);
       default:
         return err(call.id, `Unknown tool: ${call.name}`);
     }
@@ -696,7 +718,10 @@ async function runBash(
   call: ToolCall,
   opts: ExecuteOpts,
 ): Promise<ToolResult> {
-  const input = call.input as { command?: unknown };
+  const input = call.input as {
+    command?: unknown;
+    run_in_background?: unknown;
+  };
   const command = typeof input.command === 'string' ? input.command.trim() : '';
   if (!command) return err(call.id, 'command required');
   if (BASH_DENYLIST.some((re) => re.test(command))) {
@@ -708,6 +733,7 @@ async function runBash(
   if (!opts.requestApproval) {
     return err(call.id, 'Bash is not enabled in this session.');
   }
+  const runInBackground = input.run_in_background === true;
 
   // Pre-bash hook: runs BEFORE approval so a project-level guard
   // (e.g. block any `git push --force` against main) can deny the
@@ -717,7 +743,7 @@ async function runBash(
   const preHook = await runHook({
     workspace: opts.workspace,
     event: 'pre_bash',
-    input: { command },
+    input: { command, run_in_background: runInBackground },
   });
   if (!preHook.proceed) {
     return err(call.id, preHook.message);
@@ -725,15 +751,35 @@ async function runBash(
 
   const decision = await opts.requestApproval({
     kind: 'bash',
-    command,
+    command: runInBackground ? `[background] ${command}` : command,
     cwd: opts.workspace,
   });
   if (decision !== 'allow') {
     return ok(call.id, 'User rejected the command. Not run.');
   }
-  // Persistent shell. cd / source venv / set vars persist across
-  // bash calls within the same workspace session — the model can
-  // run "cd packages/foo" then "pytest" in two calls and have
+
+  // Background path: spawn detached, return job_id immediately.
+  // No streaming progress (the model uses bash_status to poll), no
+  // post_bash hook (the job runs after this tool call returns).
+  if (runInBackground) {
+    try {
+      const { jobId, pid } = await runBashBackground({
+        workspace: opts.workspace,
+        command,
+      });
+      const msg =
+        `Started background job ${jobId} (pid ${pid}). The command is running detached.\n` +
+        `Use bash_status({"job_id": "${jobId}"}) to drain output and check status.`;
+      return ok(call.id, msg);
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : 'unknown';
+      return err(call.id, `failed to start background job: ${reason}`);
+    }
+  }
+
+  // Foreground path: persistent shell. cd / source venv / set vars
+  // persist across bash calls within the same workspace session — the
+  // model can run "cd packages/foo" then "pytest" in two calls and have
   // pytest actually find foo's venv. See lib/bash-session.ts.
   const result = await runBashSession({
     workspace: opts.workspace,
@@ -776,6 +822,48 @@ async function runBash(
   }
 
   return exitCode === 0 && !postHook.hookErrored
+    ? ok(call.id, out)
+    : { tool_use_id: call.id, content: out, is_error: true };
+}
+
+// Per-job byte offset cache so consecutive bash_status calls only
+// return delta output (not the same buffer over and over). Keyed by
+// job_id; lives only in this process — restart loses the cursor and
+// the next bash_status returns full history, which is fine.
+const bgJobOffsets = new Map<string, number>();
+
+async function runBashStatus(
+  call: ToolCall,
+  opts: ExecuteOpts,
+): Promise<ToolResult> {
+  const input = call.input as { job_id?: unknown };
+  const jobId = typeof input.job_id === 'string' ? input.job_id : '';
+  if (!jobId) return err(call.id, 'job_id required');
+
+  let result;
+  try {
+    result = await checkBgJob({
+      jobId,
+      workspace: opts.workspace,
+      sinceOffset: bgJobOffsets.get(jobId) ?? 0,
+    });
+  } catch (e) {
+    return err(call.id, e instanceof Error ? e.message : 'unknown bg job');
+  }
+  bgJobOffsets.set(jobId, result.totalOffset);
+
+  const lines: string[] = [];
+  lines.push(`status: ${result.stillRunning ? 'running' : 'finished'}`);
+  if (!result.stillRunning && result.exitCode != null) {
+    lines.push(`exit: ${result.exitCode}`);
+  }
+  if (result.stdout) {
+    lines.push(`--- new output ---\n${result.stdout}`);
+  } else if (result.stillRunning) {
+    lines.push('(no new output since last check)');
+  }
+  const out = lines.join('\n');
+  return result.stillRunning || result.exitCode === 0
     ? ok(call.id, out)
     : { tool_use_id: call.id, content: out, is_error: true };
 }
