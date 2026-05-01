@@ -39,14 +39,20 @@ const SAMPLE_PROMPTS = [
 
 export function ChatSurface({
   model,
+  initialHistory = [],
   onTurnComplete,
 }: {
   model: string;
-  onTurnComplete?: () => void;
+  initialHistory?: Message[];
+  /** Called when a turn finishes (success, abort, or error). Receives
+   *  the full thread history so the parent can persist it. */
+  onTurnComplete?: (history: Message[]) => void;
 }) {
   const m = MODELS.find((x) => x.slug === model);
-  const [history, setHistory] = useState<Message[]>([]);
-  const [blocks, setBlocks] = useState<RenderBlock[]>([]);
+  const [history, setHistory] = useState<Message[]>(initialHistory);
+  const [blocks, setBlocks] = useState<RenderBlock[]>(() =>
+    historyToBlocks(initialHistory),
+  );
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -114,6 +120,7 @@ export function ChatSurface({
           }),
       });
       setHistory(finalHistory);
+      onTurnComplete?.(finalHistory);
     } catch (e) {
       const code = e instanceof Error ? e.message : 'unknown';
       setError(mapError(code));
@@ -124,9 +131,6 @@ export function ChatSurface({
       // bails before the loop reaches the awaiting Promise.
       for (const resolve of approvalsRef.current.values()) resolve('reject');
       approvalsRef.current.clear();
-      // Refresh the live spend bar — usage was billed during the
-      // turn, balance just dropped.
-      onTurnComplete?.();
     }
   }
 
@@ -257,6 +261,60 @@ function handleEvent(
         return blocks;
     }
   });
+}
+
+// Convert a persisted Anthropic-shape conversation back into the
+// chat surface's render blocks. Used when the user clicks a thread
+// in the sidebar — we need to recreate the visible state without
+// re-streaming. Tool calls get reconstructed from the assistant's
+// tool_use blocks paired with the next user message's tool_result
+// blocks (Anthropic protocol pairs them by tool_use_id).
+function historyToBlocks(history: Message[]): RenderBlock[] {
+  const blocks: RenderBlock[] = [];
+  // Index tool_results by id so we can attach output to its tool_use.
+  const resultById = new Map<
+    string,
+    { content: string; isError: boolean }
+  >();
+  for (const msg of history) {
+    if (msg.role !== 'user') continue;
+    for (const block of msg.content) {
+      if (block.type === 'tool_result') {
+        resultById.set(block.tool_use_id, {
+          content: block.content,
+          isError: !!block.is_error,
+        });
+      }
+    }
+  }
+  for (const msg of history) {
+    if (msg.role === 'user') {
+      const text = msg.content
+        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n');
+      if (text) blocks.push({ type: 'user_text', text });
+    } else {
+      for (const block of msg.content) {
+        if (block.type === 'text') {
+          blocks.push({ type: 'assistant_text', text: block.text });
+        } else if (block.type === 'tool_use') {
+          const r = resultById.get(block.id);
+          blocks.push({
+            type: 'tool',
+            call: {
+              id: block.id,
+              name: block.name,
+              input: block.input,
+              status: r ? (r.isError ? 'error' : 'done') : 'done',
+              output: r?.content,
+            },
+          });
+        }
+      }
+    }
+  }
+  return blocks;
 }
 
 function mapError(code: string): string {

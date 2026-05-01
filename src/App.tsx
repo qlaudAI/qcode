@@ -14,15 +14,25 @@ import { startDeepLinkListener } from './lib/deep-link';
 import { DEFAULT_MODEL } from './lib/models';
 import { useShortcuts, type MenuId } from './lib/shortcuts';
 import {
+  createThread,
+  deleteThread as deleteThreadStorage,
+  getThread,
+  listThreads,
+  saveThread,
+  type ThreadSummary,
+} from './lib/threads';
+import {
   getCurrentWorkspace,
   openFolderPicker,
   setCurrentWorkspace,
   type Workspace,
 } from './lib/workspace';
+import type { Message } from './lib/qlaud-client';
 import { ChatSurface } from './ui/ChatSurface';
 import { FileTree } from './ui/FileTree';
 import { ModelPicker } from './ui/ModelPicker';
 import { SignInGate } from './ui/SignInGate';
+import { ThreadList } from './ui/ThreadList';
 
 export function App() {
   const [authed, setAuthed] = useState<boolean>(() => Boolean(getKey()));
@@ -31,7 +41,16 @@ export function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(() =>
     getCurrentWorkspace(),
   );
-  const [chatNonce, setChatNonce] = useState(0);
+
+  // Threads. The sidebar lists summaries; the chat surface gets the
+  // active thread's full history. Switching threads remounts
+  // ChatSurface (cheap — no in-flight request to abort here since the
+  // old chat's busy state lived inside its own component).
+  const [threads, setThreads] = useState<ThreadSummary[]>(() => listThreads());
+  const [currentId, setCurrentId] = useState<string | null>(
+    () => listThreads()[0]?.id ?? null,
+  );
+  const currentThread = currentId ? getThread(currentId) : null;
 
   // Pull live balance from qlaud and merge into the cached profile so
   // the title-bar spend bar shows fresh numbers. Idempotent — safe to
@@ -81,13 +100,55 @@ export function App() {
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
+  // Thread mutations. We keep the localStorage layer authoritative
+  // and re-derive the in-memory list after each change so summaries
+  // (titles, updatedAt) stay in lockstep.
+  const refreshThreads = useCallback(() => {
+    setThreads(listThreads());
+  }, []);
+
+  const newThread = useCallback(() => {
+    const t = createThread(model);
+    refreshThreads();
+    setCurrentId(t.id);
+  }, [model, refreshThreads]);
+
+  const switchThread = useCallback((id: string) => {
+    setCurrentId(id);
+  }, []);
+
+  const removeThread = useCallback(
+    (id: string) => {
+      deleteThreadStorage(id);
+      const next = listThreads();
+      setThreads(next);
+      if (currentId === id) {
+        setCurrentId(next[0]?.id ?? null);
+      }
+    },
+    [currentId],
+  );
+
+  // Persist the active thread's history every time the chat surface
+  // hands us a new turn. Auto-titles on first user message.
+  const persistTurn = useCallback(
+    (history: Message[]) => {
+      const id = currentId;
+      if (!id) return;
+      const existing = getThread(id);
+      if (!existing) return;
+      saveThread({ ...existing, model, history });
+      refreshThreads();
+    },
+    [currentId, model, refreshThreads],
+  );
+
   // Single source of truth for native-menu + keyboard shortcuts.
   const onMenu = useCallback(
     async (id: MenuId) => {
       switch (id) {
         case 'new_chat':
-          // Forces a fresh ChatSurface mount, dumping prior history.
-          setChatNonce((n) => n + 1);
+          newThread();
           break;
         case 'open_folder': {
           const w = await openFolderPicker();
@@ -95,8 +156,8 @@ export function App() {
           break;
         }
         case 'preferences':
-          // TODO(phase-2): open the settings pane in a side drawer.
-          // For now, surface the dashboard as the closest equivalent.
+          // TODO(phase-2): in-app settings drawer. For now, surface
+          // the dashboard as the closest equivalent.
           window.open('https://qlaud.ai/dashboard', '_blank', 'noopener');
           break;
         case 'sign_out':
@@ -107,15 +168,16 @@ export function App() {
           setWorkspace(null);
           break;
         case 'command_palette':
-          // Phase 2 stub. Visible no-op so the shortcut doesn't drop
-          // silently; once the palette ships, swap this for setOpen(true).
+          // Phase 2 stub. No-op so the shortcut doesn't fire silently
+          // into the void; swap this for setOpen(true) when the
+          // palette lands.
           break;
         case 'model_picker':
-          // Phase 2: focus the picker programmatically. For now, no-op.
+          // Phase 2: focus the picker programmatically.
           break;
       }
     },
-    [],
+    [newThread],
   );
   useShortcuts(onMenu);
 
@@ -143,17 +205,35 @@ export function App() {
       <div className="flex flex-1 overflow-hidden">
         <Sidebar
           workspace={workspace}
+          threads={threads}
+          currentThreadId={currentId}
           onOpenFolder={async () => {
             const w = await openFolderPicker();
             if (w) setWorkspace(w);
           }}
-          onNewChat={() => setChatNonce((n) => n + 1)}
+          onNewChat={newThread}
+          onPickThread={switchThread}
+          onDeleteThread={removeThread}
         />
         <main className="flex flex-1 flex-col bg-background/85 backdrop-blur-sm">
           <ChatSurface
-            key={chatNonce}
+            key={currentId ?? 'empty'}
+            initialHistory={currentThread?.history ?? []}
+            onTurnComplete={(history) => {
+              if (!currentId) {
+                // First turn → conjure a thread on demand. Catches
+                // the post-sign-in case where the user types before
+                // explicitly clicking New Chat.
+                const t = createThread(model);
+                saveThread({ ...t, history });
+                refreshThreads();
+                setCurrentId(t.id);
+              } else {
+                persistTurn(history);
+              }
+              void refreshBalance();
+            }}
             model={model}
-            onTurnComplete={refreshBalance}
           />
         </main>
       </div>
@@ -246,12 +326,20 @@ function SpendBar({
 
 function Sidebar({
   workspace,
+  threads,
+  currentThreadId,
   onOpenFolder,
   onNewChat,
+  onPickThread,
+  onDeleteThread,
 }: {
   workspace: Workspace | null;
+  threads: ThreadSummary[];
+  currentThreadId: string | null;
   onOpenFolder: () => void;
   onNewChat: () => void;
+  onPickThread: (id: string) => void;
+  onDeleteThread: (id: string) => void;
 }) {
   return (
     <aside className="flex w-64 flex-col border-r border-border/40 bg-muted/30 backdrop-blur-sm">
@@ -278,16 +366,28 @@ function Sidebar({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 pb-3 pt-4">
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pt-4">
+        <div>
+          <div className="px-2 pb-2 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+            Conversations
+          </div>
+          <ThreadList
+            threads={threads}
+            currentId={currentThreadId}
+            onPick={onPickThread}
+            onDelete={onDeleteThread}
+          />
+        </div>
+
         {workspace ? (
-          <>
+          <div>
             <div className="px-2 pb-2 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
               {workspace.name}
             </div>
             <FileTree rootPath={workspace.path} />
-          </>
+          </div>
         ) : (
-          <div className="px-2 pt-2">
+          <div className="px-2">
             <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
               Workspace
             </div>
