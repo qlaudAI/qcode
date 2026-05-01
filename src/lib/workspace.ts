@@ -3,6 +3,7 @@
 // sensitive: just paths). The actual file contents come from
 // Tauri's fs plugin on demand; we don't cache them here.
 
+import { killBashSession } from './bash-session';
 import { buildMatcher, type IgnoreMatcher } from './gitignore';
 import { getProjectMemory } from './memory';
 import { isTauri, pickFolder } from './tauri';
@@ -36,6 +37,15 @@ export function getCurrentWorkspace(): Workspace | null {
 }
 
 export function setCurrentWorkspace(w: Workspace | null): void {
+  // Kill any persistent bash session attached to the OLD workspace
+  // before swapping. Carrying a shell rooted in /Users/foo/projA into
+  // a session for /Users/foo/projB would leak cwd/env state and the
+  // user would be very confused by `pytest` running against the
+  // wrong project.
+  const prev = getCurrentWorkspace();
+  if (prev && (!w || prev.path !== w.path)) {
+    void killBashSession(prev.path);
+  }
   if (w) {
     localStorage.setItem(CURRENT_KEY, JSON.stringify(w));
     pushMru(w);

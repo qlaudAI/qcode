@@ -16,6 +16,7 @@
 // dangerous tool also has its own per-tool defense (deny-list for
 // bash, expected-replacements check for edit_file, etc.).
 
+import { runBashSession } from './bash-session';
 import { computeDiff, type DiffLine } from './diff';
 import type { IgnoreMatcher } from './gitignore';
 import { hasRipgrep, rgGlob, rgGrep } from './ripgrep';
@@ -223,7 +224,7 @@ export const WRITE_TOOLS: ToolDef[] = [
   {
     name: 'bash',
     description:
-      'Run a shell command in the workspace directory. Output is captured and returned. Requires user approval. Cannot escape the workspace cwd. 60s timeout. A small deny-list rejects obviously-dangerous commands (rm -rf /, fork bombs, sudo, curl|sh, etc.).',
+      "Run a shell command. Persistent session: cwd, env vars, and shell state (sourced venvs, exported variables) survive across calls in the same conversation, so `cd packages/foo` followed by `pytest` works as you'd expect. Requires user approval. Output streams in. 60s per-call timeout (the shell stays alive on timeout — env preserved for the next call). Deny-list catches obviously-dangerous commands (rm -rf /, fork bombs, sudo, curl|sh).",
     input_schema: {
       type: 'object',
       properties: {
@@ -665,69 +666,30 @@ async function runBash(
   if (decision !== 'allow') {
     return ok(call.id, 'User rejected the command. Not run.');
   }
-  if (!isTauri()) {
-    return ok(call.id, `[browser-mode stub: would run \`${command}\`]`);
-  }
-  const { Command } = await import('@tauri-apps/plugin-shell');
-  const child = Command.create('sh', ['-c', command], { cwd: opts.workspace });
-
-  // Stream stdout / stderr as they arrive. Each chunk grows the
-  // accumulators below; we ship the full re-built BashView-formatted
-  // text to opts.onPartial on every event so the UI can render
-  // progressively without us having to track per-stream offsets.
-  let stdoutBuf = '';
-  let stderrBuf = '';
-  const emit = (codeSoFar: number | null) => {
-    if (!opts.onPartial) return;
-    const exitLine = codeSoFar == null ? 'exit running…' : `exit ${codeSoFar}`;
-    const text =
-      `${exitLine}\n` +
-      (stdoutBuf ? `--- stdout ---\n${stdoutBuf}\n` : '') +
-      (stderrBuf ? `--- stderr ---\n${stderrBuf}\n` : '');
-    opts.onPartial(text);
-  };
-  child.stdout.on('data', (line: string) => {
-    stdoutBuf += line.endsWith('\n') ? line : line + '\n';
-    emit(null);
-  });
-  child.stderr.on('data', (line: string) => {
-    stderrBuf += line.endsWith('\n') ? line : line + '\n';
-    emit(null);
+  // Persistent shell. cd / source venv / set vars persist across
+  // bash calls within the same workspace session — the model can
+  // run "cd packages/foo" then "pytest" in two calls and have
+  // pytest actually find foo's venv. See lib/bash-session.ts.
+  const result = await runBashSession({
+    workspace: opts.workspace,
+    command,
+    onPartial: opts.onPartial,
+    timeoutMs: BASH_TIMEOUT_MS,
   });
 
-  const finish = new Promise<{ code: number; signal: number | null }>(
-    (resolve) => {
-      child.on('close', (data) => {
-        // Tauri 2's plugin-shell event payload: { code, signal }.
-        const code = (data as { code?: number }).code ?? 0;
-        const signal = (data as { signal?: number | null }).signal ?? null;
-        resolve({ code, signal });
-      });
-    },
-  );
-
-  const childProc = await child.spawn();
-  const timeout = new Promise<'timeout'>((resolve) =>
-    setTimeout(() => resolve('timeout'), BASH_TIMEOUT_MS),
-  );
-  const winner = await Promise.race([finish, timeout]);
-  if (winner === 'timeout') {
-    try {
-      await childProc.kill();
-    } catch {
-      // process may have just exited — ignore
-    }
+  if (result.timedOut) {
     return err(
       call.id,
-      `Command exceeded the ${BASH_TIMEOUT_MS / 1000}s timeout. Partial output:\n${stdoutBuf}${stderrBuf ? '\n[stderr]\n' + stderrBuf : ''}`,
+      `Command exceeded the ${BASH_TIMEOUT_MS / 1000}s timeout. The shell stays alive — your environment (cwd, env vars) is preserved for the next call. Partial output:\n${result.stdout}${result.stderr ? '\n[stderr]\n' + result.stderr : ''}`,
     );
   }
-  const { code } = winner;
+
+  const { exitCode, stdout, stderr } = result;
   const out =
-    `exit ${code}\n` +
-    (stdoutBuf ? `--- stdout ---\n${stdoutBuf}` : '') +
-    (stderrBuf ? `--- stderr ---\n${stderrBuf}` : '');
-  return code === 0
+    `exit ${exitCode}\n` +
+    (stdout ? `--- stdout ---\n${stdout}` : '') +
+    (stderr ? `--- stderr ---\n${stderr}` : '');
+  return exitCode === 0
     ? ok(call.id, out)
     : { tool_use_id: call.id, content: out, is_error: true };
 }
