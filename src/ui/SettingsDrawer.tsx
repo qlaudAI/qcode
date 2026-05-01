@@ -14,7 +14,7 @@ import {
 
 import { cn } from '../lib/cn';
 import { MODELS } from '../lib/models';
-import { hasRipgrep, ripgrepInstallHint } from '../lib/ripgrep';
+import { ripgrepInstallHint, ripgrepSource } from '../lib/ripgrep';
 import {
   getSettings,
   patchSettings,
@@ -382,7 +382,9 @@ function DangerButton({
 // already have it (VS Code ships it) but we still nudge the
 // missing case so they're not silently stuck on the slow path.
 function RipgrepStatus() {
-  const [installed, setInstalled] = useState<boolean | null>(null);
+  const [source, setSource] = useState<
+    'sidecar' | 'system' | null | 'pending'
+  >('pending');
   const [hint, setHint] = useState<{
     command: string | null;
     url: string;
@@ -390,10 +392,10 @@ function RipgrepStatus() {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([hasRipgrep(), ripgrepInstallHint()]).then(
-      ([has, h]) => {
+    void Promise.all([ripgrepSource(), ripgrepInstallHint()]).then(
+      ([s, h]) => {
         if (cancelled) return;
-        setInstalled(has);
+        setSource(s);
         setHint(h);
       },
     );
@@ -401,17 +403,19 @@ function RipgrepStatus() {
       cancelled = true;
     };
   }, []);
-  if (installed == null) {
+  if (source === 'pending') {
     return (
       <p className="text-[12px] text-muted-foreground">Detecting ripgrep…</p>
     );
   }
-  if (installed) {
+  if (source === 'sidecar' || source === 'system') {
     return (
       <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2">
         <Zap className="h-3.5 w-3.5 text-emerald-600" />
         <span className="text-[12px] text-foreground/85">
-          ripgrep detected — file search using the fast path.
+          {source === 'sidecar'
+            ? 'ripgrep bundled — fast path always on.'
+            : 'ripgrep on PATH — fast path on. (qcode also bundles a copy starting in alpha.12+ so you can uninstall yours if you want.)'}
         </span>
       </div>
     );

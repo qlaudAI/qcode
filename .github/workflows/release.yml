@@ -62,6 +62,55 @@ jobs:
       - name: Install JS deps
         run: pnpm install --frozen-lockfile=false
 
+      # Ripgrep is bundled as a Tauri sidecar via tauri.conf.json's
+      # bundle.externalBin. Tauri picks the file matching the build's
+      # target triple; CI downloads the right binary for each matrix
+      # entry into src-tauri/binaries/rg-<triple>(.exe).
+      #
+      # Why bundle: rg makes file search 10-50× faster on big repos,
+      # but it's not on every developer's PATH. Shipping a copy adds
+      # ~5-7 MB to the .dmg / .exe and eliminates the "install rg"
+      # friction. Same approach Claude Code uses.
+      - name: Download ripgrep sidecar (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          set -e
+          RG_VERSION=14.1.1
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin)
+              URL="https://github.com/BurntSushi/ripgrep/releases/download/$RG_VERSION/ripgrep-$RG_VERSION-aarch64-apple-darwin.tar.gz"
+              ;;
+            x86_64-apple-darwin)
+              URL="https://github.com/BurntSushi/ripgrep/releases/download/$RG_VERSION/ripgrep-$RG_VERSION-x86_64-apple-darwin.tar.gz"
+              ;;
+            x86_64-unknown-linux-gnu)
+              # musl static build — more portable across distros.
+              URL="https://github.com/BurntSushi/ripgrep/releases/download/$RG_VERSION/ripgrep-$RG_VERSION-x86_64-unknown-linux-musl.tar.gz"
+              ;;
+            *)
+              echo "no rg download mapping for ${{ matrix.target }}"; exit 1 ;;
+          esac
+          mkdir -p src-tauri/binaries
+          curl -L -o /tmp/rg.tar.gz "$URL"
+          tar -xzf /tmp/rg.tar.gz -C /tmp
+          mv /tmp/ripgrep-$RG_VERSION-*/rg src-tauri/binaries/rg-${{ matrix.target }}
+          chmod +x src-tauri/binaries/rg-${{ matrix.target }}
+          ls -la src-tauri/binaries/
+
+      - name: Download ripgrep sidecar (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $RG_VERSION = "14.1.1"
+          $URL = "https://github.com/BurntSushi/ripgrep/releases/download/$RG_VERSION/ripgrep-$RG_VERSION-x86_64-pc-windows-msvc.zip"
+          New-Item -ItemType Directory -Force -Path src-tauri\binaries | Out-Null
+          Invoke-WebRequest -Uri $URL -OutFile $env:TEMP\rg.zip
+          Expand-Archive -Path $env:TEMP\rg.zip -DestinationPath $env:TEMP\rg-extracted -Force
+          $rgPath = Get-ChildItem -Path $env:TEMP\rg-extracted -Recurse -Filter rg.exe | Select-Object -First 1
+          Copy-Item $rgPath.FullName -Destination "src-tauri\binaries\rg-${{ matrix.target }}.exe"
+          Get-ChildItem src-tauri\binaries
+
       - name: Build Tauri release
         env:
           # Mac signing secrets (set in repo settings):

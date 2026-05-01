@@ -1,0 +1,4 @@
+# Bundled ripgrep binaries are downloaded fresh in CI per-target.
+# Local dev builds can rely on system rg via PATH. We do NOT commit
+# these (~5-7 MB per platform; a per-binary diff would be miserable).
+rg-*

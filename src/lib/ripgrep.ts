@@ -19,23 +19,59 @@
 
 import { getPlatform, isTauri } from './tauri';
 
-let detectionCache: Promise<boolean> | null = null;
+type RgSource = 'sidecar' | 'system' | null;
+let detectionCache: Promise<RgSource> | null = null;
 
-/** Cheap runtime detection. Caches the result so subsequent calls
- *  don't re-spawn rg. Returns false outside Tauri (no Command API). */
-export async function hasRipgrep(): Promise<boolean> {
-  if (!isTauri()) return false;
+async function makeRgCommand(
+  args: string[],
+  cwd?: string,
+): Promise<import('@tauri-apps/plugin-shell').Command<string>> {
+  const { Command } = await import('@tauri-apps/plugin-shell');
+  // Prefer the bundled sidecar — it's the version we tested against
+  // and ships at a known path. System rg falls back when the sidecar
+  // isn't present (older alpha builds, dev mode without bundling).
+  const source = await detectRipgrep();
+  if (source === 'sidecar') {
+    return Command.sidecar('binaries/rg', args, cwd ? { cwd } : undefined);
+  }
+  return Command.create('rg', args, cwd ? { cwd } : undefined);
+}
+
+async function detectRipgrep(): Promise<RgSource> {
+  if (!isTauri()) return null;
   if (detectionCache) return detectionCache;
   detectionCache = (async () => {
+    const { Command } = await import('@tauri-apps/plugin-shell');
+    // Try the bundled sidecar first.
     try {
-      const { Command } = await import('@tauri-apps/plugin-shell');
-      const result = await Command.create('rg', ['--version']).execute();
-      return result.code === 0;
+      const r = await Command.sidecar('binaries/rg', ['--version']).execute();
+      if (r.code === 0) return 'sidecar' as const;
     } catch {
-      return false;
+      // Sidecar missing in this build — fall through.
     }
+    // Then system PATH.
+    try {
+      const r = await Command.create('rg', ['--version']).execute();
+      if (r.code === 0) return 'system' as const;
+    } catch {
+      // Neither available — caller falls back to JS walker.
+    }
+    return null;
   })();
   return detectionCache;
+}
+
+/** Cheap runtime detection. True if rg is available either as the
+ *  bundled sidecar or on the user's PATH. Cached. */
+export async function hasRipgrep(): Promise<boolean> {
+  return (await detectRipgrep()) !== null;
+}
+
+/** Where the active rg came from — 'sidecar' (bundled), 'system'
+ *  (user's PATH), or null (not available). UI uses this to show
+ *  "bundled" vs "from PATH" in Settings. */
+export async function ripgrepSource(): Promise<RgSource> {
+  return detectRipgrep();
 }
 
 /** Reset for tests / re-detection after install. Not currently called
@@ -86,15 +122,13 @@ export async function rgGlob(opts: {
   pattern: string;
   max: number;
 }): Promise<RgGlobResult> {
-  const { Command } = await import('@tauri-apps/plugin-shell');
   // --files emits one path per matching file (relative to cwd).
   // -g GLOB filters to paths matching the glob.
   // --hidden includes dotfiles the user might want (e.g. .github/),
   //   still respecting .gitignore / .ignore.
-  // -L follows symlinks shallowly — useful for monorepos with linked
-  //   workspaces; ripgrep refuses to follow into cycles.
   const args = ['--files', '--hidden', '-g', opts.pattern];
-  const out = await Command.create('rg', args, { cwd: opts.workspace }).execute();
+  const cmd = await makeRgCommand(args, opts.workspace);
+  const out = await cmd.execute();
   if (out.code !== 0 && out.code !== 1) {
     // 0 = matches found; 1 = no matches; anything else is real error.
     throw new Error(`ripgrep glob failed (${out.code}): ${out.stderr.slice(0, 200)}`);
@@ -118,7 +152,6 @@ export async function rgGrep(opts: {
   max: number;
   maxFileBytes: number;
 }): Promise<RgGrepResult> {
-  const { Command } = await import('@tauri-apps/plugin-shell');
   const args = [
     '-n', // line numbers
     '--no-heading',
@@ -132,7 +165,8 @@ export async function rgGrep(opts: {
   args.push('--hidden');
   args.push('--', opts.pattern, opts.rootRel);
 
-  const out = await Command.create('rg', args, { cwd: opts.workspace }).execute();
+  const cmd = await makeRgCommand(args, opts.workspace);
+  const out = await cmd.execute();
   if (out.code !== 0 && out.code !== 1) {
     throw new Error(`ripgrep grep failed (${out.code}): ${out.stderr.slice(0, 200)}`);
   }
