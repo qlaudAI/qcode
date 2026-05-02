@@ -110,21 +110,26 @@ type RenderBlock =
 // awaits one of these promises; the UI fulfills it on click.
 type PendingResolver = (decision: ApprovalDecision) => void;
 
+// Sample prompts for the empty-state. Each one is calibrated to
+// show off a real qcode differentiator the moment the user clicks
+// it — task tool / subagents, plan mode, multi-model, persistent
+// bash, project memory. Avoids generic "list files" prompts that
+// every other AI coding tool shows.
 const SAMPLE_PROMPTS = [
-  'List the files in this project',
-  'Open the main entry point and explain what it does',
-  'Find the auth flow — which files implement it?',
-  'Summarize the architecture from the README and source',
+  'Audit the auth flow and list every file that touches it',
+  'Plan a refactor: extract API client logic into its own module',
+  'Run the test suite and explain any failures',
+  'Find every TODO in the repo and group them by area',
 ];
 
 // Web build has no workspace + no tools, so the file/grep prompts
-// above don't apply. These are framed for paste-in code review +
-// general questions a chat-only build can actually handle.
+// above don't apply. These showcase what a chat-only build CAN do:
+// review pasted code, explain concepts, compare options.
 const WEB_SAMPLE_PROMPTS = [
   'Review this code for bugs (paste it after)',
-  'Explain how React hooks work',
-  'What\'s the right way to structure a Cloudflare Worker?',
-  'Compare Next.js App Router vs Pages Router',
+  'Explain when to use Server Components vs Client Components',
+  'Compare Cloudflare Workers vs AWS Lambda vs Vercel Edge',
+  'Walk me through how OAuth 2.0 works, end to end',
 ];
 
 export function ChatSurface({

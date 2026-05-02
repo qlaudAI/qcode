@@ -12,6 +12,7 @@ import {
 } from './lib/auth';
 import { isTauri, WebNotSupportedError } from './lib/tauri';
 import { posthog } from './lib/analytics';
+import { fetchAccount } from './lib/account';
 import { fetchBalance } from './lib/billing';
 import { startDeepLinkListener } from './lib/deep-link';
 import {
@@ -183,6 +184,26 @@ export function App() {
     });
   }, []);
 
+  // One-shot account info fetch — populates email + user_id into the
+  // profile cache so the settings drawer renders "Signed in as
+  // <email>" instead of nothing. Without this the API key auth flow
+  // never sees the human profile (the keychain only stores the
+  // bearer secret). Called on first authed render + after sign-in.
+  const refreshAccount = useCallback(async () => {
+    if (!getKey()) return;
+    const info = await fetchAccount();
+    if (!info) return;
+    setProfile((p) => {
+      const next: Profile = {
+        email: info.email ?? '',
+        user_id: info.user_id,
+        balance_usd: p?.balance_usd,
+      };
+      persistProfile(next);
+      return next;
+    });
+  }, []);
+
   // Deep-link listener: qcode://auth?k=… from the qlaud sign-in flow.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -190,17 +211,22 @@ export function App() {
       setAuthed(true);
       setProfile(getProfile());
       void refreshBalance();
+      void refreshAccount();
     }).then((u) => {
       unlisten = u;
     });
     return () => unlisten?.();
-  }, [refreshBalance]);
+  }, [refreshBalance, refreshAccount]);
 
-  // Boot: pull a fresh balance on the first authed render so the
-  // spend bar isn't sitting at $0 while the cache hydrates.
+  // Boot: pull a fresh balance + account info on the first authed
+  // render so the spend bar isn't $0 + the settings drawer shows the
+  // signed-in email instead of an empty string.
   useEffect(() => {
-    if (authed) void refreshBalance();
-  }, [authed, refreshBalance]);
+    if (authed) {
+      void refreshBalance();
+      void refreshAccount();
+    }
+  }, [authed, refreshBalance, refreshAccount]);
 
   // Link the anonymous PostHog person to the qlaud user so signed-in
   // events land on the right profile + the pre-signin events from
