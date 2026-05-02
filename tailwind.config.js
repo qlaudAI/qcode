@@ -15,11 +15,16 @@ export default {
         mono: ['ui-monospace', 'SF Mono', 'Menlo', 'monospace'],
       },
       colors: {
+        // Brand-aligned palette — same hues as qlaud.ai dashboard so
+        // surfaces match across the desktop app, web preview, and
+        // marketing pages. Neutral hue 0 (pure grayscale, no blue
+        // tint) keeps the primary red the only chromatic accent.
         background: 'hsl(0 0% 100%)',
-        foreground: 'hsl(240 10% 3.9%)',
-        muted: 'hsl(240 4.8% 95.9%)',
-        'muted-foreground': 'hsl(240 3.8% 46.1%)',
-        border: 'hsl(240 5.9% 90%)',
+        foreground: 'hsl(0 0% 3.9%)',
+        muted: 'hsl(0 0% 96.1%)',
+        'muted-foreground': 'hsl(0 0% 45.1%)',
+        border: 'hsl(0 0% 89.8%)',
+        destructive: 'hsl(0 72% 51%)',
         primary: 'hsl(0 72% 51%)',
         'primary-foreground': 'hsl(0 0% 100%)',
       },

@@ -59,4 +59,22 @@
       transform: translateY(0);
     }
   }
+  /* Brief primary-tint pulse when a row is scrolled-to from the
+     right-rail Tasks panel. The class is added imperatively for
+     ~1.2s, then removed; the key thing is the click "lands"
+     visibly so the user knows where they jumped to. */
+  .qcode-row-flash {
+    animation: qcode-row-flash 1200ms ease-out;
+  }
+  @keyframes qcode-row-flash {
+    0% {
+      background-color: hsl(0 72% 51% / 0);
+    }
+    20% {
+      background-color: hsl(0 72% 51% / 0.12);
+    }
+    100% {
+      background-color: hsl(0 72% 51% / 0);
+    }
+  }
 }

@@ -50,6 +50,7 @@ import { ApprovalCard } from './ApprovalCard';
 import { Markdown } from './Markdown';
 import { MentionMenu, getMentionResults } from './MentionMenu';
 import { ToolCallCard, type ToolCallView } from './ToolCallCard';
+import { RightRail, type RightRailView } from './RightRail';
 
 // Each "block" rendered in the chat is the smallest UI unit. The
 // agent loop emits a stream of events that `handleEvent` translates
@@ -147,32 +148,25 @@ export function ChatSurface({
   onTurnLanded,
   hasWorkspace,
   workspaceName,
+  workspacePath,
   onOpenFolder,
+  rightRailView,
+  onCloseRightRail,
 }: {
   model: string;
   mode?: 'agent' | 'plan';
-  /** Active qlaud thread id, or null when the user hasn't opened one
-   *  yet. The first send creates a thread on demand via
-   *  ensureThreadId so the user doesn't pay a new-chat round-trip
-   *  unless they actually type something. */
   threadId: string | null;
-  /** Lazily provision a thread id. ChatSurface calls this before
-   *  every send; App.tsx returns the active id or creates a new
-   *  remote thread + updates the sidebar. */
   ensureThreadId: () => Promise<string>;
-  /** Fired after a turn completes so App.tsx can refresh the
-   *  cached summary's title (first turn) and updatedAt. The user's
-   *  prompt text is passed as `userText` for title derivation. */
   onTurnLanded?: (info: { userText: string | null; threadId: string }) => void;
-  /** Last segment of the workspace path. Used to personalize the
-   *  empty-state heading ("What should we build in <name>?"). */
   workspaceName?: string;
-  /** Drives the empty-state onboarding branch — when false the
-   *  EmptyState pushes the user to open a folder before sending. */
+  workspacePath?: string;
   hasWorkspace: boolean;
-  /** Triggered by the EmptyState's primary CTA on first launch.
-   *  App.tsx owns the picker + workspace state. */
   onOpenFolder: () => void | Promise<void>;
+  /** Active right-rail view, or null when hidden. ChatSurface owns
+   *  the `blocks` state so it renders the rail as a sibling. */
+  rightRailView?: RightRailView | null;
+  /** Close handler for the rail's X button. */
+  onCloseRightRail?: () => void;
 }) {
   const m = MODELS.find((x) => x.slug === model);
   const [blocks, setBlocks] = useState<RenderBlock[]>([]);
@@ -542,7 +536,8 @@ export function ChatSurface({
   const empty = blocks.length === 0;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col">
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl px-3 py-6 sm:px-4 sm:py-8">
           {empty ? (
@@ -630,6 +625,15 @@ export function ChatSurface({
         }}
         onImageError={(msg) => setError(msg)}
       />
+      </div>
+      {rightRailView && (
+        <RightRail
+          view={rightRailView}
+          blocks={blocks}
+          workspacePath={workspacePath}
+          onClose={onCloseRightRail}
+        />
+      )}
     </div>
   );
 }
@@ -1042,7 +1046,7 @@ function BlockRow({
     // sees one canonical source of truth, not a tool log + a panel.
     if (block.call.name === 'todo_write') return null;
     return (
-      <div className="flex pl-10">
+      <div id={`tool-${block.call.id}`} className="flex scroll-mt-4 pl-10">
         <div className="flex-1">
           <ToolCallCard call={block.call} />
         </div>

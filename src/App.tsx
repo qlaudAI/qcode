@@ -5,6 +5,7 @@ import {
   Folder,
   FolderOpen,
   Menu,
+  PanelRight,
   Plus,
   Search as SearchIcon,
   Settings,
@@ -51,6 +52,7 @@ import {
   type Workspace,
 } from './lib/workspace';
 import { ChatSurface } from './ui/ChatSurface';
+import { type RightRailView } from './ui/RightRail';
 import { CommandPalette } from './ui/CommandPalette';
 import { FileTree } from './ui/FileTree';
 import { ModelPicker } from './ui/ModelPicker';
@@ -73,6 +75,14 @@ export function App() {
   // in the titlebar; auto-closes on thread pick so the chat surface
   // takes full width after navigation.
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  // Right rail — single side panel that hosts multiple workbench
+  // views (Tasks, Plan, Files, Terminal, Preview, Diff). All views
+  // share the same panel width so the chat surface always has the
+  // same real estate; users pick what to look at via the dropdown
+  // in the titlebar. null = panel hidden. Mirrors Codex's right
+  // rail.
+  const [rightRailView, setRightRailView] =
+    useState<RightRailView | null>(null);
   // Set true when the user clicked something that requires the
   // desktop app (folder picker, etc.) on the web build. Renders an
   // inline notice with a download CTA instead of failing silently.
@@ -328,6 +338,10 @@ export function App() {
         onRefreshBalance={refreshBalance}
         onOpenSettings={() => setSettingsOpen(true)}
         onToggleSidebar={() => setMobileSidebarOpen((v) => !v)}
+        rightRailView={rightRailView}
+        onPickRightRailView={(v) =>
+          setRightRailView((prev) => (prev === v ? null : v))
+        }
       />
 
       <div className="relative flex flex-1 overflow-hidden">
@@ -384,6 +398,9 @@ export function App() {
               const w = await tryOpenFolder();
               if (w) setWorkspace(w);
             }}
+            rightRailView={rightRailView}
+            onCloseRightRail={() => setRightRailView(null)}
+            workspacePath={workspace?.path}
           />
         </main>
       </div>
@@ -429,6 +446,8 @@ function Titlebar({
   onRefreshBalance,
   onOpenSettings,
   onToggleSidebar,
+  rightRailView,
+  onPickRightRailView,
 }: {
   model: string;
   onModelChange: (slug: string) => void;
@@ -439,6 +458,8 @@ function Titlebar({
   workspaceName?: string;
   onOpenSettings: () => void;
   onToggleSidebar?: () => void;
+  rightRailView?: RightRailView | null;
+  onPickRightRailView?: (v: RightRailView) => void;
 }) {
   return (
     <header className="titlebar relative z-50 flex h-11 items-center justify-between border-b border-border/40 bg-background/40 px-3 backdrop-blur-md">
@@ -484,6 +505,12 @@ function Titlebar({
         <div className="hidden sm:block">
           <SpendBar profile={profile} onRefresh={onRefreshBalance} />
         </div>
+        {onPickRightRailView && (
+          <RightRailMenu
+            active={rightRailView ?? null}
+            onPick={onPickRightRailView}
+          />
+        )}
         <button
           aria-label="Settings"
           className="grid h-7 w-7 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
@@ -630,7 +657,7 @@ function Sidebar({
   const visibleThreads = threads.filter(matches);
 
   return (
-    <aside className="flex w-64 flex-col border-r border-border/40 bg-muted/30 backdrop-blur-sm">
+    <aside className="flex h-full w-full flex-col border-r border-border/40 bg-muted/30 backdrop-blur-sm">
       <div className="space-y-2 px-3 pt-3">
         <button
           onClick={onNewChat}
@@ -919,6 +946,99 @@ function ProjectGroup({
         </div>
       </div>
     </li>
+  );
+}
+
+// Titlebar dropdown that picks which view the right rail shows.
+// Codex's pattern: one button (PanelRight icon), opens a small menu
+// with all the workbench surfaces — Tasks, Plan, Files, Terminal,
+// Preview, Diff. Each entry is a single click; clicking the active
+// one again closes the panel. Keyboard shortcuts mirror Codex
+// (⇧⌘P, ⇧⌘D, etc.) via useShortcuts in the host.
+function RightRailMenu({
+  active,
+  onPick,
+}: {
+  active: RightRailView | null;
+  onPick: (v: RightRailView) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  // Close on outside click — single-click open is the lightest
+  // affordance; we don't want a heavier portal-based menu.
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      const target = e.target as Element | null;
+      if (!target?.closest('[data-rightrail-menu]')) setOpen(false);
+    }
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const entries: Array<{
+    view: RightRailView;
+    label: string;
+    hint?: string;
+  }> = [
+    { view: 'tasks', label: 'Tasks' },
+    { view: 'plan', label: 'Plan' },
+    { view: 'files', label: 'Files', hint: '⇧⌘F' },
+    { view: 'terminal', label: 'Terminal', hint: '⌃`' },
+    { view: 'preview', label: 'Preview', hint: '⇧⌘P' },
+    { view: 'diff', label: 'Diff', hint: '⇧⌘D' },
+  ];
+
+  return (
+    <div className="relative" data-rightrail-menu>
+      <button
+        aria-label="Toggle right panel"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          'grid h-7 w-7 place-items-center rounded transition-colors',
+          active
+            ? 'bg-muted text-foreground'
+            : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+        )}
+        title="Open workbench panel"
+      >
+        <PanelRight className="h-3.5 w-3.5" />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-9 z-50 w-52 overflow-hidden rounded-lg border border-border/60 bg-background/95 shadow-xl backdrop-blur-md"
+        >
+          <ul className="py-1">
+            {entries.map((e) => (
+              <li key={e.view}>
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    onPick(e.view);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    'flex w-full items-center justify-between px-3 py-1.5 text-left text-[13px] transition-colors',
+                    active === e.view
+                      ? 'bg-muted/60 text-foreground'
+                      : 'text-foreground/85 hover:bg-muted/40',
+                  )}
+                >
+                  <span>{e.label}</span>
+                  {e.hint && (
+                    <span className="text-[10.5px] tabular-nums text-muted-foreground">
+                      {e.hint}
+                    </span>
+                  )}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
 
