@@ -125,6 +125,12 @@ type RenderBlock =
       status: 'running' | 'done' | 'error';
       /** Final text the subagent returned. Populated on subagent_done. */
       summary: string | null;
+    }
+  | {
+      type: 'checkpoint';
+      result:
+        | { kind: 'committed'; sha: string; message: string; filesChanged: number }
+        | { kind: 'skipped'; reason: string };
     };
 
 // Sample prompts for the empty-state. Each one is calibrated to
@@ -586,6 +592,7 @@ export function ChatSurface({
         // the very next turn without a remount.
         enableConnectors: settingsAtSend.enableConnectors,
         autoApprove: settingsAtSend.autoApprove,
+        autoCommit: settingsAtSend.autoCommit,
         signal: abortRef.current.signal,
         onEvent: (e) => {
           // Stale-run guard: drop events from any run that's been
@@ -959,6 +966,9 @@ function handleEvent(
               }
             : b,
         );
+
+      case 'checkpoint':
+        return [...blocks, { type: 'checkpoint', result: e.result }];
 
       case 'finished':
       case 'error':
@@ -1459,6 +1469,13 @@ function BlockRow({
       </div>
     );
   }
+  if (block.type === 'checkpoint') {
+    return (
+      <div className="flex pl-10">
+        <CheckpointChip result={block.result} />
+      </div>
+    );
+  }
   if (block.type === 'error') {
     const p = block.presentation;
     // Warning-level errors (cap, rate limit, network) get a softer
@@ -1654,6 +1671,45 @@ function TypingDots() {
           {quip}
         </span>
       )}
+    </div>
+  );
+}
+
+// Auto-commit checkpoint chip. Renders after the agent's turn lands
+// when autoCommit is on. "Committed" state shows the short SHA and
+// file count; "skipped" shows the reason on hover (so the user
+// understands why a turn that wrote files didn't get a commit —
+// usually pre-existing dirty tree or special git state).
+function CheckpointChip({
+  result,
+}: {
+  result:
+    | { kind: 'committed'; sha: string; message: string; filesChanged: number }
+    | { kind: 'skipped'; reason: string };
+}) {
+  if (result.kind === 'skipped') {
+    return (
+      <div
+        className="flex items-center gap-2 rounded-full border border-border/60 bg-background/70 px-2.5 py-0.5 text-[10.5px] tabular-nums text-muted-foreground"
+        title={`auto-commit skipped: ${result.reason}`}
+      >
+        <span className="opacity-70">no commit</span>
+        <span className="opacity-50">·</span>
+        <span className="truncate text-foreground/60">{result.reason}</span>
+      </div>
+    );
+  }
+  return (
+    <div
+      className="flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-0.5 text-[10.5px] tabular-nums text-emerald-700 dark:text-emerald-400"
+      title={`auto-commit · ${result.message}`}
+    >
+      <span className="font-medium">commit</span>
+      <span className="font-mono opacity-80">{result.sha}</span>
+      <span className="opacity-50">·</span>
+      <span>
+        {result.filesChanged} file{result.filesChanged === 1 ? '' : 's'}
+      </span>
     </div>
   );
 }

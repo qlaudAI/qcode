@@ -256,6 +256,25 @@ export function SettingsDrawer({
             </p>
           </Section>
 
+          <Section title="Auto-commit">
+            <Toggle
+              label="Commit each agent turn to git"
+              checked={settings.autoCommit}
+              onChange={(v) => update('autoCommit', v)}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              When on, qcode runs <span className="font-mono">git add -A &amp;&amp; git commit</span> on
+              your current branch after every agent turn that wrote
+              files. Author is set to{' '}
+              <span className="font-mono">qcode &lt;bot@qlaud.ai&gt;</span>{' '}
+              so you can filter agent commits from manual ones. Skipped
+              when the working tree was already dirty before the turn
+              (won't mix your WIP), during merges/rebases, or on
+              detached HEAD. <strong>Never pushes</strong> — that
+              stays your call.
+            </p>
+          </Section>
+
           <Section title="Updates">
             <Toggle
               label="Auto-check for updates on launch"

@@ -148,6 +148,18 @@ export type AgentEvent =
       parentToolUseId: string;
       isError: boolean;
       summary: string;
+    }
+  // Auto-commit checkpoint event. Fires once per turn when autoCommit
+  // is on and the agent wrote any files. The UI renders a small chip
+  // ("commit a1b2c3d4 — 3 files") that links to the diff. On skip
+  // (already-dirty tree, special git state, etc.) we still emit so
+  // the UI can show "skipped: <reason>" the first time it happens
+  // — silent skip would be more confusing than a one-line surface.
+  | {
+      type: 'checkpoint';
+      result:
+        | { kind: 'committed'; sha: string; message: string; filesChanged: number }
+        | { kind: 'skipped'; reason: string };
     };
 
 // ─── Thread agent: server-side tool loop, client_dispatch tools ───
@@ -192,6 +204,11 @@ export type RunThreadAgentOpts = {
    *  the parent's mode unless overridden. See lib/settings.ts for
    *  the yolo/smart/strict semantics. */
   autoApprove?: import('./settings').AutoApproveMode;
+  /** When true, snapshot working-tree state at turn start and commit
+   *  the agent's writes when the turn ends. Skipped on non-git folders,
+   *  pre-existing dirty trees, and special git states (merge/rebase/
+   *  detached). Subagents inherit. */
+  autoCommit?: boolean;
 };
 
 /** Anthropic-shape tool defs → the inline ClientToolDef the qlaud
@@ -251,6 +268,31 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
   let totalInput = 0;
   let totalOutput = 0;
   let currentIteration = 1;
+
+  // Auto-commit checkpoint: snapshot the working-tree state at run
+  // start so we know whether it was clean before any agent action.
+  // We only commit if cleanAtStart was true (don't mix WIP with the
+  // agent's edits). Subagents skip — the parent run owns the
+  // checkpoint surface; otherwise nested subagent commits would
+  // produce a noisy log.
+  const wantsCheckpoint = !!opts.autoCommit && !!opts.workspace && !opts.isSubagent;
+  let preTurnSnapshot: import('./git-checkpoint').Snapshot | null = null;
+  let userTurnSummary = ''; // first text-block of the user turn — feeds the commit subject
+  // Track whether the agent successfully wrote/edited any file this
+  // run. Pure-read turns (read_file / grep / browser) skip the
+  // commit so we don't pollute the log with empty-diff entries.
+  let didWriteFiles = false;
+  if (wantsCheckpoint) {
+    const { snapshot } = await import('./git-checkpoint');
+    preTurnSnapshot = await snapshot(opts.workspace as string);
+    // Pull the user's text from the content blocks; first text wins.
+    for (const b of opts.content) {
+      if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
+        userTurnSummary = b.text;
+        break;
+      }
+    }
+  }
 
   // The first turn always exists; iteration_start fires for #2+.
   opts.onEvent({ type: 'turn_start', turn: 0 });
@@ -481,6 +523,18 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
       },
       onToolDispatchDone: (info) => {
         pending.delete(info.toolUseId);
+        // Note: bash also mutates files (compiles, generates, scaffolds)
+        // but auto-commit only triggers on tracked-by-the-agent writes
+        // because counting bash here would commit on every `pnpm install`
+        // (mutates node_modules, lockfile etc.). git-checkpoint's own
+        // `git status --porcelain` post-check is the truth source — if
+        // bash wrote anything tracked, the porcelain output picks it up.
+        if (
+          !info.isError &&
+          (info.name === 'write_file' || info.name === 'edit_file')
+        ) {
+          didWriteFiles = true;
+        }
         opts.onEvent({
           type: 'tool_done',
           id: info.toolUseId,
@@ -508,6 +562,33 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'unknown';
     opts.onEvent({ type: 'error', message: msg });
+  }
+
+  // Auto-commit after the run wrapped. Always uses `git status
+  // --porcelain` as the truth — `didWriteFiles` is just an early
+  // bail to skip the shell calls when nothing wrote, but bash-mutated
+  // files (formatters, codegen) still count if porcelain sees them.
+  if (wantsCheckpoint && preTurnSnapshot && didWriteFiles) {
+    try {
+      const { commitTurn } = await import('./git-checkpoint');
+      const result = await commitTurn({
+        workspace: opts.workspace as string,
+        snapshot: preTurnSnapshot,
+        summary: userTurnSummary,
+        body: `Thread: ${opts.threadId}\nModel: ${opts.model}`,
+      });
+      opts.onEvent({ type: 'checkpoint', result });
+    } catch (e) {
+      // Don't fail the whole turn over a checkpoint issue. Surface
+      // as a skip event so the user sees something happened.
+      opts.onEvent({
+        type: 'checkpoint',
+        result: {
+          kind: 'skipped',
+          reason: e instanceof Error ? e.message : 'checkpoint failed',
+        },
+      });
+    }
   }
 
   // Drop any leftover approval handles — covers abort mid-tool.

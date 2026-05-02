@@ -73,6 +73,20 @@ export type Settings = {
    *  ops and asking for every read is a worse experience than
    *  letting the agent move. */
   autoApprove: AutoApproveMode;
+  /** Auto-commit per agent turn. After each turn that wrote files,
+   *  qcode runs `git add -A && git commit` on the user's current
+   *  branch. Author is `qcode <bot@qlaud.ai>` so manual vs. agent
+   *  commits stay distinguishable. Skipped when the working tree
+   *  had pre-existing uncommitted changes at turn start, when the
+   *  workspace isn't a git repo, when HEAD is detached, or when a
+   *  merge/rebase is in progress — auto-committing through any of
+   *  those would mix work or confuse the merge state machine.
+   *  Never pushes to remote; that stays the user's call.
+   *
+   *  Default off — opt-in. When users like it we can flip the
+   *  default; pushing it on by default risks surprising people who
+   *  weren't watching. */
+  autoCommit: boolean;
 };
 
 const DEFAULT_SUBAGENT_MODEL = 'claude-haiku-4-5';
@@ -85,6 +99,7 @@ const DEFAULTS: Settings = {
   subagentModel: DEFAULT_SUBAGENT_MODEL,
   theme: 'system',
   autoApprove: 'smart',
+  autoCommit: false,
 };
 
 /** Coerce the stored autoApprove value to a tri-state mode. Handles
