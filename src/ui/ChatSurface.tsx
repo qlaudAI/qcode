@@ -583,6 +583,8 @@ export function ChatSurface({
         value={input}
         onChange={setInput}
         modelLabel={m?.label ?? model}
+        workspaceName={workspaceName}
+        mode={mode}
         onSend={send}
         onStop={stop}
         busy={busy}
@@ -1520,6 +1522,8 @@ function Composer({
   value,
   onChange,
   modelLabel,
+  workspaceName,
+  mode,
   onSend,
   onStop,
   busy,
@@ -1538,6 +1542,12 @@ function Composer({
   value: string;
   onChange: (v: string) => void;
   modelLabel: string;
+  /** Last segment of the workspace path. Renders as a pill on the
+   *  composer footer so the user always sees what folder qcode is
+   *  about to act on — no "wait, which repo?" surprises. */
+  workspaceName?: string;
+  /** Active mode — drives the secondary pill ("Plan" / "Agent"). */
+  mode?: 'agent' | 'plan';
   onSend: (v: string) => void;
   onStop: () => void;
   busy: boolean;
@@ -1829,17 +1839,55 @@ function Composer({
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="grid h-7 w-7 place-items-center rounded-md border border-border/60 bg-background text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
+                  className="grid h-7 w-7 place-items-center rounded-md border border-border/60 bg-background text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground active:scale-95"
                   aria-label="Attach files"
                   title="Attach images, PDFs, or text files"
                 >
                   <Paperclip className="h-3.5 w-3.5" />
                 </button>
-                <span className="text-[11px] text-muted-foreground">
-                  {dragging
-                    ? 'Drop to attach'
-                    : `${modelLabel} · ⏎ to send · @ files · paste/drop · images, PDFs, text`}
-                </span>
+                {dragging ? (
+                  <span className="text-[11px] font-medium text-primary">
+                    Drop to attach
+                  </span>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    {workspaceName && (
+                      <span
+                        className="inline-flex max-w-[140px] items-center gap-1 truncate rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-[10.5px] font-medium text-foreground/80"
+                        title={`Workspace: ${workspaceName}`}
+                      >
+                        <FolderOpen className="h-2.5 w-2.5 shrink-0 text-muted-foreground" />
+                        <span className="truncate">{workspaceName}</span>
+                      </span>
+                    )}
+                    {mode && (
+                      <span
+                        className={cn(
+                          'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-medium',
+                          mode === 'plan'
+                            ? 'border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                            : 'border border-border/60 bg-background/60 text-foreground/80',
+                        )}
+                        title={
+                          mode === 'plan'
+                            ? 'Plan mode — read-only, proposes changes'
+                            : 'Agent mode — full toolkit'
+                        }
+                      >
+                        {mode === 'plan' ? 'Plan' : 'Agent'}
+                      </span>
+                    )}
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-[10.5px] font-medium text-foreground/80"
+                      title="Active model — switch in the title bar"
+                    >
+                      {modelLabel}
+                    </span>
+                    <span className="hidden text-[10.5px] text-muted-foreground sm:inline">
+                      ⏎ to send · @ files
+                    </span>
+                  </div>
+                )}
               </div>
               {busy ? (
                 <button

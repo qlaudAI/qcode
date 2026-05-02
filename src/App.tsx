@@ -5,8 +5,10 @@ import {
   Folder,
   FolderOpen,
   Plus,
+  Search as SearchIcon,
   Settings,
   Wallet,
+  X as XIcon,
 } from 'lucide-react';
 import { cn } from './lib/cn';
 import { QlaudMark } from './ui/QlaudMark';
@@ -561,12 +563,24 @@ function Sidebar({
   onPickThread: (id: string) => void;
   onDeleteThread: (id: string) => void;
 }) {
+  // Local filter — narrows BOTH the projects section and the chats
+  // section as the user types. Empty string = pass-through. Match
+  // is case-insensitive substring on the title for now (cheap, no
+  // index needed since titles are already in memory). Cmd-K still
+  // opens the global palette for actions + files; this is the
+  // sidebar-scoped "find a conversation" affordance.
+  const [filter, setFilter] = useState('');
+  const filterLc = filter.trim().toLowerCase();
+  const matches = (t: ThreadSummary) =>
+    !filterLc || t.title.toLowerCase().includes(filterLc);
+  const visibleThreads = threads.filter(matches);
+
   return (
     <aside className="flex w-64 flex-col border-r border-border/40 bg-muted/30 backdrop-blur-sm">
       <div className="space-y-2 px-3 pt-3">
         <button
           onClick={onNewChat}
-          className="flex w-full items-center justify-between rounded-md border border-border bg-background/80 px-3 py-2 text-sm font-medium transition-colors hover:border-foreground/30"
+          className="flex w-full items-center justify-between rounded-md border border-border bg-background/80 px-3 py-2 text-sm font-medium transition-colors hover:border-foreground/30 hover:bg-background"
         >
           <span className="flex items-center gap-2">
             <Plus className="h-4 w-4" />
@@ -576,7 +590,7 @@ function Sidebar({
         </button>
         <button
           onClick={onOpenFolder}
-          className="flex w-full items-center justify-between rounded-md border border-border bg-background/80 px-3 py-2 text-sm font-medium transition-colors hover:border-foreground/30"
+          className="flex w-full items-center justify-between rounded-md border border-border bg-background/80 px-3 py-2 text-sm font-medium transition-colors hover:border-foreground/30 hover:bg-background"
         >
           <span className="flex items-center gap-2">
             <FolderOpen className="h-4 w-4" />
@@ -584,11 +598,18 @@ function Sidebar({
           </span>
           <Kbd>⌘O</Kbd>
         </button>
+        {/* Filter input. Hidden when there are <3 threads — for an
+         *  empty/near-empty list there's nothing to find. Visible
+         *  the moment the sidebar gets meaningful, which mirrors
+         *  how Codex / Linear / Slack reveal their search row. */}
+        {threads.length >= 3 && (
+          <SidebarFilter value={filter} onChange={setFilter} />
+        )}
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pt-4">
         <ProjectsSection
-          threads={threads}
+          threads={visibleThreads}
           currentThreadId={currentThreadId}
           activeWorkspacePath={workspace?.path ?? null}
           onPick={onPickThread}
@@ -599,11 +620,16 @@ function Sidebar({
             Chats
           </div>
           <ThreadList
-            threads={threads.filter((t) => !t.workspacePath)}
+            threads={visibleThreads.filter((t) => !t.workspacePath)}
             currentId={currentThreadId}
             onPick={onPickThread}
             onDelete={onDeleteThread}
           />
+          {filterLc && visibleThreads.length === 0 && (
+            <p className="px-2 py-2 text-[11px] leading-relaxed text-muted-foreground">
+              No matches for &ldquo;{filter}&rdquo;.
+            </p>
+          )}
         </div>
 
         {workspace ? (
@@ -649,6 +675,46 @@ function Sidebar({
         v0.1.0-alpha · powered by qlaud
       </div>
     </aside>
+  );
+}
+
+// Compact search/filter input for the sidebar. Press Esc to clear,
+// Backspace on an empty value bails focus back to the chat. Stays
+// thin and quiet by default; primary border on focus mirrors the
+// composer's focus styling so the surfaces feel like one app.
+function SidebarFilter({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="group relative flex items-center rounded-md border border-border bg-background/60 px-2.5 py-1.5 transition-colors focus-within:border-foreground/30 focus-within:bg-background">
+      <SearchIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-colors group-focus-within:text-foreground/70" />
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape' && value) {
+            e.preventDefault();
+            onChange('');
+          }
+        }}
+        placeholder="Find a conversation"
+        className="ml-2 min-w-0 flex-1 bg-transparent text-[12.5px] outline-none placeholder:text-muted-foreground"
+      />
+      {value && (
+        <button
+          aria-label="Clear filter"
+          onClick={() => onChange('')}
+          className="ml-1 grid h-4 w-4 shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <XIcon className="h-3 w-3" />
+        </button>
+      )}
+    </div>
   );
 }
 
