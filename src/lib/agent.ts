@@ -1,13 +1,14 @@
 // qcode's agent loop.
 //
-// Sends the user's turn, streams the model's response, executes any
-// tool calls in qcode (read or write, depending on tier), feeds
-// tool_results back, and repeats until the model returns a non-tool
-// stop_reason or we hit the safety cap (MAX_LOOPS).
+// Sends the user's turn over /v1/threads/:id/messages, streams the
+// model + server-side tool loop, dispatches client_dispatch tool
+// calls (the 7 local tools — file ops, bash, browser) when qlaud
+// parks on the per-thread Durable Object, POSTs the result, and
+// keeps consuming SSE until qlaud emits qlaud.done.
 //
 // Approval flow for write_file / edit_file / bash:
 //   1. Tool executor builds an ApprovalRequest (diff, command, etc.)
-//   2. Calls back into runAgent's `onApproval` handler
+//   2. Calls back into onApproval
 //   3. ChatSurface renders an approval card and resolves the promise
 //      when the user clicks Allow or Reject
 //   4. Executor runs (or skips) based on the decision
@@ -15,11 +16,9 @@
 import { envSystemSection, probeEnv } from './env-probe';
 import { getProjectMemory, memorySystemSection } from './memory';
 import {
-  streamMessage,
   streamThreadMessage,
   type ClientToolDef,
   type ContentBlock,
-  type Message,
 } from './qlaud-client';
 import {
   ALL_TOOLS,
@@ -67,8 +66,6 @@ Tools available to you:
 - write_file / edit_file / bash are NOT available in plan mode by design. Don't claim you'll run them; don't ask to use them. Describe the change in prose.
 
 When the user is satisfied with the plan they'll switch out of plan mode and ask you to execute.`;
-
-const MAX_LOOPS = 16; // hard ceiling; with write tools, real tasks need more turns
 
 export type AgentEvent =
   | { type: 'turn_start'; turn: number }
@@ -153,207 +150,20 @@ export type AgentEvent =
       summary: string;
     };
 
-export type RunAgentOpts = {
-  model: string;
-  workspace: string | null;
-  /** Prior conversation. Includes the just-sent user turn at the end. */
-  history: Message[];
-  /** 'agent' (default) — full toolkit. 'plan' — read-only tools +
-   *  proposal-style system prompt. */
-  mode?: 'agent' | 'plan';
-  signal?: AbortSignal;
-  onEvent: (e: AgentEvent) => void;
-  /** Resolves to allow/reject for a write/edit/bash tool. The UI
-   *  surfaces the request via the `approval_pending` event and
-   *  fulfills this promise when the user clicks. */
-  onApproval: (
-    toolUseId: string,
-    request: ApprovalRequest,
-  ) => Promise<ApprovalDecision>;
-  /** Auto-approve preferences forwarded to executeTool — when set,
-   *  the relevant categories (workspace edits, safe-bash whitelist)
-   *  bypass requestApproval. ChatSurface reads these from settings
-   *  at send time so toggling takes effect on the next turn. */
-  autoApprove?: {
-    workspaceEdits?: boolean;
-    safeBash?: boolean;
-  };
-};
-
-export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
-  const messages: Message[] = [...opts.history];
-  const planMode = opts.mode === 'plan';
-  const basePrompt = planMode ? SYSTEM_PROMPT_PLAN : SYSTEM_PROMPT_AGENT;
-  // Project memory (qcode.md / CLAUDE.md) is appended to the base
-  // persona so the model picks up project conventions on every turn.
-  // Cached per workspace inside getProjectMemory — only one fs read
-  // per session unless the user clears the cache via /init.
-  const memory = opts.workspace
-    ? await getProjectMemory(opts.workspace)
-    : null;
-  const systemPrompt = basePrompt + memorySystemSection(memory);
-  const tools = opts.workspace
-    ? planMode
-      ? READ_TOOLS
-      : ALL_TOOLS
-    : undefined;
-  // Aggregate per-turn usage across the whole runAgent call. Each
-  // streamMessage iteration adds its own input/output token count;
-  // the final 'finished' event ships the cumulative number.
-  let totalInput = 0;
-  let totalOutput = 0;
-
-  for (let turn = 0; turn < MAX_LOOPS; turn++) {
-    opts.onEvent({ type: 'turn_start', turn });
-
-    const assistantBlocks: ContentBlock[] = [];
-    let currentText = '';
-    let stopReason: string | undefined;
-
-    try {
-      await streamMessage({
-        model: opts.model,
-        system: systemPrompt,
-        tools,
-        messages,
-        signal: opts.signal,
-        onTextDelta: (chunk) => {
-          currentText += chunk;
-          opts.onEvent({ type: 'text', text: chunk });
-        },
-        onToolUse: (block) => {
-          if (currentText) {
-            assistantBlocks.push({ type: 'text', text: currentText });
-            currentText = '';
-          }
-          assistantBlocks.push({
-            type: 'tool_use',
-            id: block.id,
-            name: block.name,
-            input: block.input,
-          });
-          opts.onEvent({
-            type: 'tool_call',
-            id: block.id,
-            name: block.name,
-            input: block.input,
-            status: 'running',
-          });
-        },
-        onMessageStart: (info) => {
-          if (info.inputTokens != null) totalInput += info.inputTokens;
-        },
-        onMessageStop: (info) => {
-          if (currentText) {
-            assistantBlocks.push({ type: 'text', text: currentText });
-            currentText = '';
-          }
-          stopReason = info.stopReason;
-          if (info.outputTokens != null) totalOutput += info.outputTokens;
-        },
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'unknown';
-      opts.onEvent({ type: 'error', message: msg });
-      return messages;
-    }
-
-    messages.push({ role: 'assistant', content: assistantBlocks });
-
-    if (stopReason !== 'tool_use') {
-      opts.onEvent({
-        type: 'finished',
-        stopReason,
-        turns: turn + 1,
-        usage: { inputTokens: totalInput, outputTokens: totalOutput },
-        // Legacy runAgent path doesn't go through qlaud's tool-loop
-        // SSE; cost + seq aren't available here. UI falls back to
-        // hiding the cost cell when null.
-        costUsd: null,
-        seq: null,
-      });
-      return messages;
-    }
-
-    const toolUseBlocks = assistantBlocks.filter(
-      (b): b is Extract<ContentBlock, { type: 'tool_use' }> =>
-        b.type === 'tool_use',
-    );
-    const toolResults: ContentBlock[] = [];
-
-    for (const tu of toolUseBlocks) {
-      if (!opts.workspace) {
-        const content =
-          'No workspace is open. The user must open a folder (⌘O) before file tools work. Tell them to do that.';
-        opts.onEvent({
-          type: 'tool_done',
-          id: tu.id,
-          content,
-          isError: true,
-        });
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: tu.id,
-          content,
-          is_error: true,
-        });
-        continue;
-      }
-
-      const call: ToolCall = { id: tu.id, name: tu.name, input: tu.input };
-      const result: ToolResult = await executeTool(call, {
-        workspace: opts.workspace,
-        autoApprove: opts.autoApprove,
-        requestApproval: async (req) => {
-          opts.onEvent({ type: 'approval_pending', id: tu.id, request: req });
-          const decision = await opts.onApproval(tu.id, req);
-          opts.onEvent({ type: 'approval_resolved', id: tu.id, decision });
-          return decision;
-        },
-        onPartial: (partial) => {
-          opts.onEvent({ type: 'tool_progress', id: tu.id, partial });
-        },
-      });
-      opts.onEvent({
-        type: 'tool_done',
-        id: tu.id,
-        content: result.content,
-        isError: !!result.is_error,
-      });
-      toolResults.push({
-        type: 'tool_result',
-        tool_use_id: result.tool_use_id,
-        content: result.content,
-        is_error: result.is_error,
-      });
-    }
-
-    messages.push({ role: 'user', content: toolResults });
-  }
-
-  opts.onEvent({
-    type: 'error',
-    message: `Agent hit the ${MAX_LOOPS}-turn safety limit. Break the task into smaller steps.`,
-  });
-  return messages;
-}
-
 // ─── Thread agent: server-side tool loop, client_dispatch tools ───
 //
-// Sprint C entrypoint. Replaces the multi-iteration runAgent loop
-// with a single streamThreadMessage call. qlaud-edge runs the
-// model + tool-loop server-side; qcode just dispatches tool calls
-// for our 7 local tools (file ops, bash) when qlaud parks on the
-// per-thread Durable Object.
+// qlaud-edge runs the model + tool-loop server-side; qcode dispatches
+// the 7 local tools (file ops, bash, browser) when qlaud parks on the
+// per-thread Durable Object. One streamThreadMessage call streams the
+// entire multi-iteration response — no client-side history rebuild.
 //
-// Why split from runAgent instead of refactoring it: the two have
-// fundamentally different shapes — runAgent maintains history
-// client-side and re-sends it every turn; runThreadAgent sends
-// one turn and streams the entire multi-iteration response. Trying
-// to share the loop body makes both worse. App.tsx + ChatSurface
-// pick which one to use; the legacy runAgent stays around in
-// Sprint C-1 so we can flip the switch in C-2 without bleeding
-// regressions across the same commit.
+// Parallelism: the edge dispatches every tool_use in an iteration via
+// Promise.all (apps/edge/src/lib/exec-messages-streaming-with-tools.ts).
+// On the client, qlaud-client.ts intentionally does NOT await the
+// onToolDispatchStart handler, so concurrent tool_use blocks run their
+// executeTool + safeSubmit in parallel. The system prompt explicitly
+// tells the model to batch independent reads in one assistant message
+// — the infrastructure rewards that pattern.
 
 export type RunThreadAgentOpts = {
   threadId: string;

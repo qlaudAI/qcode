@@ -526,6 +526,14 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
           opts.onIterationStart?.({ iteration: ev.iteration ?? 0 });
           break;
         case 'qlaud.tool_dispatch_start':
+          // Fire-and-forget on purpose. Do NOT await this handler.
+          // The edge dispatches every tool_use in one iteration via
+          // Promise.all and parks on the per-thread DO until each
+          // tool_result POST lands. Awaiting here would serialize the
+          // SSE event loop behind a single tool's executeTool +
+          // safeSubmit, defeating the parallelism the edge is trying
+          // to give us. The handler in agent.ts uses a per-toolUseId
+          // pending Map so concurrent dispatches don't conflict.
           opts.onToolDispatchStart?.({
             toolUseId: ev.tool_use_id ?? '',
             name: ev.name ?? '',
