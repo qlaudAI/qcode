@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowUp,
   BookOpen,
+  Download,
   FileText,
   FolderOpen,
   RotateCcw,
@@ -10,6 +11,8 @@ import {
   Square,
   X,
 } from 'lucide-react';
+
+import { isTauri } from '../lib/tauri';
 
 import { runThreadAgent, type AgentEvent } from '../lib/agent';
 import { buildAttachmentContext } from '../lib/attachments';
@@ -95,6 +98,16 @@ const SAMPLE_PROMPTS = [
   'Open the main entry point and explain what it does',
   'Find the auth flow — which files implement it?',
   'Summarize the architecture from the README and source',
+];
+
+// Web build has no workspace + no tools, so the file/grep prompts
+// above don't apply. These are framed for paste-in code review +
+// general questions a chat-only build can actually handle.
+const WEB_SAMPLE_PROMPTS = [
+  'Review this code for bugs (paste it after)',
+  'Explain how React hooks work',
+  'What\'s the right way to structure a Cloudflare Worker?',
+  'Compare Next.js App Router vs Pages Router',
 ];
 
 export function ChatSurface({
@@ -1036,6 +1049,47 @@ function EmptyState({
   // useful, so demanding the choice up front is better than letting
   // the user discover that mid-prompt.
   if (!hasWorkspace) {
+    // Web build can't open a folder — browsers don't get raw fs
+    // access. Show a chat-only welcome with sample prompts and a
+    // download CTA, instead of an "Open folder" button that leads
+    // to a confusing modal.
+    if (!isTauri()) {
+      return (
+        <div className="flex flex-col items-center pt-12 text-center">
+          <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
+          <h2 className="mt-6 text-2xl font-semibold tracking-tight">
+            Welcome to qcode chat
+          </h2>
+          <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
+            You&rsquo;re on the web build — chat-only. Ask anything you can
+            answer with text: code review on snippets you paste, design
+            questions, debugging help. To run shell commands, edit files,
+            or open a folder, get the desktop app.
+          </p>
+          <a
+            href="https://qlaud.ai/qcode"
+            target="_blank"
+            rel="noopener"
+            className="mt-6 inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90"
+          >
+            <Download className="h-4 w-4" />
+            Download qcode for desktop
+          </a>
+          <div className="mt-10 grid w-full max-w-2xl gap-2 text-left">
+            {WEB_SAMPLE_PROMPTS.map((s) => (
+              <button
+                key={s}
+                onClick={() => onPick(s)}
+                className="rounded-lg border border-border bg-background/70 px-4 py-3 text-sm text-muted-foreground transition-colors hover:border-foreground/20 hover:text-foreground"
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex flex-col items-center pt-12 text-center">
         <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
