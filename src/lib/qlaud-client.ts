@@ -275,6 +275,27 @@ export type ThreadStreamOpts = ThreadStreamHandlers & {
   system?: string;
   signal?: AbortSignal;
   maxTokens?: number;
+  /** Server-built system-prompt opt-in. When present, qlaud assembles
+   *  the persona + plan-mode + memory + env sections itself and uses
+   *  THAT as the system prompt — overriding whatever string we send
+   *  in `system`. The point: prompt tweaks ride a `wrangler deploy`
+   *  rather than requiring a qcode binary release. We still send
+   *  `system` for backward compat — if qlaud is ever rolled back to
+   *  a version that doesn't know about qlaud_runtime, the legacy
+   *  client-built prompt still works. */
+  qlaudRuntime?: {
+    plan_mode?: boolean;
+    is_subagent?: boolean;
+    memory?: { source: string; text: string };
+    env?: {
+      platform: 'macos' | 'linux' | 'windows' | 'unknown';
+      arch?: string;
+      os_version?: string;
+      workspace: string;
+      tools?: Record<string, string | null>;
+      rg?: 'sidecar' | 'system' | null;
+    };
+  };
 };
 
 export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void> {
@@ -292,6 +313,7 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
   if (opts.clientTools && opts.clientTools.length > 0) {
     body.client_tools = opts.clientTools;
   }
+  if (opts.qlaudRuntime) body.qlaud_runtime = opts.qlaudRuntime;
 
   const res = await fetch(`${BASE}/v1/threads/${encodeURIComponent(opts.threadId)}/messages`, {
     method: 'POST',

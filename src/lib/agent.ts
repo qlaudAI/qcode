@@ -400,12 +400,36 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
   // The first turn always exists; iteration_start fires for #2+.
   opts.onEvent({ type: 'turn_start', turn: 0 });
 
+  // Server-built prompt opt-in: send the same memory + env data the
+  // local assembler used, plus plan_mode flag, so qlaud can build the
+  // canonical system prompt server-side. We still pass the locally-
+  // built `systemPrompt` as a fallback for the (rare) case where a
+  // qlaud worker rollback lands us on a version that doesn't know
+  // about qlaud_runtime — old worker reads `system`, new worker
+  // overrides it with the server-built one.
+  const qlaudRuntime = {
+    plan_mode: planMode,
+    is_subagent: !!opts.isSubagent,
+    memory: memory ? { source: memory.source, text: memory.text } : undefined,
+    env: env
+      ? {
+          platform: env.platform,
+          arch: env.arch || undefined,
+          os_version: env.osVersion || undefined,
+          workspace: env.workspace,
+          tools: env.tools,
+          rg: env.rg,
+        }
+      : undefined,
+  };
+
   try {
     await streamThreadMessage({
       threadId: opts.threadId,
       model: opts.model,
       content: opts.content,
       system: systemPrompt,
+      qlaudRuntime,
       clientTools,
       toolsMode: opts.enableConnectors ? 'dynamic' : undefined,
       signal: opts.signal,
