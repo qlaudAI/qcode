@@ -1,9 +1,11 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import { QueryClientProvider } from '@tanstack/react-query';
 
 import { App } from './App';
 import { initAnalytics, posthog } from './lib/analytics';
 import { consumeAuthCallback, hydrateAuth } from './lib/auth';
+import { hydrateThreadsFromCache, queryClient } from './lib/queries';
 import { isTauri } from './lib/tauri';
 import './styles.css';
 
@@ -29,9 +31,14 @@ async function boot() {
   posthog.capture('app_boot');
   await consumeAuthCallback();
   await hydrateAuth();
+  // Seed the threads query from localStorage so the sidebar paints
+  // instantly on cold start while the remote refetch runs in the bg.
+  hydrateThreadsFromCache();
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
-      <App />
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
     </React.StrictMode>,
   );
 }

@@ -34,10 +34,8 @@ import { MODELS } from '../lib/models';
 import { planToAgentHandoff, setLastMode } from '../lib/mode-tracking';
 import { getSettings } from '../lib/settings';
 import type { ContentBlock, Message } from '../lib/qlaud-client';
-import {
-  getRemoteThreadMessages,
-  type CompactionInfo,
-} from '../lib/threads';
+import { type CompactionInfo } from '../lib/threads';
+import { useThreadMessagesQuery } from '../lib/queries';
 import { QlaudMark } from './QlaudMark';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
 import {
@@ -223,30 +221,19 @@ export function ChatSurface({
     };
   }, []);
 
-  // Rehydrate when the active thread changes. qlaud owns the
-  // canonical history — we GET the message list and convert back
-  // into render blocks.
+  // Rehydrate when the active thread changes. Query owns the network
+  // dance (caching, dedupe, abort, retry); we just project its data
+  // into the render-block state once per thread switch.
   //
   // Busy guard: when the user sends a turn against a brand-new
   // session, ensureThreadId provisions a remote thread mid-send and
-  // bumps threadId from null to a real id. We don't want to fetch
-  // (and overwrite the just-pushed user_text block) in that race —
-  // the new thread is empty server-side anyway. Skip the load while
-  // a send is in flight; the next thread-switch covers it.
-  //
-  // Also skip if we've already loaded this exact id this session
-  // (covers re-renders that aren't thread-switches, like model
-  // changes propagating through props).
+  // bumps threadId from null to a real id. We don't want to overwrite
+  // the just-pushed user_text block in that race — the new thread is
+  // empty server-side anyway. Skip the load while a send is in flight;
+  // the next thread-switch covers it.
+  const messagesQuery = useThreadMessagesQuery(busy ? null : threadId);
   const lastLoadedRef = useRef<string | null>(null);
   useEffect(() => {
-    // Order matters: check busy FIRST. When the user sends from a
-    // brand-new thread, the sequence is setBlocks([user]) →
-    // setBusy(true) → ensureThreadId() → setCurrentId(t.id). The
-    // setCurrentId triggers a prop change here. Without the busy
-    // gate first, the (!threadId) wipe path was racing against
-    // ensureThreadId returning — wiping the user's just-sent bubble
-    // a few ms before threadId arrived. Symptom: "I keep sending hi
-    // and after sending it disappears."
     if (busy) return;
     if (!threadId) {
       setBlocks([]);
@@ -254,25 +241,11 @@ export function ChatSurface({
       return;
     }
     if (lastLoadedRef.current === threadId) return;
+    if (!messagesQuery.data) return;
     lastLoadedRef.current = threadId;
-    let cancelled = false;
-    void getRemoteThreadMessages(threadId)
-      .then((history) => {
-        if (cancelled) return;
-        setBlocks(historyToBlocks(history.messages));
-        setCompaction(history.compaction);
-      })
-      .catch(() => {
-        // 404 (deleted from another device) / network — leave blocks
-        // empty; the user can still send a fresh turn.
-        if (cancelled) return;
-        setBlocks([]);
-        setCompaction(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [threadId, busy]);
+    setBlocks(historyToBlocks(messagesQuery.data.messages));
+    setCompaction(messagesQuery.data.compaction);
+  }, [threadId, busy, messagesQuery.data]);
 
   useEffect(
     () => () => {

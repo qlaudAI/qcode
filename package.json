@@ -1,6 +1,6 @@
 {
   "name": "qcode",
-  "version": "0.1.0-alpha.31",
+  "version": "0.1.0-alpha.32",
   "private": true,
   "description": "The multi-model coding agent. Bring any model — Claude, GPT, Llama, DeepSeek — to your codebase. Powered by qlaud.",
   "type": "module",
@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.100.8",
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-deep-link": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.1",

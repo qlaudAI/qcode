@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { MessageSquare, Trash2 } from 'lucide-react';
 
 import { cn } from '../lib/cn';
+import { prefetchThreadMessages } from '../lib/queries';
 import type { ThreadSummary } from '../lib/threads';
 
 export function ThreadList({
@@ -31,6 +32,13 @@ export function ThreadList({
           active={t.id === currentId}
           onPick={() => onPick(t.id)}
           onDelete={() => onDelete(t.id)}
+          onHover={() => {
+            // Hover prefetch: warms the message-history query so the
+            // click-to-render is ≤1 frame from cache. Idempotent
+            // (Query dedupes) and gated by the 30s staleTime in
+            // prefetchThreadMessages, so this is cheap on hover-spam.
+            void prefetchThreadMessages(t.id);
+          }}
         />
       ))}
     </ul>
@@ -42,15 +50,19 @@ function Row({
   active,
   onPick,
   onDelete,
+  onHover,
 }: {
   thread: ThreadSummary;
   active: boolean;
   onPick: () => void;
   onDelete: () => void;
+  onHover?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   return (
     <li
+      onMouseEnter={onHover}
+      onFocus={onHover}
       className={cn(
         'group relative flex items-center gap-2 rounded px-2 py-1.5 text-left transition-colors',
         active ? 'bg-muted/80' : 'hover:bg-muted/50',

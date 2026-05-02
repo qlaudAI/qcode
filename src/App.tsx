@@ -5,15 +5,10 @@ import { QlaudMark } from './ui/QlaudMark';
 import {
   clearAuth,
   getKey,
-  getProfile,
-  setProfile as persistProfile,
   startSignIn,
-  type Profile,
 } from './lib/auth';
 import { isTauri, WebNotSupportedError } from './lib/tauri';
 import { posthog } from './lib/analytics';
-import { fetchAccount } from './lib/account';
-import { fetchBalance } from './lib/billing';
 import { startDeepLinkListener } from './lib/deep-link';
 import {
   getSettings,
@@ -22,16 +17,19 @@ import {
 } from './lib/settings';
 import { useShortcuts, type MenuId } from './lib/shortcuts';
 import {
-  createRemoteThread,
-  deleteRemoteThread,
-  listRemoteThreads,
-  purgeEmptyRemoteThreads,
-  loadCachedSummaries,
-  patchCachedSummary,
-  removeCachedSummary,
-  saveCachedSummaries,
+  clearAllQueries,
+  invalidateBalance,
+  patchThread,
+  qk,
+  queryClient,
+  useAccountQuery,
+  useBalanceQuery,
+  useCreateThreadMutation,
+  useDeleteThreadMutation,
+  useThreadsQuery,
+} from './lib/queries';
+import {
   titleFromPrompt,
-  upsertCachedSummary,
   type ThreadSummary,
 } from './lib/threads';
 import {
@@ -50,7 +48,6 @@ import { ThreadList } from './ui/ThreadList';
 
 export function App() {
   const [authed, setAuthed] = useState<boolean>(() => Boolean(getKey()));
-  const [profile, setProfile] = useState<Profile | null>(() => getProfile());
   const [model, setModel] = useState<string>(() => getSettings().defaultModel);
   const [mode, setMode] = useState<AgentMode>(() => getSettings().mode);
   const [workspace, setWorkspace] = useState<Workspace | null>(() =>
@@ -102,268 +99,163 @@ export function App() {
     await clearAuth();
     setCurrentWorkspace(null);
     setAuthed(false);
-    setProfile(null);
     setWorkspace(null);
     setSettingsOpen(false);
+    // Wipe server-state caches — no stale data leaks if a different
+    // account signs in next.
+    clearAllQueries();
   }, []);
 
-  // Threads. qlaud owns the canonical history at /v1/threads; we
-  // hold a localStorage cache of summaries so the sidebar renders
-  // before the network round-trip lands. ChatSurface fetches the
-  // active thread's messages via GET /v1/threads/:id/messages on
-  // mount and re-renders from there.
-  const [threads, setThreads] = useState<ThreadSummary[]>(() =>
-    loadCachedSummaries(),
-  );
-  const [currentId, setCurrentId] = useState<string | null>(
-    () => loadCachedSummaries()[0]?.id ?? null,
-  );
+  // ─── Server state ─────────────────────────────────────────────
+  // All of this used to be hand-rolled useEffects (boot reconcile,
+  // refreshAccount, refreshBalance). Now Query owns it: cache hydrates
+  // from localStorage on boot for instant paint, refetches in the
+  // background, and refetches automatically on focus / reconnect.
+  // No more "is the data fresh?" bug surface.
 
-  // Reconcile the cache against qlaud on first authed render. Remote
-  // wins on conflict — if a thread was deleted on another device,
-  // our local cache loses its row. Newly-created remote threads get
-  // a synthesized title (qlaud doesn't store one yet).
-  useEffect(() => {
-    if (!authed) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        // Best-effort cleanup of orphans before listing — keeps the
-        // sidebar clean even when sends previously failed mid-flight
-        // (CORS, network, capability gaps) and left empty threads
-        // behind. Safe to call every load; server returns 0 when
-        // nothing matches.
-        await purgeEmptyRemoteThreads();
-        const remote = await listRemoteThreads();
-        if (cancelled) return;
-        const cache = loadCachedSummaries();
-        const cacheById = new Map(cache.map((s) => [s.id, s]));
-        const merged: ThreadSummary[] = remote.map((r) => {
-          const cached = cacheById.get(r.id);
-          // Prefer remote metadata for workspace info — survives a
-          // reinstall / cache wipe. Fall back to local cache (covers
-          // the brief window between optimistic create and the
-          // metadata round-tripping back from qlaud).
-          const meta = (r.metadata ?? {}) as Record<string, unknown>;
-          const wsPath =
-            typeof meta.workspace_path === 'string'
-              ? meta.workspace_path
-              : cached?.workspacePath;
-          const wsName =
-            typeof meta.workspace_name === 'string'
-              ? meta.workspace_name
-              : cached?.workspaceName;
-          return {
-            id: r.id,
-            title: cached?.title ?? 'New chat',
-            model: cached?.model ?? model,
-            createdAt: r.created_at,
-            updatedAt: r.last_active_at,
-            ...(wsPath ? { workspacePath: wsPath } : {}),
-            ...(wsName ? { workspaceName: wsName } : {}),
-          };
-        });
-        saveCachedSummaries(merged);
-        setThreads(merged);
-        // If our active id no longer exists remotely, fall back to
-        // the most recent thread (or null).
-        if (currentId && !merged.some((t) => t.id === currentId)) {
-          setCurrentId(merged[0]?.id ?? null);
-        }
-      } catch {
-        // Network blip on boot — keep the cached view, retry implicit
-        // on next render that triggers the effect.
+  const threadsQuery = useThreadsQuery({
+    authed,
+    workspace,
+    fallbackModel: model,
+  });
+  const threads = threadsQuery.data ?? [];
+
+  const accountQuery = useAccountQuery(authed);
+  const balanceQuery = useBalanceQuery(authed);
+
+  // Single derived profile — what every consumer that used to read
+  // from useState(profile) now reads. No persisted middle layer:
+  // Query is the source of truth.
+  const profile = authed
+    ? {
+        email: accountQuery.data?.email ?? '',
+        user_id: accountQuery.data?.user_id ?? '',
+        balance_usd: balanceQuery.data?.balanceUsd ?? undefined,
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed]);
+    : null;
 
-  // Pull live balance from qlaud and merge into the cached profile so
-  // the title-bar spend bar shows fresh numbers. Idempotent — safe to
-  // call from anywhere (boot, post-turn, manual refresh click).
-  const refreshBalance = useCallback(async () => {
-    if (!getKey()) return;
-    const info = await fetchBalance();
-    if (!info) return;
-    setProfile((p) => {
-      const next: Profile = {
-        email: p?.email ?? '',
-        user_id: p?.user_id ?? '',
-        balance_usd: info.balanceUsd,
-      };
-      persistProfile(next);
-      return next;
-    });
-  }, []);
+  const [currentId, setCurrentId] = useState<string | null>(() => {
+    // Seed from the cached threads list so refreshing the app lands
+    // on the same conversation. Falls through to null when the cache
+    // is empty (first run or post sign-out).
+    const cachedFirst = threadsQuery.data?.[0]?.id;
+    return cachedFirst ?? null;
+  });
 
-  // One-shot account info fetch — populates email + user_id into the
-  // profile cache so the settings drawer renders "Signed in as
-  // <email>" instead of nothing. Without this the API key auth flow
-  // never sees the human profile (the keychain only stores the
-  // bearer secret). Called on first authed render + after sign-in.
-  const refreshAccount = useCallback(async () => {
-    if (!getKey()) return;
-    const info = await fetchAccount();
-    if (!info) return;
-    setProfile((p) => {
-      const next: Profile = {
-        email: info.email ?? '',
-        user_id: info.user_id,
-        balance_usd: p?.balance_usd,
-      };
-      persistProfile(next);
-      return next;
-    });
-  }, []);
+  // If the active thread vanished from the remote (deleted on another
+  // device), fall back to whatever the list says is most recent.
+  // This is a derived sync — Query data → local pointer state. Cheap
+  // and idempotent.
+  useEffect(() => {
+    if (!threadsQuery.data) return;
+    if (currentId && !threadsQuery.data.some((t) => t.id === currentId)) {
+      setCurrentId(threadsQuery.data[0]?.id ?? null);
+    }
+  }, [threadsQuery.data, currentId]);
 
   // Deep-link listener: qcode://auth?k=… from the qlaud sign-in flow.
+  // Once a key lands in the keychain, flipping `authed` is enough —
+  // every `useXxxQuery(authed)` hook above will fire its query on
+  // the same render. No manual refresh* fan-out needed.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     startDeepLinkListener(() => {
       setAuthed(true);
-      setProfile(getProfile());
-      void refreshBalance();
-      void refreshAccount();
     }).then((u) => {
       unlisten = u;
     });
     return () => unlisten?.();
-  }, [refreshBalance, refreshAccount]);
+  }, []);
 
-  // Boot: pull a fresh balance + account info on the first authed
-  // render so the spend bar isn't $0 + the settings drawer shows the
-  // signed-in email instead of an empty string.
-  useEffect(() => {
-    if (authed) {
-      void refreshBalance();
-      void refreshAccount();
-    }
-  }, [authed, refreshBalance, refreshAccount]);
-
-  // Link the anonymous PostHog person to the qlaud user so signed-in
-  // events land on the right profile + the pre-signin events from
-  // the same browser get attributed correctly.
+  // PostHog identify — runs whenever account data lands.
   useEffect(() => {
     if (authed && profile?.user_id) {
       posthog.identify(profile.user_id, { email: profile.email });
     }
   }, [authed, profile?.user_id, profile?.email]);
 
-  // Cross-tab storage sync (vite-dev convenience).
+  // Cross-tab storage sync (vite-dev convenience). Just flips authed —
+  // queries refetch on the same render.
   useEffect(() => {
     function onStorage() {
       setAuthed(Boolean(getKey()));
-      setProfile(getProfile());
       setWorkspace(getCurrentWorkspace());
     }
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
-  // Thread mutations. qlaud is authoritative; we mutate the cache
-  // optimistically and reconcile on the next list call.
+  // Manual refetch handles for legacy props that took an imperative
+  // refresh callback. Internally these are just Query invalidations —
+  // the next consumer rerenders against the new data.
   const refreshThreads = useCallback(() => {
-    setThreads(loadCachedSummaries());
+    void queryClient.invalidateQueries({ queryKey: qk.threads });
+  }, []);
+  const refreshBalance = useCallback(() => {
+    void invalidateBalance();
+  }, []);
+  const refreshAccount = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: qk.account });
   }, []);
 
+  // "New chat" is purely a UI clear — no network, no cache mutation.
+  // The remote thread is created lazily by ensureThreadId() on the
+  // first send. This stops the sidebar from filling with "New chat"
+  // rows every time the user clicks the button without sending,
+  // which was happening because every click POSTed /v1/threads
+  // (a real thread on qlaud's side) and the sidebar showed all of
+  // them. Now: clicking creates nothing; the first message creates
+  // a thread with the user's prompt as its seed title.
   const newThread = useCallback(async () => {
-    try {
-      // Tag the thread with the current workspace (if any). Sidebar
-      // uses this to bucket into Projects vs Chats — without it, a
-      // thread started inside a folder still shows up in the
-      // workspace-less "Chats" section.
-      const meta = workspace
-        ? { workspace_path: workspace.path, workspace_name: workspace.name }
-        : undefined;
-      const t = await createRemoteThread(
-        meta ? { metadata: meta } : undefined,
-      );
-      const summary: ThreadSummary = {
-        id: t.id,
-        title: 'New chat',
-        model,
-        createdAt: t.created_at,
-        updatedAt: t.last_active_at,
-        ...(workspace
-          ? { workspacePath: workspace.path, workspaceName: workspace.name }
-          : {}),
-      };
-      setThreads(upsertCachedSummary(summary));
-      setCurrentId(t.id);
-    } catch {
-      // Network failure — leave the user on whatever they had.
-      // The composer will surface the error on first send if the
-      // problem persists.
-    }
-  }, [model, workspace]);
+    setCurrentId(null);
+  }, []);
 
   const switchThread = useCallback((id: string) => {
     setCurrentId(id);
   }, []);
 
-  const removeThread = useCallback(
-    async (id: string) => {
-      // Optimistic prune — drop from cache + list immediately, then
-      // delete server-side. If the delete fails the next refresh
-      // will resurrect the row.
-      const next = removeCachedSummary(id);
-      setThreads(next);
+  // Optimistic delete via Query mutation — sidebar updates the
+  // moment the user clicks; cache rolls back if the network errors.
+  const deleteMutation = useDeleteThreadMutation({
+    onSuccess: (id) => {
       if (currentId === id) {
-        setCurrentId(next[0]?.id ?? null);
-      }
-      try {
-        await deleteRemoteThread(id);
-      } catch {
-        // Tolerated — see comment above.
+        const list = queryClient.getQueryData<ThreadSummary[]>(qk.threads);
+        setCurrentId(list?.[0]?.id ?? null);
       }
     },
-    [currentId],
+  });
+  const removeThread = useCallback(
+    (id: string) => {
+      deleteMutation.mutate(id);
+    },
+    [deleteMutation],
   );
 
   // Lazy thread provisioning. ChatSurface calls this before its
-  // first send when no thread is active — gives us a real qlaud
-  // thread id to address. Mirrors the legacy "first turn → conjure
-  // a thread" path but delegates the round-trip out of the
-  // composer's hot path.
+  // first send when no thread is active — the mutation handles the
+  // optimistic insert + cache reconciliation; we just return the id.
+  const createMutation = useCreateThreadMutation();
   const ensureThreadId = useCallback(async (): Promise<string> => {
     if (currentId) return currentId;
-    const meta = workspace
-      ? { workspace_path: workspace.path, workspace_name: workspace.name }
-      : undefined;
-    const t = await createRemoteThread(meta ? { metadata: meta } : undefined);
-    const summary: ThreadSummary = {
-      id: t.id,
-      title: 'New chat',
-      model,
-      createdAt: t.created_at,
-      updatedAt: t.last_active_at,
-      ...(workspace
-        ? { workspacePath: workspace.path, workspaceName: workspace.name }
-        : {}),
-    };
-    setThreads(upsertCachedSummary(summary));
-    setCurrentId(t.id);
-    return t.id;
-  }, [currentId, model, workspace]);
+    const result = await createMutation.mutateAsync({ workspace, model });
+    setCurrentId(result.summary.id);
+    return result.summary.id;
+  }, [currentId, model, workspace, createMutation]);
 
-  // ChatSurface reports back when a turn lands. We use that to
-  // refresh the cached summary's updatedAt and (if the title is
-  // still the "New chat" placeholder) seed a real title from the
-  // user's prompt. Canonical history lives on qlaud — we don't
-  // replay or re-persist it locally.
+  // ChatSurface reports back when a turn lands. Patch the title (if
+  // still the "New chat" placeholder), bump updatedAt, and invalidate
+  // balance so the spend bar reflects this turn's spend.
   const onTurnLanded = useCallback(
     (info: { userText: string | null; threadId: string }) => {
-      const cache = loadCachedSummaries();
-      const existing = cache.find((s) => s.id === info.threadId);
-      if (!existing) return;
+      const list =
+        queryClient.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
+      const existing = list.find((s) => s.id === info.threadId);
       const patch: Partial<ThreadSummary> = { updatedAt: Date.now() };
-      if (existing.title === 'New chat' && info.userText) {
+      if (existing?.title === 'New chat' && info.userText) {
         patch.title = titleFromPrompt(info.userText);
       }
-      setThreads(patchCachedSummary(info.threadId, patch));
+      patchThread(info.threadId, patch);
+      void invalidateBalance();
     },
     [],
   );
@@ -387,8 +279,8 @@ export function App() {
           await clearAuth();
           setCurrentWorkspace(null);
           setAuthed(false);
-          setProfile(null);
           setWorkspace(null);
+          clearAllQueries();
           break;
         case 'command_palette':
           setPaletteOpen(true);
@@ -497,7 +389,7 @@ function Titlebar({
   mode: AgentMode;
   onModeChange: (m: AgentMode) => void;
   onRefreshBalance: () => void;
-  profile: Profile | null;
+  profile: { email: string; user_id: string; balance_usd?: number } | null;
   workspaceName?: string;
   onOpenSettings: () => void;
 }) {
@@ -543,7 +435,7 @@ function SpendBar({
   profile,
   onRefresh,
 }: {
-  profile: Profile | null;
+  profile: { email: string; user_id: string; balance_usd?: number } | null;
   onRefresh: () => void;
 }) {
   if (!profile) return null;
