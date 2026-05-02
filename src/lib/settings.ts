@@ -20,6 +20,26 @@ export type AgentMode = 'agent' | 'plan';
  *  settings change. */
 export type Theme = 'system' | 'light' | 'dark';
 
+/** Auto-approve posture for tool execution. Single tri-state instead
+ *  of N booleans because the user actually thinks about this in
+ *  three modes — full auto, sensible defaults, watch every step —
+ *  and exposing two checkboxes (workspaceEdits + safeBash) made the
+ *  states inconsistent ("safe-bash on but workspace-edits off" is
+ *  nonsensical for an agent that has to read your code to write to
+ *  it). The deny-list (rm -rf /, sudo, fork bombs, curl|sh) ALWAYS
+ *  applies regardless of mode — yolo doesn't disable the safety net.
+ *
+ *  - yolo:   auto-approve every write_file / edit_file / bash, even
+ *            commands that aren't on the safe-bash whitelist. For
+ *            users who trust the agent and have git as their undo.
+ *  - smart:  auto-approve workspace writes + the safe-bash whitelist.
+ *            Anything outside the whitelist (commit, push, merge,
+ *            destructive ops) prompts. Background bash always prompts
+ *            so dev servers don't spawn behind your back.
+ *  - strict: ask for everything. The "watch every step" mode for
+ *            unfamiliar codebases or live demos. */
+export type AutoApproveMode = 'yolo' | 'smart' | 'strict';
+
 export type Settings = {
   /** Model picked when a new chat is created. The title-bar dropdown
    *  still lets the user override per-thread. */
@@ -48,28 +68,11 @@ export type Settings = {
   subagentModel: string | null;
   /** Theme — 'system' follows the OS pref, 'light' / 'dark' lock it. */
   theme: Theme;
-  /** Auto-approve mode. When the agent calls a tool that's
-   *  workspace-scoped + non-destructive, just run it instead of
-   *  prompting the user for every step. The whole point of an
-   *  agent is to do the work; clicking "Allow" 50 times in a
-   *  session defeats that. Dangerous operations (the BASH_DENYLIST
-   *  patterns + writes outside the workspace) ALWAYS still require
-   *  approval regardless of these flags.
-   *
-   *  Defaults to ON for both because that's the agent experience
-   *  the user paid for. Toggle off in Settings for "watch every
-   *  step" mode. */
-  autoApprove: {
-    /** write_file + edit_file when target is inside the workspace.
-     *  We already path-jail; auto-approving inside that jail is
-     *  the same trust posture as letting the agent edit at all. */
-    workspaceEdits: boolean;
-    /** bash commands that match the safe-prefix whitelist (read-
-     *  only ops, package-manager noops, git read-only, etc).
-     *  Anything outside the whitelist still prompts. The full
-     *  whitelist lives in lib/tools.ts:isSafeBash. */
-    safeBash: boolean;
-  };
+  /** Auto-approve mode. See AutoApproveMode for the three values.
+   *  Default 'smart' because the deny-list still gates dangerous
+   *  ops and asking for every read is a worse experience than
+   *  letting the agent move. */
+  autoApprove: AutoApproveMode;
 };
 
 const DEFAULT_SUBAGENT_MODEL = 'claude-haiku-4-5';
@@ -81,25 +84,38 @@ const DEFAULTS: Settings = {
   enableConnectors: false,
   subagentModel: DEFAULT_SUBAGENT_MODEL,
   theme: 'system',
-  autoApprove: {
-    workspaceEdits: true,
-    safeBash: true,
-  },
+  autoApprove: 'smart',
 };
+
+/** Coerce the stored autoApprove value to a tri-state mode. Handles
+ *  three cases:
+ *    1. Already a string — pass through if valid, fall back to default.
+ *    2. Old { workspaceEdits, safeBash } object — map both-true→smart,
+ *       both-false→strict, mixed→smart (close enough; previous mixed
+ *       states were a UI inconsistency anyway).
+ *    3. Anything else — default. */
+function coerceAutoApprove(v: unknown): AutoApproveMode {
+  if (v === 'yolo' || v === 'smart' || v === 'strict') return v;
+  if (v && typeof v === 'object') {
+    const obj = v as { workspaceEdits?: unknown; safeBash?: unknown };
+    if (obj.workspaceEdits === false && obj.safeBash === false) return 'strict';
+    return 'smart';
+  }
+  return DEFAULTS.autoApprove;
+}
 
 export function getSettings(): Settings {
   if (typeof localStorage === 'undefined') return { ...DEFAULTS };
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return { ...DEFAULTS };
   try {
-    const parsed = JSON.parse(raw) as Partial<Settings>;
-    // Deep-merge nested objects so a stored partial doesn't drop
-    // fields we add later (autoApprove.* would have been dropped
-    // for users who saved settings before the field existed).
+    const parsed = JSON.parse(raw) as Partial<Settings> & {
+      autoApprove?: unknown;
+    };
     return {
       ...DEFAULTS,
       ...parsed,
-      autoApprove: { ...DEFAULTS.autoApprove, ...(parsed.autoApprove ?? {}) },
+      autoApprove: coerceAutoApprove(parsed.autoApprove),
     };
   } catch {
     return { ...DEFAULTS };

@@ -520,11 +520,34 @@ const BASH_SAFE_PATTERNS: RegExp[] = [
   /\|\s*(head|tail|grep|wc|sort|uniq|jq|awk|sed|cut|less|cat)\b/,
 ];
 
+/** Whether write_file / edit_file should bypass the approval prompt.
+ *  yolo + smart auto-approve workspace writes (the path-jail already
+ *  guarantees the target is inside the open folder); strict prompts. */
+function autoApproveWrite(mode: import('./settings').AutoApproveMode | undefined): boolean {
+  return mode === 'yolo' || mode === 'smart';
+}
+
+/** Whether a bash invocation should bypass the approval prompt.
+ *  yolo bypasses everything (the deny-list still applies via the
+ *  caller before this is reached). smart bypasses only the safe-bash
+ *  whitelist for foreground commands; background jobs always prompt
+ *  in smart so dev servers don't spawn behind your back. strict
+ *  prompts for everything. */
+function autoApproveBash(
+  mode: import('./settings').AutoApproveMode | undefined,
+  command: string,
+  runInBackground: boolean,
+): boolean {
+  if (mode === 'yolo') return true;
+  if (mode === 'strict') return false;
+  return !runInBackground && isSafeBashCommand(command);
+}
+
 /** Whether a bash command is safe enough to auto-execute under
- *  autoApprove.safeBash. Conservative — the deny-list always wins,
- *  and only commands matching the explicit allow patterns return
- *  true. Multi-statement (cmd1 && cmd2) requires EVERY segment to
- *  be safe; one risky segment fails the whole thing. */
+ *  smart mode. Conservative — the deny-list always wins, and only
+ *  commands matching the explicit allow patterns return true.
+ *  Multi-statement (cmd1 && cmd2) requires EVERY segment to be safe;
+ *  one risky segment fails the whole thing. */
 export function isSafeBashCommand(cmd: string): boolean {
   const trimmed = cmd.trim();
   if (!trimmed) return false;
@@ -553,14 +576,12 @@ export type ExecuteOpts = {
    *  so the UI can render it as the command runs. The agent still gets
    *  the final consolidated result via the returned ToolResult. */
   onPartial?: (text: string) => void;
-  /** Auto-approve preferences — read from settings at send time and
-   *  passed through every executor call. When enabled, the relevant
-   *  category bypasses requestApproval. The deny-list (BASH_DENYLIST,
-   *  workspace path-jail) always wins regardless. */
-  autoApprove?: {
-    workspaceEdits?: boolean;
-    safeBash?: boolean;
-  };
+  /** Auto-approve mode — read from settings at send time and passed
+   *  through every executor call. yolo bypasses every approval (still
+   *  honors the deny-list); smart auto-approves workspace writes +
+   *  safe-bash whitelist; strict prompts for everything. The deny-
+   *  list (BASH_DENYLIST, workspace path-jail) always wins regardless. */
+  autoApprove?: import('./settings').AutoApproveMode;
 };
 
 export async function executeTool(
@@ -810,7 +831,8 @@ async function runWriteFile(
   if (!abs) return badPath(call.id, requested);
   // requestApproval is only required when we're NOT auto-approving;
   // checked inside the conditional below.
-  if (!opts.autoApprove?.workspaceEdits && !opts.requestApproval) {
+  const skipWriteApproval = autoApproveWrite(opts.autoApprove);
+  if (!skipWriteApproval && !opts.requestApproval) {
     return err(
       call.id,
       'Write tools are not enabled in this session — approval gate missing.',
@@ -841,11 +863,11 @@ async function runWriteFile(
     return err(call.id, preWrite.message);
   }
 
-  // Auto-approve workspace-scoped writes when the user has enabled
-  // it. The path-jail (resolveInWorkspace, line above) already
-  // confirmed `abs` is inside the workspace; auto-approving here
-  // is the same trust posture as letting the agent edit at all.
-  if (!opts.autoApprove?.workspaceEdits) {
+  // Auto-approve workspace-scoped writes under yolo + smart. Path-jail
+  // (resolveInWorkspace, line above) already confirmed `abs` is inside
+  // the workspace; auto-approving here is the same trust posture as
+  // letting the agent edit at all.
+  if (!skipWriteApproval) {
     const decision = await opts.requestApproval!({
       kind: 'write_file',
       path: relativizePath(abs, opts.workspace),
@@ -910,7 +932,8 @@ async function runEditFile(
 
   const abs = resolveInWorkspace(requested, opts.workspace);
   if (!abs) return badPath(call.id, requested);
-  if (!opts.autoApprove?.workspaceEdits && !opts.requestApproval) {
+  const skipEditApproval = autoApproveWrite(opts.autoApprove);
+  if (!skipEditApproval && !opts.requestApproval) {
     return err(call.id, 'Edit tools are not enabled in this session.');
   }
   if (!isTauri()) {
@@ -966,7 +989,7 @@ async function runEditFile(
 
   // Auto-approve workspace-scoped edits — same posture as
   // write_file above. Path-jail already confirmed scope.
-  if (!opts.autoApprove?.workspaceEdits) {
+  if (!skipEditApproval) {
     const decision = await opts.requestApproval!({
       kind: 'edit_file',
       path: relativizePath(abs, opts.workspace),
@@ -1015,15 +1038,12 @@ async function runBash(
     );
   }
   const runInBackground = input.run_in_background === true;
-  // Safe-bash check: anything in the whitelist (read-only ops, pkg-
-  // manager noops, git read-only, etc.) skips the prompt under
-  // autoApprove.safeBash. Background jobs DO require approval even
-  // when safe — long-running processes are a different posture and
-  // worth a click.
-  const autoApproved =
-    !!opts.autoApprove?.safeBash &&
-    !runInBackground &&
-    isSafeBashCommand(command);
+  // Tri-state gate: yolo bypasses approval entirely (deny-list above
+  // already filtered the truly nasty stuff); smart bypasses only the
+  // safe-bash whitelist for foreground commands (background jobs
+  // always prompt in smart so dev servers don't spawn behind your
+  // back); strict prompts for everything.
+  const autoApproved = autoApproveBash(opts.autoApprove, command, runInBackground);
 
   if (!autoApproved && !opts.requestApproval) {
     return err(call.id, 'Bash is not enabled in this session.');

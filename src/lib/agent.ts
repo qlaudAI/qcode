@@ -188,12 +188,10 @@ export type RunThreadAgentOpts = {
     toolUseId: string,
     request: ApprovalRequest,
   ) => Promise<ApprovalDecision>;
-  /** Auto-approve forwarded to executeTool. Subagents inherit the
-   *  parent's settings unless overridden. */
-  autoApprove?: {
-    workspaceEdits?: boolean;
-    safeBash?: boolean;
-  };
+  /** Auto-approve mode forwarded to executeTool. Subagents inherit
+   *  the parent's mode unless overridden. See lib/settings.ts for
+   *  the yolo/smart/strict semantics. */
+  autoApprove?: import('./settings').AutoApproveMode;
 };
 
 /** Anthropic-shape tool defs → the inline ClientToolDef the qlaud
@@ -629,7 +627,7 @@ async function runSubagentForTask(args: {
     toolUseId: string,
     request: ApprovalRequest,
   ) => Promise<ApprovalDecision>;
-  autoApprove?: { workspaceEdits?: boolean; safeBash?: boolean };
+  autoApprove?: import('./settings').AutoApproveMode;
 }): Promise<void> {
   // Tell the parent UI a subagent is starting so it can render a
   // "Subagent: <description>" card. The corresponding subagent_done

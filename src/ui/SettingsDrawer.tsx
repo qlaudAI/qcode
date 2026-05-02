@@ -215,38 +215,44 @@ export function SettingsDrawer({
           </Section>
 
           <Section title="Auto-approve">
-            <Toggle
-              label="Auto-execute workspace edits"
-              checked={settings.autoApprove.workspaceEdits}
-              onChange={(v) =>
-                update('autoApprove', { ...settings.autoApprove, workspaceEdits: v })
-              }
-            />
+            <div className="flex gap-1.5 rounded-md border border-border bg-background p-1">
+              {(
+                [
+                  { value: 'yolo', label: 'YOLO' },
+                  { value: 'smart', label: 'Smart' },
+                  { value: 'strict', label: 'Strict' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => update('autoApprove', opt.value)}
+                  className={cn(
+                    'flex-1 rounded px-2 py-1 text-[12px] font-medium transition-colors',
+                    settings.autoApprove === opt.value
+                      ? 'bg-foreground text-background'
+                      : 'text-foreground/70 hover:bg-muted',
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
             <p className="text-[11px] text-muted-foreground">
-              When on, write_file and edit_file run without asking
-              you to click <em>Allow</em> for every change. The path-
-              jail still rejects writes outside the open workspace,
-              so the trust boundary is the workspace itself.
-            </p>
-            <Toggle
-              label="Auto-execute safe shell commands"
-              checked={settings.autoApprove.safeBash}
-              onChange={(v) =>
-                update('autoApprove', { ...settings.autoApprove, safeBash: v })
-              }
-            />
-            <p className="text-[11px] text-muted-foreground">
-              Auto-runs read-only commands ({' '}
-              <span className="font-mono">ls</span>,{' '}
-              <span className="font-mono">cat</span>,{' '}
-              <span className="font-mono">git status</span>), test/
-              build runners ({' '}
-              <span className="font-mono">pnpm install</span>,{' '}
-              <span className="font-mono">pnpm test</span>), and
-              version checks. Anything destructive (deletions,{' '}
-              <span className="font-mono">git push --force</span>,{' '}
+              <span className="font-medium text-foreground/80">YOLO</span>{' '}
+              auto-approves every write + every shell command — even
+              ones outside the safe whitelist. Use when you trust the
+              agent and rely on git as your undo. Hard deny-list (
+              <span className="font-mono">rm -rf /</span>,{' '}
+              <span className="font-mono">sudo</span>,{' '}
               <span className="font-mono">curl | sh</span>) still
-              prompts. Background jobs prompt regardless.
+              applies. <span className="font-medium text-foreground/80">Smart</span>{' '}
+              (default) auto-approves workspace writes + safe-bash
+              whitelist (<span className="font-mono">ls</span>,{' '}
+              <span className="font-mono">pnpm test</span>,{' '}
+              <span className="font-mono">git status</span>); prompts
+              for anything destructive or background jobs.{' '}
+              <span className="font-medium text-foreground/80">Strict</span>{' '}
+              prompts for every write and every command.
             </p>
           </Section>
 
