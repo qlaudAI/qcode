@@ -335,6 +335,18 @@ export function App() {
         case 'model_picker':
           // Phase 2: focus the picker programmatically.
           break;
+        case 'rail_tasks':
+        case 'rail_plan':
+        case 'rail_files':
+        case 'rail_terminal':
+        case 'rail_preview':
+        case 'rail_diff': {
+          // Strip the rail_ prefix to get the RightRailView slug.
+          // Toggle: pressing the same shortcut twice closes the rail.
+          const view = id.slice('rail_'.length) as RightRailView;
+          setRightRailView((prev) => (prev === view ? null : view));
+          break;
+        }
       }
     },
     [newThread],

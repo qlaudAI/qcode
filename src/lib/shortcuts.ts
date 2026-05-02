@@ -18,14 +18,31 @@ export type MenuId =
   | 'preferences'
   | 'sign_out'
   | 'command_palette'
-  | 'model_picker';
+  | 'model_picker'
+  | 'rail_tasks'
+  | 'rail_plan'
+  | 'rail_files'
+  | 'rail_terminal'
+  | 'rail_preview'
+  | 'rail_diff';
 
-const KB_BINDINGS: Array<{ id: MenuId; mod: boolean; key: string }> = [
+const KB_BINDINGS: Array<{
+  id: MenuId;
+  mod: boolean;
+  shift?: boolean;
+  key: string;
+}> = [
   { id: 'new_chat', mod: true, key: 'n' },
   { id: 'open_folder', mod: true, key: 'o' },
   { id: 'preferences', mod: true, key: ',' },
   { id: 'command_palette', mod: true, key: 'k' },
   { id: 'model_picker', mod: true, key: 'm' },
+  // Right-rail view picker shortcuts — match Codex's mappings so
+  // muscle memory carries over. Shift+Cmd+P/D/F for the heavier
+  // surfaces (Preview, Diff, Files), bare-key on the others.
+  { id: 'rail_preview', mod: true, shift: true, key: 'p' },
+  { id: 'rail_diff', mod: true, shift: true, key: 'd' },
+  { id: 'rail_files', mod: true, shift: true, key: 'f' },
 ];
 
 export function useShortcuts(handler: (id: MenuId) => void) {
@@ -47,6 +64,8 @@ export function useShortcuts(handler: (id: MenuId) => void) {
 
       for (const b of KB_BINDINGS) {
         if (b.mod && !mod) continue;
+        if (b.shift && !e.shiftKey) continue;
+        if (!b.shift && e.shiftKey && b.key.length === 1) continue;
         if (e.key.toLowerCase() === b.key) {
           e.preventDefault();
           handler(b.id);

@@ -20,5 +20,20 @@ export default defineConfig({
     target: 'es2022',
     minify: 'esbuild',
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        // Split big leaf deps into their own chunks so the main
+        // bundle stays small. PostHog (~140kb) and TanStack Query
+        // (~45kb) load lazily without blocking first paint;
+        // lucide-react is tree-shaken at use-site already so we
+        // don't try to preempt its chunk shape.
+        manualChunks: {
+          react: ['react', 'react-dom'],
+          query: ['@tanstack/react-query'],
+          analytics: ['posthog-js'],
+        },
+      },
+    },
+    chunkSizeWarningLimit: 600,
   },
 });

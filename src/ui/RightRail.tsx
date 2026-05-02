@@ -14,13 +14,15 @@ import {
   ListTodo,
   Loader2,
   Play,
+  RefreshCw,
   Terminal as TerminalIcon,
   X,
   XCircle,
 } from 'lucide-react';
-import type React from 'react';
+import { useEffect, useState, type ComponentType } from 'react';
 
 import { cn } from '../lib/cn';
+import { readWorkspaceDiff, type FileDiff } from '../lib/git-info';
 import { FileTree } from './FileTree';
 import type { ToolCallView } from './ToolCallCard';
 
@@ -56,35 +58,55 @@ export function RightRail({
     .filter((b) => b.call.name !== 'todo_write');
 
   return (
-    <aside className="hidden w-72 shrink-0 flex-col border-l border-border/40 bg-background/60 backdrop-blur-sm md:flex">
-      <header className="flex h-10 items-center justify-between border-b border-border/40 px-3">
-        <div className="flex items-center gap-2">
-          <span className="text-[12px] font-semibold capitalize text-foreground">
-            {view}
-          </span>
-          {view === 'tasks' && tools.length > 0 && (
-            <TaskCounts tools={tools} />
-          )}
-        </div>
-        {onClose && (
-          <button
-            aria-label="Close panel"
-            onClick={onClose}
-            className="grid h-6 w-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
+    <>
+      {/* Mobile scrim — taps close the sheet. md+ never sees this. */}
+      <button
+        aria-label="Close panel"
+        onClick={onClose}
+        className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm md:hidden"
+      />
+      <aside
+        className={cn(
+          // Mobile: bottom-anchored sheet that takes 75dvh, slides up
+          // over the chat. Desktop md+: in-flow column on the right
+          // (272px wide) with the chat surface to the left.
+          'fixed inset-x-0 bottom-0 z-50 flex h-[75dvh] flex-col rounded-t-xl border-t border-border/40 bg-background/95 backdrop-blur-md',
+          'md:static md:h-auto md:w-72 md:shrink-0 md:rounded-none md:border-l md:border-t-0 md:bg-background/60',
         )}
-      </header>
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      >
+        {/* Sheet grabber on mobile only — visual handoff that this is
+         *  draggable-feeling. Just decoration; actual close is via
+         *  the X button or scrim tap. */}
+        <div className="mx-auto mt-1.5 h-1 w-9 shrink-0 rounded-full bg-border md:hidden" />
+        <header className="flex h-10 items-center justify-between border-b border-border/40 px-3">
+          <div className="flex items-center gap-2">
+            <span className="text-[12px] font-semibold capitalize text-foreground">
+              {view}
+            </span>
+            {view === 'tasks' && tools.length > 0 && (
+              <TaskCounts tools={tools} />
+            )}
+          </div>
+          {onClose && (
+            <button
+              aria-label="Close panel"
+              onClick={onClose}
+              className="grid h-6 w-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </header>
+        <div className="min-h-0 flex-1 overflow-y-auto">
         {view === 'tasks' && <TasksView tools={tools} />}
         {view === 'plan' && <PlanView blocks={blocks} />}
         {view === 'files' && <FilesView workspacePath={workspacePath} />}
-        {view === 'terminal' && <ComingSoon icon={TerminalIcon} label="Terminal" hint="Live persistent shell session — coming next." />}
-        {view === 'preview' && <ComingSoon icon={Play} label="Preview" hint="Browser preview powered by Playwright MCP — coming next." />}
-        {view === 'diff' && <ComingSoon icon={GitCompare} label="Diff" hint="Inline git diff viewer — coming next." />}
-      </div>
-    </aside>
+        {view === 'diff' && <DiffView workspacePath={workspacePath} />}
+          {view === 'terminal' && <TerminalView tools={tools} />}
+          {view === 'preview' && <ComingSoon icon={Play} label="Preview" hint="Browser preview powered by Playwright MCP — coming next." />}
+        </div>
+      </aside>
+    </>
   );
 }
 
@@ -327,6 +349,322 @@ function FilesView({ workspacePath }: { workspacePath?: string | null }) {
   );
 }
 
+// ─── Terminal (recent bash) ───────────────────────────────────────
+//
+// Surfaces every bash tool call from the current thread as a
+// terminal-style scrollback. Each entry shows the command + its
+// stdout/stderr in a chronological feed; latest pinned to the
+// bottom (terminal convention). Lifts the inline BashView output
+// out of the chat blocks and into a persistent reading lens —
+// useful when the agent runs ten commands and you want to scan
+// them as a build log instead of scrolling through prose.
+
+function TerminalView({ tools }: { tools: ToolBlock[] }) {
+  const bash = tools.filter((t) => t.call.name === 'bash');
+  if (bash.length === 0) {
+    return (
+      <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+        <TerminalIcon className="h-5 w-5 text-muted-foreground/60" />
+        <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+          No shell commands run yet. When the agent uses bash, the
+          output streams in here as a chronological log.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2 p-2">
+      {bash.map((b) => (
+        <TerminalEntry key={b.call.id} call={b.call} />
+      ))}
+    </div>
+  );
+}
+
+function TerminalEntry({ call }: { call: ToolCallView }) {
+  const command = (call.input as { command?: string })?.command ?? '';
+  const out = call.output ?? '';
+  const exitMatch = /^exit (\d+)/.exec(out);
+  const exitCode = exitMatch ? Number.parseInt(exitMatch[1] ?? '0', 10) : null;
+  const ok = call.status === 'done' && (exitCode === 0 || exitCode === null);
+  const stdoutMatch = /\n--- stdout ---\n([\s\S]*?)(?=\n--- stderr ---|$)/m.exec(out);
+  const stderrMatch = /\n--- stderr ---\n([\s\S]*)$/m.exec(out);
+  const stdout = stdoutMatch?.[1]?.trim() ?? '';
+  const stderr = stderrMatch?.[1]?.trim() ?? '';
+  const body = stdout || stderr || (call.status === 'running' ? '(running…)' : out);
+  return (
+    <div className="overflow-hidden rounded border border-border/40">
+      <div className="flex items-center gap-1.5 border-b border-border/40 bg-muted/40 px-2 py-1 text-[10.5px]">
+        <span
+          className={cn(
+            'inline-flex h-1.5 w-1.5 rounded-full',
+            call.status === 'running'
+              ? 'bg-primary animate-pulse'
+              : ok
+                ? 'bg-emerald-500'
+                : 'bg-primary',
+          )}
+          aria-hidden
+        />
+        <span className="font-mono text-foreground/85">$</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-foreground/85">
+          {command}
+        </span>
+        {exitCode != null && (
+          <span className="shrink-0 text-muted-foreground tabular-nums">
+            exit {exitCode}
+          </span>
+        )}
+      </div>
+      <pre className="m-0 max-h-48 overflow-auto whitespace-pre-wrap bg-[#0a0a0a] px-2 py-1.5 font-mono text-[10.5px] leading-snug text-[#d8d8d8]">
+        {body || ' '}
+      </pre>
+      {stderr && stdout && (
+        <pre className="m-0 max-h-32 overflow-auto whitespace-pre-wrap border-t border-white/10 bg-[#0a0a0a] px-2 py-1.5 font-mono text-[10.5px] leading-snug text-rose-300">
+          {stderr}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// ─── Diff (uncommitted changes) ───────────────────────────────────
+
+function DiffView({ workspacePath }: { workspacePath?: string | null }) {
+  const [files, setFiles] = useState<FileDiff[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [openFiles, setOpenFiles] = useState<Set<string>>(new Set());
+
+  // Fetch on mount + on workspace change. The user can also manual-
+  // refresh via the reload button — we don't auto-poll because git
+  // diff isn't free, and the user knows when they want fresh state.
+  useEffect(() => {
+    if (!workspacePath) {
+      setFiles(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    void readWorkspaceDiff(workspacePath).then((d) => {
+      if (!cancelled) {
+        setFiles(d);
+        setLoading(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspacePath]);
+
+  const refresh = () => {
+    if (!workspacePath) return;
+    setLoading(true);
+    void readWorkspaceDiff(workspacePath).then((d) => {
+      setFiles(d);
+      setLoading(false);
+    });
+  };
+
+  if (!workspacePath) {
+    return (
+      <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+        <GitCompare className="h-5 w-5 text-muted-foreground/60" />
+        <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+          Open a folder to see uncommitted changes here.
+        </p>
+      </div>
+    );
+  }
+
+  if (loading && !files) {
+    return (
+      <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground/60" />
+        <p className="text-[11.5px] text-muted-foreground">Reading diff…</p>
+      </div>
+    );
+  }
+
+  if (!files || files.length === 0) {
+    return (
+      <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+        <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
+        <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+          Working tree is clean — no uncommitted changes.
+        </p>
+        <button
+          onClick={refresh}
+          className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <RefreshCw className="h-3 w-3" />
+          Refresh
+        </button>
+      </div>
+    );
+  }
+
+  const totalAdded = files.reduce((a, f) => a + f.added, 0);
+  const totalRemoved = files.reduce((a, f) => a + f.removed, 0);
+
+  return (
+    <div className="flex flex-col">
+      <div className="flex items-center justify-between gap-2 border-b border-border/40 px-3 py-2">
+        <div className="flex items-baseline gap-2 text-[11px] tabular-nums">
+          <span className="text-muted-foreground">{files.length} files</span>
+          <span className="text-emerald-600 dark:text-emerald-400">
+            +{totalAdded}
+          </span>
+          <span className="text-primary">−{totalRemoved}</span>
+        </div>
+        <button
+          onClick={refresh}
+          disabled={loading}
+          aria-label="Refresh diff"
+          className="grid h-6 w-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+        >
+          <RefreshCw
+            className={cn('h-3 w-3', loading && 'animate-spin')}
+          />
+        </button>
+      </div>
+      <ul className="space-y-0.5 p-2">
+        {files.map((f) => (
+          <DiffRow
+            key={f.path}
+            file={f}
+            open={openFiles.has(f.path)}
+            onToggle={() =>
+              setOpenFiles((prev) => {
+                const next = new Set(prev);
+                if (next.has(f.path)) next.delete(f.path);
+                else next.add(f.path);
+                return next;
+              })
+            }
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function DiffRow({
+  file,
+  open,
+  onToggle,
+}: {
+  file: FileDiff;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const statusColor =
+    file.status === '??'
+      ? 'text-muted-foreground'
+      : file.status === 'D'
+        ? 'text-primary'
+        : file.status === 'A' || file.status.includes('A')
+          ? 'text-emerald-600 dark:text-emerald-400'
+          : 'text-foreground/85';
+  return (
+    <li>
+      <button
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 rounded px-2 py-1 text-left transition-colors hover:bg-muted/50"
+      >
+        <ChevronRight
+          className={cn(
+            'h-3 w-3 shrink-0 text-muted-foreground transition-transform',
+            open && 'rotate-90',
+          )}
+        />
+        <span
+          className={cn(
+            'shrink-0 font-mono text-[10px] font-semibold tabular-nums',
+            statusColor,
+          )}
+        >
+          {file.status || '·'}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground/85">
+          {file.path}
+        </span>
+        <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+          {file.added > 0 && (
+            <span className="text-emerald-600 dark:text-emerald-400">
+              +{file.added}
+            </span>
+          )}
+          {file.added > 0 && file.removed > 0 && ' '}
+          {file.removed > 0 && (
+            <span className="text-primary">−{file.removed}</span>
+          )}
+        </span>
+      </button>
+      {open && file.patch && <DiffPatch patch={file.patch} />}
+      {open && !file.patch && (
+        <p className="ml-7 mt-1 text-[10.5px] text-muted-foreground">
+          {file.status === '??'
+            ? '(untracked file — no diff to show)'
+            : '(diff too large to render inline)'}
+        </p>
+      )}
+    </li>
+  );
+}
+
+function DiffPatch({ patch }: { patch: string }) {
+  // Color +/- lines green/red, headers (@@ ... @@) muted. Strips the
+  // diff --git / index lines for compactness — those don't help in
+  // a sidebar reading flow.
+  const lines = patch
+    .split('\n')
+    .filter(
+      (l) =>
+        !l.startsWith('diff --git ') &&
+        !l.startsWith('index ') &&
+        !l.startsWith('--- ') &&
+        !l.startsWith('+++ '),
+    );
+  return (
+    <pre className="ml-7 mt-1 max-h-72 overflow-auto rounded border border-border/40 bg-muted/30 px-2 py-1.5 font-mono text-[10.5px] leading-snug">
+      {lines.map((l, i) => {
+        if (l.startsWith('@@')) {
+          return (
+            <div key={i} className="text-muted-foreground/80">
+              {l}
+            </div>
+          );
+        }
+        if (l.startsWith('+')) {
+          return (
+            <div
+              key={i}
+              className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+            >
+              {l}
+            </div>
+          );
+        }
+        if (l.startsWith('-')) {
+          return (
+            <div
+              key={i}
+              className="bg-primary/10 text-primary"
+            >
+              {l}
+            </div>
+          );
+        }
+        return (
+          <div key={i} className="text-foreground/70">
+            {l}
+          </div>
+        );
+      })}
+    </pre>
+  );
+}
+
 // ─── Coming-soon placeholder ──────────────────────────────────────
 
 function ComingSoon({
@@ -334,7 +672,7 @@ function ComingSoon({
   label,
   hint,
 }: {
-  icon: React.ComponentType<{ className?: string }>;
+  icon: ComponentType<{ className?: string }>;
   label: string;
   hint: string;
 }) {

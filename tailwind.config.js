@@ -1,6 +1,12 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
+  // Class-based dark mode: we set `<html class="dark">` from JS so
+  // we can honor either system preference (default) or an explicit
+  // user override (Settings → Theme). Token swap happens via the
+  // CSS vars in styles.css; tailwind utilities (bg-background,
+  // text-foreground, etc.) automatically pick up the active mode.
+  darkMode: 'class',
   theme: {
     extend: {
       fontFamily: {
@@ -15,18 +21,18 @@ export default {
         mono: ['ui-monospace', 'SF Mono', 'Menlo', 'monospace'],
       },
       colors: {
-        // Brand-aligned palette — same hues as qlaud.ai dashboard so
-        // surfaces match across the desktop app, web preview, and
-        // marketing pages. Neutral hue 0 (pure grayscale, no blue
-        // tint) keeps the primary red the only chromatic accent.
-        background: 'hsl(0 0% 100%)',
-        foreground: 'hsl(0 0% 3.9%)',
-        muted: 'hsl(0 0% 96.1%)',
-        'muted-foreground': 'hsl(0 0% 45.1%)',
-        border: 'hsl(0 0% 89.8%)',
-        destructive: 'hsl(0 72% 51%)',
-        primary: 'hsl(0 72% 51%)',
-        'primary-foreground': 'hsl(0 0% 100%)',
+        // Tokens flow through CSS vars so a single `<html class="dark">`
+        // toggle swaps the entire palette atomically. Same hue family
+        // (neutral hue 0, primary qlaud red 0 72% 51%) across both
+        // modes so brand stays consistent.
+        background: 'hsl(var(--background) / <alpha-value>)',
+        foreground: 'hsl(var(--foreground) / <alpha-value>)',
+        muted: 'hsl(var(--muted) / <alpha-value>)',
+        'muted-foreground': 'hsl(var(--muted-foreground) / <alpha-value>)',
+        border: 'hsl(var(--border) / <alpha-value>)',
+        destructive: 'hsl(var(--primary) / <alpha-value>)',
+        primary: 'hsl(var(--primary) / <alpha-value>)',
+        'primary-foreground': 'hsl(var(--primary-foreground) / <alpha-value>)',
       },
     },
   },

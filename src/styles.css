@@ -3,6 +3,32 @@
 @tailwind utilities;
 
 @layer base {
+  /* Theme tokens — light by default. The `.dark` class on <html>
+   * (set from main.tsx based on settings.theme + system pref)
+   * swaps the entire palette atomically. Tailwind utilities like
+   * bg-background / text-foreground read these via the colors
+   * config in tailwind.config.js. */
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+    --border: 0 0% 89.8%;
+    --primary: 0 72% 51%;
+    --primary-foreground: 0 0% 100%;
+  }
+  .dark {
+    /* Dark palette — matches qlaud.ai dashboard's dark mode. Pure
+     * neutral with the same primary red, slightly muted on dark
+     * surfaces so it doesn't burn against the dark background. */
+    --background: 0 0% 7%;
+    --foreground: 0 0% 96%;
+    --muted: 0 0% 14%;
+    --muted-foreground: 0 0% 65%;
+    --border: 0 0% 18%;
+    --primary: 0 72% 56%;
+    --primary-foreground: 0 0% 100%;
+  }
   html {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -13,14 +39,14 @@
     /* Transparent body so OS-native vibrancy/acrylic shows through.
      * Surfaces that need solid backgrounds (chat bubbles, composer,
      * sidebar inner) paint their own. */
-    background: rgba(255, 255, 255, 0.6);
+    background: hsl(var(--background) / 0.6);
     overflow: hidden;
     -webkit-user-select: none;
     user-select: none;
   }
   /* Browser-mode (vite dev, no Tauri vibrancy backdrop). */
   html:not([data-tauri='1']) body {
-    background: hsl(0 0% 100%);
+    background: hsl(var(--background));
   }
   input,
   textarea,
@@ -43,7 +69,7 @@
     }
   }
   ::selection {
-    background: hsl(0 72% 51% / 0.18);
+    background: hsl(var(--primary) / 0.18);
   }
 }
 
@@ -82,13 +108,13 @@
   }
   @keyframes qcode-row-flash {
     0% {
-      background-color: hsl(0 72% 51% / 0);
+      background-color: hsl(var(--primary) / 0);
     }
     20% {
-      background-color: hsl(0 72% 51% / 0.12);
+      background-color: hsl(var(--primary) / 0.12);
     }
     100% {
-      background-color: hsl(0 72% 51% / 0);
+      background-color: hsl(var(--primary) / 0);
     }
   }
 }

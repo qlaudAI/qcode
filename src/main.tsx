@@ -6,6 +6,7 @@ import { App } from './App';
 import { initAnalytics, posthog } from './lib/analytics';
 import { consumeAuthCallback, hydrateAuth } from './lib/auth';
 import { hydrateThreadsFromCache, queryClient } from './lib/queries';
+import { applyTheme, getSettings } from './lib/settings';
 import { isTauri } from './lib/tauri';
 import './styles.css';
 
@@ -31,6 +32,10 @@ async function boot() {
   posthog.capture('app_boot');
   await consumeAuthCallback();
   await hydrateAuth();
+  // Apply theme BEFORE first React render so the user never sees a
+  // light flash before the dark class lands. Reads from settings,
+  // falls back to system preference for fresh installs.
+  applyTheme(getSettings().theme);
   // Seed the threads query from localStorage so the sidebar paints
   // instantly on cold start while the remote refetch runs in the bg.
   hydrateThreadsFromCache();

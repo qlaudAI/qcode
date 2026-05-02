@@ -187,6 +187,33 @@ export function SettingsDrawer({
             </p>
           </Section>
 
+          <Section title="Appearance">
+            <FieldLabel>Theme</FieldLabel>
+            <div className="flex gap-1.5 rounded-md border border-border bg-background p-1">
+              {(['system', 'light', 'dark'] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => update('theme', t)}
+                  className={cn(
+                    'flex-1 rounded px-2 py-1 text-[12px] font-medium capitalize transition-colors',
+                    settings.theme === t
+                      ? 'bg-foreground text-background'
+                      : 'text-foreground/70 hover:bg-muted',
+                  )}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              <span className="font-medium text-foreground/80">System</span>{' '}
+              follows your OS dark-mode preference (and tracks live
+              if you flip it). <span className="font-medium text-foreground/80">Light</span>{' '}
+              and <span className="font-medium text-foreground/80">Dark</span>{' '}
+              lock the palette regardless of the OS setting.
+            </p>
+          </Section>
+
           <Section title="Updates">
             <Toggle
               label="Auto-check for updates on launch"
