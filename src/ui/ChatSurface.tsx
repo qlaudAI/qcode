@@ -255,20 +255,25 @@ export function ChatSurface({
   // the next thread-switch covers it.
   const messagesQuery = useThreadMessagesQuery(busy ? null : threadId);
   const lastLoadedRef = useRef<string | null>(null);
-  // Thread-switch invalidator. Bumping the run id here aborts any
-  // in-flight send + makes its still-streaming events no-ops, so
-  // navigating away from a slow turn doesn't leak its blocks into
-  // the new thread. Pair with abortRef.abort() to cut the network
-  // stream too — abort is best-effort (server may finish), but the
-  // run-id check guarantees we won't render the leftover events.
+  // Thread-switch invalidator. If a thread switch happens WHILE we
+  // were busy streaming, abort the in-flight stream + bump the run
+  // id so any late events become no-ops. When idle, switching is
+  // free — just re-runs the message-load effect below for the new
+  // threadId. Gates on `busy`, not on lastSendThreadRef, because
+  // the latter sticks at the last-sent thread forever and was
+  // incorrectly blocking switches once the user had ever sent
+  // anything (symptom: "tabs/sessions locked after first send").
+  const lastThreadIdRef = useRef(threadId);
   useEffect(() => {
-    if (lastSendThreadRef.current && lastSendThreadRef.current !== threadId) {
+    const prev = lastThreadIdRef.current;
+    lastThreadIdRef.current = threadId;
+    if (prev !== threadId && busy) {
       activeRunIdRef.current += 1;
       abortRef.current?.abort();
       rejectAllApprovals();
       setBusy(false);
     }
-  }, [threadId]);
+  }, [threadId, busy]);
 
   useEffect(() => {
     if (busy) return;
@@ -279,14 +284,9 @@ export function ChatSurface({
     }
     if (lastLoadedRef.current === threadId) return;
     if (!messagesQuery.data) return;
-    // Belt-and-suspenders: confirm the data we have actually
-    // belongs to the thread we want. Query keys this on threadId
-    // so it should always match, but if a previous queryFn lands
-    // late after a fast thread switch, this guard means we don't
-    // paint stale history.
-    if (lastSendThreadRef.current && lastSendThreadRef.current !== threadId) {
-      return;
-    }
+    // Query keys on threadId, so messagesQuery.data is always for
+    // the active thread (Query handles cross-thread isolation
+    // internally). No additional guard needed.
     lastLoadedRef.current = threadId;
     setBlocks(historyToBlocks(messagesQuery.data.messages));
     setCompaction(messagesQuery.data.compaction);
@@ -489,6 +489,16 @@ export function ChatSurface({
       // thread and updates the sidebar before resolving.
       const id = await ensureThreadId();
       lastSendThreadRef.current = id;
+      // Mark this thread as already-loaded so the post-send message
+      // re-fetch effect bails. Without this, the moment busy flips
+      // back to false the messagesQuery for this thread enables,
+      // fetches the canonical server history, and setBlocks
+      // overwrites every tool card / approval / usage pill we
+      // streamed live (historyToBlocks only knows user_text +
+      // assistant_text). Symptom: "streaming message briefly,
+      // disappeared." The streamed blocks ARE canonical; we don't
+      // need to round-trip the server to learn what we just rendered.
+      lastLoadedRef.current = id;
       // Thread changed (user navigated) between send press and the
       // thread-id resolution. Don't keep going — the user's looking
       // at a different conversation.

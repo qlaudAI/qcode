@@ -194,9 +194,18 @@ export function App() {
   // where projects-section briefly shows the wrong folder. Force
   // a refetch immediately so the user lands on the right project
   // group within one round-trip instead of waiting for staleTime.
+  //
+  // exact:true is critical — Query does PREFIX matching by default,
+  // so `queryKey: ['threads']` would also invalidate every
+  // `['threads', :id, 'messages']` query. That tanked the active
+  // chat's history on every folder open (messages refetched and
+  // overwrote the streaming blocks). Scope it to just the list.
   useEffect(() => {
     if (!authed) return;
-    void queryClient.invalidateQueries({ queryKey: qk.threads });
+    void queryClient.invalidateQueries({
+      queryKey: qk.threads,
+      exact: true,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace?.path]);
 
@@ -493,11 +502,22 @@ function Titlebar({
   onPickRightRailView?: (v: RightRailView) => void;
 }) {
   return (
-    <header className="titlebar relative z-50 flex h-11 items-center justify-between border-b border-border/40 bg-background/40 px-3 backdrop-blur-md">
+    <header
+      data-tauri-drag-region
+      className="titlebar relative z-50 flex h-11 items-center justify-between border-b border-border/40 bg-background/40 px-3 backdrop-blur-md"
+    >
       {/* pl-16 leaves clearance for macOS traffic-light buttons.
        *  On mobile/web we lose the traffic-lights and pick up a
-       *  hamburger that toggles the off-canvas sidebar. */}
-      <div className="flex items-center gap-2 md:pl-16">
+       *  hamburger that toggles the off-canvas sidebar.
+       *
+       *  data-tauri-drag-region propagates from the header so
+       *  empty space inside this div drags the window. Interactive
+       *  children that should NOT drag (buttons, links) have to
+       *  opt out explicitly via data-tauri-drag-region={false}. */}
+      <div
+        data-tauri-drag-region
+        className="flex items-center gap-2 md:pl-16"
+      >
         {onToggleSidebar && (
           <button
             type="button"

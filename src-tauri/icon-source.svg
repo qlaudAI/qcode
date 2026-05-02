@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <!-- Canonical qlaud monogram, scaled from QlaudMark (src/ui/QlaudMark.tsx).
+       1024x1024 master that Tauri's `pnpm tauri icon` slices into every
+       platform-specific output (icns, ico, png set). Rebuild after any
+       monogram tweak to keep the in-app, dock, and DMG marks identical. -->
+  <rect width="1024" height="1024" rx="224" fill="#0a0a0a" />
+  <!-- Head of the q — circle outline, centered ~36% from left, ~44% from top -->
+  <circle cx="368" cy="448" r="160" stroke="#ffffff" stroke-width="80" fill="none" />
+  <!-- Stem of the q — vertical bar that descends below the head -->
+  <rect x="528" y="352" width="112" height="512" fill="#ffffff" />
+  <!-- Brand-red period accent in the bottom-right -->
+  <circle cx="800" cy="800" r="56" fill="#ef4444" />
+</svg>
