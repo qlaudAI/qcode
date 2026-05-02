@@ -457,8 +457,8 @@ export function ChatSurface({
   const empty = blocks.length === 0;
 
   return (
-    <div className="flex flex-1 flex-col">
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl px-4 py-8">
           {empty ? (
             <EmptyState

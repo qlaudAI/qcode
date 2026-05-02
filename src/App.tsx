@@ -23,6 +23,7 @@ import {
   createRemoteThread,
   deleteRemoteThread,
   listRemoteThreads,
+  purgeEmptyRemoteThreads,
   loadCachedSummaries,
   patchCachedSummary,
   removeCachedSummary,
@@ -121,6 +122,12 @@ export function App() {
     let cancelled = false;
     void (async () => {
       try {
+        // Best-effort cleanup of orphans before listing — keeps the
+        // sidebar clean even when sends previously failed mid-flight
+        // (CORS, network, capability gaps) and left empty threads
+        // behind. Safe to call every load; server returns 0 when
+        // nothing matches.
+        await purgeEmptyRemoteThreads();
         const remote = await listRemoteThreads();
         if (cancelled) return;
         const cache = loadCachedSummaries();
@@ -352,7 +359,7 @@ export function App() {
           onPickThread={switchThread}
           onDeleteThread={removeThread}
         />
-        <main className="flex flex-1 flex-col bg-background/85 backdrop-blur-sm">
+        <main className="flex min-h-0 flex-1 flex-col bg-background/85 backdrop-blur-sm">
           <ChatSurface
             threadId={currentId}
             ensureThreadId={ensureThreadId}

@@ -106,6 +106,23 @@ export async function deleteRemoteThread(id: string): Promise<void> {
   }
 }
 
+/** Server-side bulk cleanup of threads that have zero messages. Called
+ *  on app load to wipe orphans created when sends fail mid-flight (e.g.
+ *  the CORS gap that caused 16 "New chat" rows to pile up before this
+ *  was added). Idempotent + safe to call repeatedly — server returns
+ *  `{ deleted: 0 }` when nothing matches. Swallows errors silently;
+ *  cleanup is best-effort and shouldn't block app boot. */
+export async function purgeEmptyRemoteThreads(): Promise<number> {
+  try {
+    const r = await api<{ deleted: number }>('/v1/threads/empty', {
+      method: 'DELETE',
+    });
+    return r.deleted ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** Auto-compaction status for a thread. Surfaced by /v1/threads/:id
  *  /messages so the UI can render a "↳ N earlier turns summarized"
  *  pill above the visible messages. Null on threads that haven't
