@@ -162,20 +162,13 @@ export function useThreadMessagesQuery(threadId: string | null) {
     staleTime: Infinity, // server-side compaction owns freshness
     refetchInterval: (query) => {
       if (!threadId || !isInFlight(threadId)) return false;
-      // Sample the latest data — if the assistant turn has landed,
-      // clear the in-flight marker and stop polling. Otherwise
-      // poll every 2s up to the 2-minute timeout (managed in
-      // isInFlight via startedAt comparison).
       const data = query.state.data;
-      if (data) {
-        const messages = data.messages.map((m, i) => ({
-          role: m.role,
-          seq: i, // synthetic — we don't track per-message seq client-side
-        }));
-        if (hasLanded(threadId, messages)) {
-          clearInFlight(threadId);
-          return false;
-        }
+      // hasLanded reads the server's seq directly off each
+      // message — no synthetic indices, no parallel counter to
+      // keep in sync.
+      if (data && hasLanded(threadId, data.messages)) {
+        clearInFlight(threadId);
+        return false;
       }
       return 2_000;
     },

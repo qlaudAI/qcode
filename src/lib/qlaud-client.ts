@@ -88,6 +88,12 @@ export type ContentBlock =
 export type Message = {
   role: 'user' | 'assistant';
   content: ContentBlock[];
+  /** Monotonic sequence number from qlaud (1-based). Present on
+   *  messages loaded from /v1/threads/:id/messages, omitted on
+   *  the optimistic in-memory shape we build during streaming.
+   *  Lets the in-flight resume detector compare server-side
+   *  freshness without inventing client-side counters. */
+  seq?: number;
 };
 
 export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence';
@@ -318,7 +324,15 @@ export type ThreadStreamHandlers = {
   }) => void;
   /** Fired once when the entire tool-loop finishes (or hits the cap).
    *  Means: no further events will arrive on this stream. */
-  onDone?: (info: { iterations: number; hitMaxIterations: boolean }) => void;
+  onDone?: (info: {
+    iterations: number;
+    hitMaxIterations: boolean;
+    /** USD cost — qlaud's authoritative number, markup included.
+     *  Skip the balance-delta math; use this. */
+    costUsd: number | null;
+    /** Seq of the assistant turn that was just persisted. */
+    seq: number | null;
+  }) => void;
   /** Mid-stream qlaud.error (after we've already written 200). The
    *  HTTP-level errors still throw from streamThreadMessage's caller;
    *  this handler is for tool-loop or upstream-mid-stream issues. */
@@ -538,6 +552,11 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
           opts.onDone?.({
             iterations: ev.iterations ?? 0,
             hitMaxIterations: !!ev.hit_max_iterations,
+            costUsd:
+              typeof ev.cost_micros === 'number'
+                ? ev.cost_micros / 1_000_000
+                : null,
+            seq: typeof ev.seq === 'number' ? ev.seq : null,
           });
           break;
         default:
@@ -605,4 +624,11 @@ type ThreadStreamEvent =
       type: 'qlaud.done';
       iterations?: number;
       hit_max_iterations?: boolean;
+      /** USD cost expressed in micro-dollars (1 USD = 1_000_000).
+       *  Authoritative — includes qlaud's markup. Use this instead
+       *  of computing from balance deltas. */
+      cost_micros?: number;
+      /** Seq of the assistant turn we just persisted. */
+      seq?: number;
+      thread_id?: string;
     };

@@ -21,7 +21,6 @@ import { posthog } from '../lib/analytics';
 
 import { runThreadAgent, type AgentEvent } from '../lib/agent';
 import { buildAttachmentContext } from '../lib/attachments';
-import { fetchBalance } from '../lib/billing';
 import { cn } from '../lib/cn';
 import { type AttachedImage } from '../lib/images';
 import {
@@ -492,12 +491,15 @@ export function ChatSurface({
     activeRunIdRef.current += 1;
     const runId = activeRunIdRef.current;
 
-    // Snapshot wallet balance + start time for the cost-from-delta
-    // calc on the usage pill. qlaud doesn't ship cost on the SSE
-    // stream yet — the balance delta is the source of truth.
+    // qlaud's qlaud.done event ships cost_micros — its authoritative
+    // count, markup included. We capture it on the finished event
+    // alongside token counts. No more pre/post balance fetch math.
     const startMs = Date.now();
-    const preBalance = (await fetchBalance())?.balanceUsd ?? null;
-    let lastUsage: { inputTokens: number; outputTokens: number } | null = null;
+    let finished: {
+      usage: { inputTokens: number; outputTokens: number };
+      costUsd: number | null;
+      seq: number | null;
+    } | null = null;
 
     try {
       // Lazily provision the thread on first send. App.tsx returns
@@ -517,10 +519,19 @@ export function ChatSurface({
       lastLoadedRef.current = id;
       // Track this send as in-flight so if the user navigates away
       // mid-stream, switching back triggers a poll until qlaud's
-      // server-side persisted assistant turn shows up. Cleared on
-      // success in the finally block; left in place if the user
-      // abandons (server keeps running via waitUntil).
-      markInFlight(id);
+      // server-side persisted assistant turn shows up. The seq
+      // floor is the highest seq currently in the cached history;
+      // hasLanded() looks for an assistant turn past that seq to
+      // detect "the new turn arrived." Cleared on success in the
+      // finally block; left in place if the user abandons (server
+      // keeps running via waitUntil).
+      const cachedHistory = messagesQuery.data;
+      const seqFloor =
+        cachedHistory?.messages.reduce(
+          (max, m) => Math.max(max, m.seq ?? 0),
+          0,
+        ) ?? 0;
+      markInFlight(id, seqFloor);
       // Thread changed (user navigated) between send press and the
       // thread-id resolution. Don't keep going — the user's looking
       // at a different conversation.
@@ -542,7 +553,13 @@ export function ChatSurface({
           // Without this, a late tool_done from an aborted thread
           // mutates the active thread's blocks.
           if (runId !== activeRunIdRef.current) return;
-          if (e.type === 'finished') lastUsage = e.usage;
+          if (e.type === 'finished') {
+            finished = {
+              usage: e.usage,
+              costUsd: e.costUsd,
+              seq: e.seq,
+            };
+          }
           handleEvent(e, setBlocks);
         },
         onApproval: (toolUseId, _request) =>
@@ -565,27 +582,22 @@ export function ChatSurface({
       // detect a plan → agent transition.
       setLastMode(id, mode);
 
-      // After the turn ends, fetch the new balance and append a
-      // usage block. Balance delta is the authoritative cost (qlaud's
-      // markup included); token counts come from the SSE stream.
-      if (lastUsage) {
-        const postBalance = (await fetchBalance())?.balanceUsd ?? null;
-        // Stale-run guard: if the user navigated away while we were
-        // fetching the post-turn balance, drop the usage append —
-        // the active thread doesn't own this turn's cost.
-        if (runId !== activeRunIdRef.current) return;
-        const usage: { inputTokens: number; outputTokens: number } = lastUsage;
-        const cost =
-          preBalance != null && postBalance != null
-            ? Math.max(0, preBalance - postBalance)
-            : null;
+      // qlaud's qlaud.done event already ships cost_micros — append
+      // the usage pill directly from that without round-tripping
+      // /v1/billing/balance again. invalidateBalance() in
+      // onTurnLanded keeps the title-bar spend bar in sync.
+      if (finished) {
+        const f: {
+          usage: { inputTokens: number; outputTokens: number };
+          costUsd: number | null;
+        } = finished;
         setBlocks((b) => [
           ...b,
           {
             type: 'usage',
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-            costUsd: cost,
+            inputTokens: f.usage.inputTokens,
+            outputTokens: f.usage.outputTokens,
+            costUsd: f.costUsd,
             model,
             durationMs: Date.now() - startMs,
           },
@@ -593,9 +605,9 @@ export function ChatSurface({
         posthog.capture('turn_completed', {
           model,
           mode,
-          input_tokens: usage.inputTokens,
-          output_tokens: usage.outputTokens,
-          cost_usd: cost,
+          input_tokens: f.usage.inputTokens,
+          output_tokens: f.usage.outputTokens,
+          cost_usd: f.costUsd,
           duration_ms: Date.now() - startMs,
         });
       }

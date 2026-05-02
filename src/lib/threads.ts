@@ -194,11 +194,14 @@ export async function getRemoteThreadMessages(
     { signal: opts.signal },
   );
   // Server returned newest-first; reverse so callers always see
-  // chronological order. The cursor (next_before_seq) is the seq
-  // of the oldest row we just got — pass it back to load older.
+  // chronological order. Preserve the server's seq on every
+  // message — it's the canonical "where am I in this thread?"
+  // signal, used by the in-flight resume detector + future
+  // pagination consumers without inventing a parallel counter.
   const messages = [...data.data].reverse().map((m) => ({
     role: m.role,
     content: normalizeContent(m.content),
+    seq: m.seq,
   }));
   return {
     messages,

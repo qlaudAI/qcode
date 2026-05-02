@@ -116,9 +116,15 @@ export type AgentEvent =
       type: 'finished';
       stopReason?: string;
       turns: number;
-      /** Aggregated usage across every model call in this run. Used
-       *  by the UI to show a per-turn cost/token pill. */
+      /** Aggregated usage across every model call in this run. */
       usage: { inputTokens: number; outputTokens: number };
+      /** USD cost from qlaud's authoritative count (cost_micros /
+       *  1e6). Includes markup. null when running against a legacy
+       *  qlaud worker that didn't ship cost_micros yet. */
+      costUsd: number | null;
+      /** Seq of the assistant turn just persisted by qlaud. Used
+       *  by the in-flight resume detector + future jump-to-turn. */
+      seq: number | null;
     }
   | { type: 'error'; message: string }
   // ─── Subagent (`task` tool) events ──────────────────────────────
@@ -252,6 +258,11 @@ export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
         stopReason,
         turns: turn + 1,
         usage: { inputTokens: totalInput, outputTokens: totalOutput },
+        // Legacy runAgent path doesn't go through qlaud's tool-loop
+        // SSE; cost + seq aren't available here. UI falls back to
+        // hiding the cost cell when null.
+        costUsd: null,
+        seq: null,
       });
       return messages;
     }
@@ -612,6 +623,8 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
           stopReason: info.hitMaxIterations ? 'max_loops' : 'end_turn',
           turns: info.iterations,
           usage: { inputTokens: totalInput, outputTokens: totalOutput },
+          costUsd: info.costUsd,
+          seq: info.seq,
         });
       },
     });
