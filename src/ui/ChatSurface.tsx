@@ -56,6 +56,7 @@ import { Markdown } from './Markdown';
 import { MentionMenu, getMentionResults } from './MentionMenu';
 import { ToolCallCard, type ToolCallView } from './ToolCallCard';
 import { RightRail, type RightRailView } from './RightRail';
+import { loadEarlierMessages } from '../lib/queries';
 
 // Each "block" rendered in the chat is the smallest UI unit. The
 // agent loop emits a stream of events that `handleEvent` translates
@@ -631,6 +632,9 @@ export function ChatSurface({
             />
           ) : (
             <div className="flex flex-col gap-5">
+              {messagesQuery.data?.hasMore && threadId && (
+                <LoadEarlierButton threadId={threadId} />
+              )}
               {compaction && (
                 <CompactionIndicator
                   summary={compaction.summary}
@@ -1478,6 +1482,33 @@ function SubagentBlock({
         )}
       </div>
     </div>
+  );
+}
+
+// "Load earlier turns" affordance — rendered above the chat list
+// when the thread has more history than the latest page we
+// fetched. Click → calls loadEarlierMessages() which fetches the
+// next-older page via the before_seq cursor + prepends to the
+// cached query data. No re-render flicker since we mutate the
+// cache directly; the query subscriber sees the new data and
+// historyToBlocks projects it.
+function LoadEarlierButton({ threadId }: { threadId: string }) {
+  const [loading, setLoading] = useState(false);
+  return (
+    <button
+      onClick={async () => {
+        setLoading(true);
+        try {
+          await loadEarlierMessages(threadId);
+        } finally {
+          setLoading(false);
+        }
+      }}
+      disabled={loading}
+      className="mx-auto inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-background/70 px-3 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground disabled:opacity-50"
+    >
+      {loading ? 'Loading…' : '↑ Load earlier turns'}
+    </button>
   );
 }
 

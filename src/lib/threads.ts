@@ -142,41 +142,74 @@ export type CompactionInfo = {
 };
 
 /** Bundle of what `/v1/threads/:id/messages` returns: the rehydrated
- *  Anthropic-shape Messages + compaction state for the indicator. */
+ *  Anthropic-shape Messages + compaction state for the indicator +
+ *  pagination cursors. */
 export type RemoteThreadHistory = {
   messages: Message[];
   compaction: CompactionInfo | null;
+  /** Sequence number of the oldest message in this page. Pass back
+   *  as `before_seq` to fetch the next-older page. Null when this
+   *  page already includes seq=1 (no more history above). */
+  oldestSeq: number | null;
+  /** True when more turns exist before the oldest we just loaded.
+   *  UI uses this to render the "Load earlier turns" affordance. */
+  hasMore: boolean;
 };
 
-/** Load full conversation history for a thread, oldest-first.
- *  Returns Anthropic-shape Messages + the thread's compaction state
- *  so ChatSurface can render the indicator above the first
- *  visible turn. */
+const DEFAULT_PAGE_SIZE = 50;
+
+/** Load conversation history for a thread, paginated by sequence.
+ *  Default: latest `limit` turns (newest-first server-side, returned
+ *  oldest-first client-side so ChatSurface can render top-to-bottom).
+ *  Pass `beforeSeq` to fetch the next page of older turns; the
+ *  caller threads pages together by prepending. */
 export async function getRemoteThreadMessages(
   id: string,
-  signal?: AbortSignal,
+  opts: {
+    limit?: number;
+    beforeSeq?: number;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<RemoteThreadHistory> {
+  const limit = opts.limit ?? DEFAULT_PAGE_SIZE;
+  const params = new URLSearchParams({
+    limit: String(limit),
+    // Newest-first from the server so the latest page lands first
+    // (chat UI's natural default — "what did we just say?"). We
+    // reverse client-side before returning so ChatSurface renders
+    // oldest→newest top-to-bottom as expected.
+    order: 'desc',
+  });
+  if (opts.beforeSeq != null) params.set('before_seq', String(opts.beforeSeq));
   const data = await api<{
     data: RemoteThreadMessage[];
+    has_more: boolean;
+    next_before_seq: number | null;
     compaction: {
       summary: string;
       summarized_through_seq: number;
     } | null;
   }>(
-    `/v1/threads/${encodeURIComponent(id)}/messages?limit=200&order=asc`,
-    { signal },
+    `/v1/threads/${encodeURIComponent(id)}/messages?${params.toString()}`,
+    { signal: opts.signal },
   );
+  // Server returned newest-first; reverse so callers always see
+  // chronological order. The cursor (next_before_seq) is the seq
+  // of the oldest row we just got — pass it back to load older.
+  const messages = [...data.data].reverse().map((m) => ({
+    role: m.role,
+    content: normalizeContent(m.content),
+  }));
   return {
-    messages: data.data.map((m) => ({
-      role: m.role,
-      content: normalizeContent(m.content),
-    })),
+    messages,
     compaction: data.compaction
       ? {
           summary: data.compaction.summary,
           summarizedThroughSeq: data.compaction.summarized_through_seq,
         }
       : null,
+    oldestSeq: data.next_before_seq,
+    hasMore: !!data.has_more,
   };
 }
 

@@ -172,6 +172,33 @@ export function setThreadMessages(
   );
 }
 
+/** Load the next-older page of messages for a thread and prepend
+ *  to the cached history. Used by the "Load earlier turns" button
+ *  the chat surface renders when hasMore is true. The cursor
+ *  threading (oldestSeq → before_seq) means we can paginate back
+ *  through 1000-turn threads without re-fetching what we already
+ *  have — incremental, no client-side de-dup needed. */
+export async function loadEarlierMessages(threadId: string): Promise<void> {
+  const cached = queryClient.getQueryData<RemoteThreadHistory>(
+    qk.threadMessages(threadId),
+  );
+  if (!cached || !cached.hasMore || cached.oldestSeq == null) return;
+  const older = await getRemoteThreadMessages(threadId, {
+    beforeSeq: cached.oldestSeq,
+  });
+  queryClient.setQueryData<RemoteThreadHistory>(
+    qk.threadMessages(threadId),
+    {
+      // Prepend older turns; keep the latest cached compaction
+      // (compaction state is thread-wide, not page-scoped).
+      messages: [...older.messages, ...cached.messages],
+      compaction: cached.compaction ?? older.compaction,
+      oldestSeq: older.oldestSeq,
+      hasMore: older.hasMore,
+    },
+  );
+}
+
 /** Invalidate so the next consumer refetches — used after a turn
  *  lands when we want fresh canonical history (instead of the
  *  client-side reconstructed buffer). */
