@@ -1,8 +1,24 @@
+import { useState } from 'react';
 import { Sparkles, ArrowRight, ShieldCheck } from 'lucide-react';
 
 import { QlaudMark } from './QlaudMark';
 
-export function SignInGate({ onSignIn }: { onSignIn: () => void }) {
+export function SignInGate({ onSignIn }: { onSignIn: () => Promise<void> | void }) {
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function handleClick() {
+    setErr(null);
+    setBusy(true);
+    try {
+      await onSignIn();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="flex h-dvh flex-col">
       <div className="titlebar h-11 border-b border-border/60" />
@@ -21,12 +37,28 @@ export function SignInGate({ onSignIn }: { onSignIn: () => void }) {
           </p>
 
           <button
-            onClick={onSignIn}
-            className="no-drag mt-8 inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-5 py-3 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+            onClick={handleClick}
+            disabled={busy}
+            className="no-drag mt-8 inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-5 py-3 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-70"
           >
-            Sign in with qlaud
-            <ArrowRight className="h-4 w-4" />
+            {busy ? 'Opening browser…' : 'Sign in with qlaud'}
+            {!busy && <ArrowRight className="h-4 w-4" />}
           </button>
+
+          {err && (
+            <div className="mt-4 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-left text-xs">
+              <div className="font-medium text-destructive">
+                Couldn&rsquo;t open the browser
+              </div>
+              <div className="mt-1 text-muted-foreground">{err}</div>
+              <a
+                href="https://qlaud.ai/cli-auth?cb=qcode%3A%2F%2Fauth&app=qcode"
+                className="mt-2 inline-block text-primary hover:underline"
+              >
+                Open in browser manually →
+              </a>
+            </div>
+          )}
 
           <p className="mt-3 text-[11px] text-muted-foreground">
             Don&rsquo;t have an account?{' '}

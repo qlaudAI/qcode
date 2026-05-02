@@ -107,14 +107,25 @@ export function setProfile(p: Profile): void {
  *  - Browser (qcode.qlaud.ai or vite dev): uses the current origin's
  *    `/auth` path so qlaud.ai can redirect the user back into the
  *    web app, where consumeAuthCallback() picks up the `k` query
- *    param and stores it in localStorage. */
+ *    param and stores it in localStorage.
+ *
+ *  Throws on Tauri permission failures so the caller can surface them
+ *  to the user. We hit this once already (alpha.14) when capabilities/
+ *  was missing — `await openExternal` rejected silently, the click
+ *  handler ate the rejection, and sign-in looked frozen. Never again. */
 export async function startSignIn(): Promise<void> {
   const cb = isTauri()
     ? 'qcode://auth'
     : `${window.location.origin}/auth`;
   const url = `https://qlaud.ai/cli-auth?cb=${encodeURIComponent(cb)}&app=qcode`;
   if (isTauri()) {
-    await openExternal(url);
+    try {
+      await openExternal(url);
+    } catch (e) {
+      throw new Error(
+        `Couldn't open the browser. Tauri error: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   } else {
     // Browser: same-tab redirect feels more like the OAuth flows
     // users are used to. After qlaud.ai authorizes, they land back

@@ -1,0 +1,48 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the main qcode window. Tauri 2.x denies every plugin call by default — we have to enumerate what the webview is allowed to ask for. If sign-in or any tool ever silently freezes, suspect this file first.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+
+    "shell:allow-open",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        { "name": "binaries/rg", "sidecar": true, "args": true },
+        { "name": "sh", "cmd": "sh", "args": true },
+        { "name": "bash", "cmd": "bash", "args": true },
+        { "name": "cmd", "cmd": "cmd", "args": true },
+        { "name": "powershell", "cmd": "powershell", "args": true }
+      ]
+    },
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        { "name": "binaries/rg", "sidecar": true, "args": true },
+        { "name": "sh", "cmd": "sh", "args": true },
+        { "name": "bash", "cmd": "bash", "args": true },
+        { "name": "cmd", "cmd": "cmd", "args": true },
+        { "name": "powershell", "cmd": "powershell", "args": true }
+      ]
+    },
+    "shell:allow-stdin-write",
+    "shell:allow-kill",
+
+    "fs:allow-read-text-file",
+    "fs:allow-exists",
+    "fs:allow-stat",
+
+    "dialog:allow-open",
+
+    "os:allow-platform",
+    "os:allow-os-type",
+    "os:allow-arch",
+    "os:allow-version",
+
+    "deep-link:default",
+
+    "updater:default"
+  ]
+}

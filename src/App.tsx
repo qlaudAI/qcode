@@ -302,7 +302,7 @@ export function App() {
   useShortcuts(onMenu);
 
   if (!authed) {
-    return <SignInGate onSignIn={() => startSignIn()} />;
+    return <SignInGate onSignIn={startSignIn} />;
   }
 
   return (
