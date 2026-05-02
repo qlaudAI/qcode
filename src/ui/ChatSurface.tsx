@@ -42,6 +42,11 @@ import { useThreadMessagesQuery } from '../lib/queries';
 import { QlaudMark } from './QlaudMark';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
 import {
+  registerApproval,
+  rejectAllApprovals,
+  resolveApproval,
+} from '../lib/approvals';
+import {
   getCurrentWorkspace,
   listAllFiles,
 } from '../lib/workspace';
@@ -112,10 +117,6 @@ type RenderBlock =
       summary: string | null;
     };
 
-// Pending approval resolvers, keyed by tool_use id. The agent loop
-// awaits one of these promises; the UI fulfills it on click.
-type PendingResolver = (decision: ApprovalDecision) => void;
-
 // Sample prompts for the empty-state. Each one is calibrated to
 // secretly invoke a specific engineer on the team — the user
 // describes a goal in their own words, the server-side classifier
@@ -183,7 +184,6 @@ export function ChatSurface({
   const [branch, setBranch] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const approvalsRef = useRef<Map<string, PendingResolver>>(new Map());
   // Monotonic run id. Bumped on every send + on every thread switch.
   // Each onEvent callback closes over the run id it was created
   // with; if the live ref drifts past it (because the user aborted,
@@ -265,8 +265,7 @@ export function ChatSurface({
     if (lastSendThreadRef.current && lastSendThreadRef.current !== threadId) {
       activeRunIdRef.current += 1;
       abortRef.current?.abort();
-      for (const resolve of approvalsRef.current.values()) resolve('reject');
-      approvalsRef.current.clear();
+      rejectAllApprovals();
       setBusy(false);
     }
   }, [threadId]);
@@ -295,11 +294,13 @@ export function ChatSurface({
 
   useEffect(
     () => () => {
+      // Cancel network on unmount, but DO NOT clear the module-
+      // scoped approval registry — a parent re-render that
+      // remounts ChatSurface (e.g. layout swap) would drop the
+      // user's pending approval card otherwise. Approvals only
+      // get rejected on explicit stop(), thread-switch, or
+      // sign-out; remounts are transparent.
       abortRef.current?.abort();
-      // Resolve any in-flight approvals as 'reject' so the loop can
-      // unwind cleanly when the user navigates away.
-      for (const resolve of approvalsRef.current.values()) resolve('reject');
-      approvalsRef.current.clear();
     },
     [],
   );
@@ -334,15 +335,12 @@ export function ChatSurface({
   }
 
   function decide(id: string, decision: ApprovalDecision) {
-    const resolve = approvalsRef.current.get(id);
-    if (!resolve) return;
-    approvalsRef.current.delete(id);
     setBlocks((bs) =>
       bs.map((b) =>
         b.type === 'approval' && b.id === id ? { ...b, resolved: decision } : b,
       ),
     );
-    resolve(decision);
+    resolveApproval(id, decision);
   }
 
   async function send(text: string) {
@@ -525,7 +523,7 @@ export function ChatSurface({
               resolve('reject');
               return;
             }
-            approvalsRef.current.set(toolUseId, resolve);
+            registerApproval(toolUseId, resolve);
           }),
       });
 
@@ -588,8 +586,7 @@ export function ChatSurface({
       abortRef.current = null;
       // Drop any leftover resolvers — covers the case where streaming
       // bails before the loop reaches the awaiting Promise.
-      for (const resolve of approvalsRef.current.values()) resolve('reject');
-      approvalsRef.current.clear();
+      rejectAllApprovals();
     }
   }
 
@@ -601,8 +598,7 @@ export function ChatSurface({
     // mutating blocks the user is now reading fresh.
     activeRunIdRef.current += 1;
     abortRef.current?.abort();
-    for (const resolve of approvalsRef.current.values()) resolve('reject');
-    approvalsRef.current.clear();
+    rejectAllApprovals();
     setBusy(false);
   }
 
@@ -1019,6 +1015,18 @@ function mapError(code: string): ErrorPresentation {
       severity: 'warning',
       title: 'Cancelled',
       body: 'You stopped the turn. Send again to continue.',
+    };
+  }
+  // SSE stream idle-timeout — fired by the 90s watchdog in
+  // qlaud-client when the upstream goes silent mid-response.
+  // Distinct from "offline" because the connection was working
+  // and then stopped sending data; common cause is mobile radio
+  // sleeping or a server-side hang.
+  if (code.includes('sse_idle_timeout')) {
+    return {
+      severity: 'warning',
+      title: 'The model went quiet',
+      body: 'The stream stopped sending data for 90 seconds, so qcode gave up waiting. The model may have hit a long-tail latency — retry, or switch model from the title bar.',
     };
   }
   // Network / DNS / offline.

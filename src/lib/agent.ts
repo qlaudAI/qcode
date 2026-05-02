@@ -535,10 +535,14 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
           });
           return;
         }
-        const stash = pending.get(info.toolUseId);
+        // SSE events should arrive in order (onToolUse before
+        // onToolDispatchStart for the same tool_use_id), but on a
+        // congested network the bytes can split across packets and
+        // the dispatch event lands first. Poll briefly before
+        // surfacing "lost the tool input" — saves the user from
+        // false errors on flaky wifi / mobile radio handoffs.
+        const stash = await waitForPending(pending, info.toolUseId, 500);
         if (!stash) {
-          // tool_use block came through but we lost it somehow — shouldn't
-          // happen given the SSE ordering, but better to surface than hang.
           await safeSubmit(opts.threadId, info.toolUseId, {
             output: `qcode lost the tool input for ${info.name}. Internal error; retry.`,
             isError: true,
@@ -618,6 +622,25 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
 
   // Drop any leftover approval handles — covers abort mid-tool.
   void currentIteration; // currently informational; UI may use later
+}
+
+/** Poll the pending-tool-use Map for a short window before giving
+ *  up. Covers the (rare) case where the SSE byte stream splits the
+ *  tool_use block's bytes across a packet boundary so onToolUse
+ *  fires AFTER onToolDispatchStart for the same id. Returns the
+ *  stashed input if found within the timeout, undefined otherwise. */
+async function waitForPending<T>(
+  map: Map<string, T>,
+  id: string,
+  timeoutMs: number,
+): Promise<T | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const v = map.get(id);
+    if (v) return v;
+    await new Promise<void>((r) => setTimeout(r, 25));
+  }
+  return undefined;
 }
 
 /** Wrap submitToolResult so a network blip on the result-POST never

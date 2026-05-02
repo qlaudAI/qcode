@@ -174,12 +174,31 @@ export function App() {
   // device), fall back to whatever the list says is most recent.
   // This is a derived sync — Query data → local pointer state. Cheap
   // and idempotent.
+  // Trigger on dataUpdatedAt (always changes per refetch) AND data
+  // (covers the structural-sharing case where Query keeps the same
+  // array reference because the rows happen to be deep-equal).
+  // Without dataUpdatedAt, a cross-device delete that produced an
+  // identical-looking list would never re-run this check and the
+  // active currentId could point at a thread that's been deleted
+  // server-side — next send fails with not_found.
   useEffect(() => {
     if (!threadsQuery.data) return;
     if (currentId && !threadsQuery.data.some((t) => t.id === currentId)) {
       setCurrentId(threadsQuery.data[0]?.id ?? null);
     }
-  }, [threadsQuery.data, currentId]);
+  }, [threadsQuery.data, threadsQuery.dataUpdatedAt, currentId]);
+
+  // Workspace-change invalidator. When the user opens a different
+  // folder, the threads list's metadata (workspace_path / name)
+  // is stale until the next reconcile — drives the brief flash
+  // where projects-section briefly shows the wrong folder. Force
+  // a refetch immediately so the user lands on the right project
+  // group within one round-trip instead of waiting for staleTime.
+  useEffect(() => {
+    if (!authed) return;
+    void queryClient.invalidateQueries({ queryKey: qk.threads });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace?.path]);
 
   // Deep-link listener: qcode://auth?k=… from the qlaud sign-in flow.
   // Once a key lands in the keychain, flipping `authed` is enough —
