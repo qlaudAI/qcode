@@ -4,6 +4,14 @@ import { ChevronDown, Check } from 'lucide-react';
 import { cn } from '../lib/cn';
 import { MODELS } from '../lib/models';
 
+// Drop the brand prefix on tight viewports so the picker doesn't
+// wrap. "Claude Sonnet 4.6" → "Sonnet 4.6", "GPT-5.4 mini" stays
+// (already short), "DeepSeek Chat" → "DeepSeek Chat" (no brand
+// prefix to drop). The tooltip preserves the full label.
+function shortLabel(label: string): string {
+  return label.replace(/^Claude\s+/, '').trim();
+}
+
 export function ModelPicker({
   value,
   onChange,
@@ -18,13 +26,17 @@ export function ModelPicker({
     <div className="relative">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 rounded border border-border/60 bg-background px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:border-foreground/30"
+        className="flex max-w-[60vw] items-center gap-1.5 rounded border border-border/60 bg-background px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:border-foreground/30"
+        title={`${current.provider} · ${current.label}`}
       >
-        <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-primary">
+        {/* Provider tag is helpful context on desktop but eats too
+         *  much horizontal real estate in the mobile titlebar (see
+         *  the wrap-3-line bug). Hide it below sm. */}
+        <span className="hidden rounded-full bg-primary/10 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-primary sm:inline">
           {current.provider}
         </span>
-        <span>{current.label}</span>
-        <ChevronDown className="h-3 w-3 text-muted-foreground" />
+        <span className="truncate">{shortLabel(current.label)}</span>
+        <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
       </button>
 
       {open && (

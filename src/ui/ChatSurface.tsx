@@ -2151,7 +2151,11 @@ function Composer({
               placeholder="Ask qcode about your code… type @ to attach a file"
               rows={2}
               disabled={busy}
-              className="block w-full resize-none rounded-2xl bg-transparent px-4 py-3 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60"
+              // text-base (16px) on mobile prevents iOS Safari from
+              // auto-zooming the page on focus — Safari only zooms
+              // when the input's font-size is < 16px. text-sm
+              // (14px) returns at sm: where we're not on touch.
+              className="block w-full resize-none rounded-2xl bg-transparent px-4 py-3 text-base leading-6 text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60 sm:text-sm sm:leading-6"
             />
             <div className="flex items-center justify-between border-t border-border/40 px-3 py-2">
               <div className="flex items-center gap-2">

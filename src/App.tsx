@@ -478,16 +478,18 @@ function Titlebar({
           </button>
         )}
         {/* Canonical qlaud monogram — dark q with red period accent.
-            Same source as qlaud.ai/icon.svg. */}
+            Same source as qlaud.ai/icon.svg. The wordmark + alpha
+            badge that used to sit beside it has been dropped: the
+            mark alone reads as the qlaud product surface, the
+            "alpha" disclaimer lives in the footer / settings. */}
         <QlaudMark className="h-5 w-5 rounded shadow-sm" />
-        <span className="text-sm font-semibold tracking-tight">qcode</span>
-        <span className="ml-1 rounded-full border border-primary/30 bg-primary/5 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
-          alpha
+        <span className="hidden text-sm font-semibold tracking-tight sm:inline">
+          qcode
         </span>
         {workspaceName && (
           <>
-            <span className="mx-2 hidden text-muted-foreground/60 sm:inline">/</span>
-            <span className="hidden truncate text-xs text-muted-foreground sm:inline">
+            <span className="mx-2 hidden text-muted-foreground/60 md:inline">/</span>
+            <span className="hidden truncate text-xs text-muted-foreground md:inline">
               {workspaceName}
             </span>
           </>
@@ -784,7 +786,9 @@ function SidebarFilter({
           }
         }}
         placeholder="Find a conversation"
-        className="ml-2 min-w-0 flex-1 bg-transparent text-[12.5px] outline-none placeholder:text-muted-foreground"
+        // 16px on mobile to dodge iOS Safari's focus-zoom; collapses
+        // to 12.5px at sm where the keyboard isn't a concern.
+        className="ml-2 min-w-0 flex-1 bg-transparent text-base outline-none placeholder:text-muted-foreground sm:text-[12.5px]"
       />
       {value && (
         <button

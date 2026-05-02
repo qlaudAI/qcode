@@ -28,6 +28,20 @@
     -webkit-user-select: text;
     user-select: text;
   }
+  /* iOS Safari auto-zooms the page when an input's font-size is
+   * smaller than 16px and the user taps to focus. The zoom doesn't
+   * reset cleanly when the keyboard hides, leaving the layout
+   * shifted right and the chat surface clipped (the symptom the
+   * user reported as "screen messes up"). This rule clamps every
+   * editable surface to 16px on touch viewports — desktop sizes
+   * stay smaller via sm:text-* utilities at the component level. */
+  @media (max-width: 640px) {
+    input,
+    textarea,
+    [contenteditable] {
+      font-size: 16px;
+    }
+  }
   ::selection {
     background: hsl(0 72% 51% / 0.18);
   }
