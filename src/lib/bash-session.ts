@@ -121,12 +121,23 @@ async function ensureSession(workspace: string): Promise<SessionState> {
   if (existing && existing.status !== 'dead') return existing;
 
   const { Command } = await import('@tauri-apps/plugin-shell');
+  const { detectShell, getShellDetectionError } = await import('./shell-launcher');
+  const launcher = await detectShell();
+  if (!launcher) {
+    throw new Error(getShellDetectionError() ?? 'No bash shell available.');
+  }
   // -i (interactive) loads .bashrc/.bash_profile so user aliases +
   // PATH additions are available; -s reads commands from stdin.
   // Without -i, sourcing venvs and pyenv shims doesn't pick up the
   // user's shell config and the model's first `python` call hits
   // the system Python instead of the project's.
-  const cmd = Command.create('sh', ['-i', '-s'], { cwd: workspace });
+  //
+  // wrap() handles the WSL case — on Windows-with-WSL we end up
+  // running `wsl bash -i -s`, which still gives the model a bash REPL
+  // it can pipe commands into the same way.
+  const cmd = Command.create(launcher.cmd, launcher.wrap(['-i', '-s']), {
+    cwd: workspace,
+  });
   const handle: ChildHandle = {
     child: null as unknown as import('@tauri-apps/plugin-shell').Child,
     stdout: '',

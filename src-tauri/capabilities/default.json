@@ -13,6 +13,7 @@
         { "name": "binaries/rg", "sidecar": true, "args": true },
         { "name": "sh", "cmd": "sh", "args": true },
         { "name": "bash", "cmd": "bash", "args": true },
+        { "name": "wsl", "cmd": "wsl", "args": true },
         { "name": "cmd", "cmd": "cmd", "args": true },
         { "name": "powershell", "cmd": "powershell", "args": true }
       ]
@@ -23,6 +24,7 @@
         { "name": "binaries/rg", "sidecar": true, "args": true },
         { "name": "sh", "cmd": "sh", "args": true },
         { "name": "bash", "cmd": "bash", "args": true },
+        { "name": "wsl", "cmd": "wsl", "args": true },
         { "name": "cmd", "cmd": "cmd", "args": true },
         { "name": "powershell", "cmd": "powershell", "args": true }
       ]

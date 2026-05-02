@@ -83,7 +83,17 @@ export async function runHook(opts: {
   }
 
   const { Command } = await import('@tauri-apps/plugin-shell');
-  const cmd = Command.create('sh', [path], { cwd: opts.workspace });
+  const { detectShell } = await import('./shell-launcher');
+  const launcher = await detectShell();
+  if (!launcher) {
+    // No bash on Windows without Git Bash or WSL — skip the hook
+    // rather than failing the whole tool call. The first-run banner
+    // tells the user how to enable hooks.
+    return PASSTHROUGH;
+  }
+  const cmd = Command.create(launcher.cmd, launcher.wrap([path]), {
+    cwd: opts.workspace,
+  });
   let stdoutBuf = '';
   let stderrBuf = '';
   cmd.stdout.on('data', (line: string) => {
