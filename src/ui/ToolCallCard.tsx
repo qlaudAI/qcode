@@ -1,13 +1,18 @@
 import { useState } from 'react';
 import {
   AlertCircle,
+  Camera,
   Check,
   ChevronRight,
+  Eye,
   FilePlus,
   FileSearch,
   FileText,
   FolderTree,
+  Globe,
+  Keyboard,
   Loader2,
+  MousePointerClick,
   Pencil,
   Plug,
   Play,
@@ -19,6 +24,7 @@ import {
 
 import { cn } from '../lib/cn';
 import { BashView } from './tool-output/BashView';
+import { BrowserView } from './tool-output/BrowserView';
 import { GlobView } from './tool-output/GlobView';
 import { GrepView } from './tool-output/GrepView';
 import { ListFilesView } from './tool-output/ListFilesView';
@@ -44,6 +50,14 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   write_file: FilePlus,
   edit_file: Pencil,
   bash: Terminal,
+  // Built-in browser (Playwright MCP). Distinct icons per verb so the
+  // timeline reads like a sequence of camera/click/keys moves.
+  browser_navigate: Globe,
+  browser_snapshot: Eye,
+  browser_screenshot: Camera,
+  browser_click: MousePointerClick,
+  browser_type: Keyboard,
+  browser_console: Terminal,
   // qlaud meta-tools — surfaced when tools_mode='dynamic' is on for
   // the request. Sparkles for "discover something new" actions, plug
   // for the credential connection flow, play for the executor.
@@ -149,6 +163,15 @@ function Output({ call }: { call: ToolCallView }) {
       );
     case 'bash':
       return <BashView output={output} isError={call.status === 'error'} />;
+    case 'browser_navigate':
+    case 'browser_snapshot':
+    case 'browser_screenshot':
+    case 'browser_click':
+    case 'browser_type':
+    case 'browser_console':
+      return (
+        <BrowserView output={output} isError={call.status === 'error'} />
+      );
     case 'qlaud_search_tools':
     case 'qlaud_get_tool_schemas':
     case 'qlaud_multi_execute':
@@ -203,6 +226,16 @@ function summarize(call: ToolCallView): string {
     }
     case 'bash':
       return typeof input.command === 'string' ? input.command : '…';
+    case 'browser_navigate':
+      return typeof input.url === 'string' ? input.url : '…';
+    case 'browser_snapshot':
+    case 'browser_console':
+      return '';
+    case 'browser_screenshot':
+      return input.full_page === true ? 'full page' : 'viewport';
+    case 'browser_click':
+    case 'browser_type':
+      return typeof input.element === 'string' ? input.element : '…';
     case 'qlaud_search_tools':
       return typeof input.intent === 'string' ? input.intent : '…';
     case 'qlaud_get_tool_schemas': {

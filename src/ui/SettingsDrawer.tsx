@@ -37,6 +37,10 @@ type Props = {
   email: string | null;
   onSignOut: () => void;
   onClearedThreads: () => void;
+  /** Re-fetch /v1/account. Triggered automatically on open so the
+   *  email row never gets stuck at "—" because the boot-time call
+   *  raced sign-in or hit a transient network error. */
+  onRefreshAccount?: () => Promise<void> | void;
 };
 
 export function SettingsDrawer({
@@ -45,14 +49,20 @@ export function SettingsDrawer({
   email,
   onSignOut,
   onClearedThreads,
+  onRefreshAccount,
 }: Props) {
   const [settings, setSettings] = useState<Settings>(() => getSettings());
 
   // Re-hydrate when the drawer opens — covers cross-tab edits in
-  // vite-dev where another tab might have saved.
+  // vite-dev where another tab might have saved. Also kick off an
+  // /v1/account refresh so the "Signed in as" row catches up if the
+  // boot-time call missed (e.g. webview cache, race with sign-in).
   useEffect(() => {
-    if (open) setSettings(getSettings());
-  }, [open]);
+    if (open) {
+      setSettings(getSettings());
+      void onRefreshAccount?.();
+    }
+  }, [open, onRefreshAccount]);
 
   // Esc to close.
   useEffect(() => {

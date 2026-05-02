@@ -25,6 +25,15 @@ export type ThreadSummary = {
   model: string;
   createdAt: number;
   updatedAt: number;
+  /** Workspace path the thread was scoped to at creation time. Empty
+   *  / undefined = pure chat (no codebase). The sidebar splits
+   *  threads into "Projects" (has workspacePath) and "Chats" using
+   *  this field. Persisted both locally and in the qlaud thread's
+   *  metadata so it survives reinstalls. */
+  workspacePath?: string;
+  /** Last segment of the workspace path, cached for sidebar display
+   *  so we don't re-derive it on every render. */
+  workspaceName?: string;
 };
 
 // ─── Remote API ────────────────────────────────────────────────────

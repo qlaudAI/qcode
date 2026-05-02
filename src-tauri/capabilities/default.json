@@ -15,7 +15,10 @@
         { "name": "bash", "cmd": "bash", "args": true },
         { "name": "wsl", "cmd": "wsl", "args": true },
         { "name": "cmd", "cmd": "cmd", "args": true },
-        { "name": "powershell", "cmd": "powershell", "args": true }
+        { "name": "powershell", "cmd": "powershell", "args": true },
+        { "name": "npx", "cmd": "npx", "args": true },
+        { "name": "npx.cmd", "cmd": "npx.cmd", "args": true },
+        { "name": "node", "cmd": "node", "args": true }
       ]
     },
     {
@@ -26,7 +29,10 @@
         { "name": "bash", "cmd": "bash", "args": true },
         { "name": "wsl", "cmd": "wsl", "args": true },
         { "name": "cmd", "cmd": "cmd", "args": true },
-        { "name": "powershell", "cmd": "powershell", "args": true }
+        { "name": "powershell", "cmd": "powershell", "args": true },
+        { "name": "npx", "cmd": "npx", "args": true },
+        { "name": "npx.cmd", "cmd": "npx.cmd", "args": true },
+        { "name": "node", "cmd": "node", "args": true }
       ]
     },
     "shell:allow-stdin-write",

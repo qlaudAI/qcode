@@ -17,6 +17,11 @@
 // bash, expected-replacements check for edit_file, etc.).
 
 import { checkBgJob, runBashBackground, runBashSession } from './bash-session';
+import {
+  callBrowserTool,
+  firstImage,
+  textOf,
+} from './browser-sidecar';
 import { computeDiff, type DiffLine } from './diff';
 import type { IgnoreMatcher } from './gitignore';
 import { runHook } from './hooks';
@@ -182,6 +187,107 @@ export const TASK_TOOL: ToolDef = {
   },
 };
 
+// ─── Browser tools (Playwright MCP) ────────────────────────────────
+//
+// Built-in headless Chromium via @playwright/mcp. The sidecar spawns
+// on first call and persists for the qcode session — page state,
+// cookies, console accumulation all survive across calls.
+//
+// browser_navigate / browser_snapshot / browser_screenshot run
+// without approval (they don't mutate the user's machine — at most
+// they GET URLs the model picked). browser_click and browser_type
+// could in theory hit a malicious URL's "delete account" flow, but
+// since the URL only got loaded because the model navigated to it,
+// the trust boundary is the workspace + the URLs the agent reaches.
+// We treat them as read-tier for now; if that proves wrong we can
+// route them through the approval gate the way bash does.
+export const BROWSER_TOOLS: ToolDef[] = [
+  {
+    name: 'browser_navigate',
+    description:
+      'Open a URL in the built-in headless Chromium. Use this to load a page before snapshotting, screenshotting, or interacting. Common flow: navigate → snapshot → click/type → screenshot. Returns the page title + the URL that loaded (which may differ from input due to redirects).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Absolute URL to load.' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'browser_snapshot',
+    description:
+      "Capture the page's accessibility tree — text + role + ref ids for every interactive element. Cheaper and more semantic than a screenshot when you need to find a button to click or a form field to fill. Use the returned ref ids with browser_click / browser_type.",
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'browser_screenshot',
+    description:
+      "Take a PNG screenshot of the current page. Returns base64-encoded image content the chat surface renders inline. Pass full_page:true for the entire scroll height (default: viewport only). Use this when visual verification matters — layout, colors, rendering — that the accessibility tree can't show.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        full_page: {
+          type: 'boolean',
+          description: 'Capture the entire page including below the fold. Default false.',
+        },
+      },
+    },
+  },
+  {
+    name: 'browser_click',
+    description:
+      'Click an element by its ref id from the most recent browser_snapshot. The element description is shown to the user for context. Page state changes after the click — re-snapshot if you need to interact with the resulting page.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        element: {
+          type: 'string',
+          description: 'Human-readable description of the target ("Sign in button"). Shown to the user.',
+        },
+        ref: {
+          type: 'string',
+          description: 'Ref id from the latest browser_snapshot.',
+        },
+      },
+      required: ['element', 'ref'],
+    },
+  },
+  {
+    name: 'browser_type',
+    description:
+      'Type text into an input element identified by ref id from the latest browser_snapshot. Set submit:true to press Enter after typing (useful for search boxes / login forms).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        element: {
+          type: 'string',
+          description: 'Human-readable description of the field ("Email field").',
+        },
+        ref: {
+          type: 'string',
+          description: 'Ref id from the latest browser_snapshot.',
+        },
+        text: {
+          type: 'string',
+          description: 'Text to type into the field.',
+        },
+        submit: {
+          type: 'boolean',
+          description: 'Press Enter after typing. Default false.',
+        },
+      },
+      required: ['element', 'ref', 'text'],
+    },
+  },
+  {
+    name: 'browser_console',
+    description:
+      'Read console messages (log/info/warn/error) accumulated since the page loaded. Use after navigating + interacting to verify a feature ran cleanly — no JS errors, no failed fetches, no React warnings.',
+    input_schema: { type: 'object', properties: {} },
+  },
+];
+
 export const WRITE_TOOLS: ToolDef[] = [
   {
     name: 'write_file',
@@ -261,15 +367,22 @@ export const WRITE_TOOLS: ToolDef[] = [
   },
 ];
 
-export const ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS, TASK_TOOL];
+export const ALL_TOOLS = [
+  ...READ_TOOLS,
+  ...BROWSER_TOOLS,
+  ...WRITE_TOOLS,
+  TASK_TOOL,
+];
 
 /** Subagent-mode tool list. The child agent gets every tool the
  *  parent has EXCEPT `task` itself — recursive subagent spawning
  *  is too easy a footgun (cost runaway, confused-deputy patterns)
  *  and we have a depth-1 cap baked in by simply not exposing the
- *  tool. Read-mode subagents drop write tools too, mirroring Plan. */
-export const SUBAGENT_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS];
-export const SUBAGENT_READ_TOOLS = [...READ_TOOLS];
+ *  tool. Read-mode subagents drop write tools too, mirroring Plan.
+ *  Browser tools ride along in both — a "verify this page renders"
+ *  subagent is the canonical use case. */
+export const SUBAGENT_TOOLS = [...READ_TOOLS, ...BROWSER_TOOLS, ...WRITE_TOOLS];
+export const SUBAGENT_READ_TOOLS = [...READ_TOOLS, ...BROWSER_TOOLS];
 
 // ─── Executor ───────────────────────────────────────────────────────
 
@@ -328,6 +441,13 @@ export async function executeTool(
         return await runBash(call, opts);
       case 'bash_status':
         return await runBashStatus(call, opts);
+      case 'browser_navigate':
+      case 'browser_snapshot':
+      case 'browser_screenshot':
+      case 'browser_click':
+      case 'browser_type':
+      case 'browser_console':
+        return await runBrowser(call);
       default:
         return err(call.id, `Unknown tool: ${call.name}`);
     }
@@ -866,6 +986,87 @@ async function runBashStatus(
   return result.stillRunning || result.exitCode === 0
     ? ok(call.id, out)
     : { tool_use_id: call.id, content: out, is_error: true };
+}
+
+// ─── Browser executor ──────────────────────────────────────────────
+//
+// Thin shim: every browser_X tool maps to one Playwright MCP tool
+// call (sometimes with arg renaming). We resolve the MCP `content`
+// array down to a single string for the model — text content joined
+// with newlines, image content surfaced as a base64 marker the chat
+// surface picks up and renders inline.
+//
+// Errors: callBrowserTool throws when the sidecar is dead or
+// unreachable; we catch and surface as is_error so the model sees
+// the failure (with the actual stderr from Playwright, when we have
+// it) instead of qcode just hanging.
+
+async function runBrowser(call: ToolCall): Promise<ToolResult> {
+  if (!isTauri()) {
+    return err(call.id, 'browser tools require the qcode desktop app.');
+  }
+  const input = (call.input as Record<string, unknown>) ?? {};
+  let mcpName: string;
+  let mcpArgs: Record<string, unknown> = {};
+  switch (call.name) {
+    case 'browser_navigate':
+      mcpName = 'browser_navigate';
+      mcpArgs = { url: input.url };
+      break;
+    case 'browser_snapshot':
+      mcpName = 'browser_snapshot';
+      break;
+    case 'browser_screenshot':
+      // Playwright MCP's tool is `browser_take_screenshot`; `raw:true`
+      // returns PNG base64 in the content array (vs. saving to disk).
+      mcpName = 'browser_take_screenshot';
+      mcpArgs = {
+        raw: true,
+        ...(input.full_page === true ? { fullPage: true } : {}),
+      };
+      break;
+    case 'browser_click':
+      mcpName = 'browser_click';
+      mcpArgs = { element: input.element, ref: input.ref };
+      break;
+    case 'browser_type':
+      mcpName = 'browser_type';
+      mcpArgs = {
+        element: input.element,
+        ref: input.ref,
+        text: input.text,
+        ...(input.submit === true ? { submit: true } : {}),
+      };
+      break;
+    case 'browser_console':
+      mcpName = 'browser_console_messages';
+      break;
+    default:
+      return err(call.id, `Unknown browser tool: ${call.name}`);
+  }
+
+  let result;
+  try {
+    result = await callBrowserTool(mcpName, mcpArgs);
+  } catch (e) {
+    return err(call.id, e instanceof Error ? e.message : 'browser call failed');
+  }
+
+  const text = textOf(result.content);
+  const img = firstImage(result.content);
+  // Embed images using a sentinel the chat surface picks up. The
+  // model never sees raw base64 (would blow context) — it sees a
+  // placeholder noting the screenshot was captured, the UI strips
+  // the placeholder and renders the image. is_error pushes the model
+  // toward retrying / debugging when the MCP layer reports failure.
+  const summary = img
+    ? `${text || '(no text content)'}\n[qcode:image:${img.mimeType}:${img.data}]`
+    : text || '(no content)';
+  return {
+    tool_use_id: call.id,
+    content: summary,
+    is_error: !!result.isError,
+  };
 }
 
 // ─── Path helpers ──────────────────────────────────────────────────

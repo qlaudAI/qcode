@@ -140,12 +140,27 @@ export function App() {
         const cacheById = new Map(cache.map((s) => [s.id, s]));
         const merged: ThreadSummary[] = remote.map((r) => {
           const cached = cacheById.get(r.id);
+          // Prefer remote metadata for workspace info — survives a
+          // reinstall / cache wipe. Fall back to local cache (covers
+          // the brief window between optimistic create and the
+          // metadata round-tripping back from qlaud).
+          const meta = (r.metadata ?? {}) as Record<string, unknown>;
+          const wsPath =
+            typeof meta.workspace_path === 'string'
+              ? meta.workspace_path
+              : cached?.workspacePath;
+          const wsName =
+            typeof meta.workspace_name === 'string'
+              ? meta.workspace_name
+              : cached?.workspaceName;
           return {
             id: r.id,
             title: cached?.title ?? 'New chat',
             model: cached?.model ?? model,
             createdAt: r.created_at,
             updatedAt: r.last_active_at,
+            ...(wsPath ? { workspacePath: wsPath } : {}),
+            ...(wsName ? { workspaceName: wsName } : {}),
           };
         });
         saveCachedSummaries(merged);
@@ -256,13 +271,25 @@ export function App() {
 
   const newThread = useCallback(async () => {
     try {
-      const t = await createRemoteThread();
+      // Tag the thread with the current workspace (if any). Sidebar
+      // uses this to bucket into Projects vs Chats — without it, a
+      // thread started inside a folder still shows up in the
+      // workspace-less "Chats" section.
+      const meta = workspace
+        ? { workspace_path: workspace.path, workspace_name: workspace.name }
+        : undefined;
+      const t = await createRemoteThread(
+        meta ? { metadata: meta } : undefined,
+      );
       const summary: ThreadSummary = {
         id: t.id,
         title: 'New chat',
         model,
         createdAt: t.created_at,
         updatedAt: t.last_active_at,
+        ...(workspace
+          ? { workspacePath: workspace.path, workspaceName: workspace.name }
+          : {}),
       };
       setThreads(upsertCachedSummary(summary));
       setCurrentId(t.id);
@@ -271,7 +298,7 @@ export function App() {
       // The composer will surface the error on first send if the
       // problem persists.
     }
-  }, [model]);
+  }, [model, workspace]);
 
   const switchThread = useCallback((id: string) => {
     setCurrentId(id);
@@ -303,18 +330,24 @@ export function App() {
   // composer's hot path.
   const ensureThreadId = useCallback(async (): Promise<string> => {
     if (currentId) return currentId;
-    const t = await createRemoteThread();
+    const meta = workspace
+      ? { workspace_path: workspace.path, workspace_name: workspace.name }
+      : undefined;
+    const t = await createRemoteThread(meta ? { metadata: meta } : undefined);
     const summary: ThreadSummary = {
       id: t.id,
       title: 'New chat',
       model,
       createdAt: t.created_at,
       updatedAt: t.last_active_at,
+      ...(workspace
+        ? { workspacePath: workspace.path, workspaceName: workspace.name }
+        : {}),
     };
     setThreads(upsertCachedSummary(summary));
     setCurrentId(t.id);
     return t.id;
-  }, [currentId, model]);
+  }, [currentId, model, workspace]);
 
   // ChatSurface reports back when a turn lands. We use that to
   // refresh the cached summary's updatedAt and (if the title is
@@ -424,6 +457,7 @@ export function App() {
         email={profile?.email ?? null}
         onSignOut={handleSignOut}
         onClearedThreads={refreshThreads}
+        onRefreshAccount={refreshAccount}
       />
 
       <WebNotSupportedModal open={webNotice} onClose={() => setWebNotice(false)} />
@@ -651,12 +685,19 @@ function Sidebar({
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pt-4">
+        <ProjectsSection
+          threads={threads}
+          currentThreadId={currentThreadId}
+          activeWorkspacePath={workspace?.path ?? null}
+          onPick={onPickThread}
+          onDelete={onDeleteThread}
+        />
         <div>
           <div className="px-2 pb-2 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-            Conversations
+            Chats
           </div>
           <ThreadList
-            threads={threads}
+            threads={threads.filter((t) => !t.workspacePath)}
             currentId={currentThreadId}
             onPick={onPickThread}
             onDelete={onDeleteThread}
@@ -706,6 +747,117 @@ function Sidebar({
         v0.1.0-alpha · powered by qlaud
       </div>
     </aside>
+  );
+}
+
+// Bucket workspace-tagged threads by workspace path. The currently
+// open workspace floats to the top + auto-expands; other projects
+// collapse so the sidebar doesn't drown in old folders. "Chats"
+// (no workspace) render in their own section below — see Sidebar.
+function ProjectsSection({
+  threads,
+  currentThreadId,
+  activeWorkspacePath,
+  onPick,
+  onDelete,
+}: {
+  threads: ThreadSummary[];
+  currentThreadId: string | null;
+  activeWorkspacePath: string | null;
+  onPick: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  // Group by workspacePath. Only threads with a path land here;
+  // workspace-less threads are filtered out by the caller.
+  const groups = new Map<
+    string,
+    { name: string; threads: ThreadSummary[] }
+  >();
+  for (const t of threads) {
+    if (!t.workspacePath) continue;
+    const g = groups.get(t.workspacePath);
+    if (g) g.threads.push(t);
+    else
+      groups.set(t.workspacePath, {
+        name: t.workspaceName ?? t.workspacePath.split('/').pop() ?? 'project',
+        threads: [t],
+      });
+  }
+  if (groups.size === 0) return null;
+
+  // Sort groups: active workspace first, then by most-recent thread.
+  const sorted = [...groups.entries()].sort(([aPath, a], [bPath, b]) => {
+    if (aPath === activeWorkspacePath) return -1;
+    if (bPath === activeWorkspacePath) return 1;
+    const aMax = Math.max(...a.threads.map((t) => t.updatedAt));
+    const bMax = Math.max(...b.threads.map((t) => t.updatedAt));
+    return bMax - aMax;
+  });
+
+  return (
+    <div>
+      <div className="px-2 pb-2 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+        Projects
+      </div>
+      <ul className="space-y-2">
+        {sorted.map(([path, g]) => (
+          <ProjectGroup
+            key={path}
+            name={g.name}
+            threads={g.threads}
+            isActive={path === activeWorkspacePath}
+            currentThreadId={currentThreadId}
+            onPick={onPick}
+            onDelete={onDelete}
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ProjectGroup({
+  name,
+  threads,
+  isActive,
+  currentThreadId,
+  onPick,
+  onDelete,
+}: {
+  name: string;
+  threads: ThreadSummary[];
+  isActive: boolean;
+  currentThreadId: string | null;
+  onPick: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  // Active project auto-expanded. Other projects collapse — the
+  // user clicks the header to expand and pick an old conversation.
+  const [open, setOpen] = useState(isActive);
+  const sorted = [...threads].sort((a, b) => b.updatedAt - a.updatedAt);
+  return (
+    <li>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[11px] font-medium text-foreground/80 transition-colors hover:bg-muted/50"
+      >
+        <FolderOpen className="h-3 w-3 shrink-0 text-muted-foreground" />
+        <span className="truncate">{name}</span>
+        <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">
+          {threads.length}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-0.5 pl-3">
+          <ThreadList
+            threads={sorted}
+            currentId={currentThreadId}
+            onPick={onPick}
+            onDelete={onDelete}
+          />
+        </div>
+      )}
+    </li>
   );
 }
 

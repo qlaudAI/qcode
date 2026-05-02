@@ -24,12 +24,23 @@ export async function fetchAccount(): Promise<AccountInfo | null> {
   const key = getKey();
   if (!key) return null;
   try {
-    const res = await fetch(`${BASE}/v1/account`, {
+    // cache:'no-store' forces a fresh network hit every time. Without
+    // this the Tauri webview happily serves a stale 401 from a
+    // pre-signin attempt — the user signs in, refreshAccount fires,
+    // and the cached 401 wins, leaving the settings row empty.
+    const res = await fetch(`${BASE}/v1/account?t=${Date.now()}`, {
       headers: { 'x-api-key': key },
+      cache: 'no-store',
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn(
+        `[account] /v1/account returned ${res.status}: ${await res.text().catch(() => '')}`,
+      );
+      return null;
+    }
     return (await res.json()) as AccountInfo;
-  } catch {
+  } catch (e) {
+    console.warn('[account] /v1/account fetch failed:', e);
     return null;
   }
 }
