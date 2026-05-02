@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { FolderOpen, Plus, Settings, Wallet } from 'lucide-react';
+import { Download, FolderOpen, Plus, Settings, Wallet } from 'lucide-react';
 import { QlaudMark } from './ui/QlaudMark';
 
 import {
@@ -10,6 +10,7 @@ import {
   startSignIn,
   type Profile,
 } from './lib/auth';
+import { isTauri, WebNotSupportedError } from './lib/tauri';
 import { fetchBalance } from './lib/billing';
 import { startDeepLinkListener } from './lib/deep-link';
 import {
@@ -54,6 +55,26 @@ export function App() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Set true when the user clicked something that requires the
+  // desktop app (folder picker, etc.) on the web build. Renders an
+  // inline notice with a download CTA instead of failing silently.
+  const [webNotice, setWebNotice] = useState(false);
+
+  /** Call this instead of openFolderPicker() directly. On web it
+   *  flips the notice on and returns null; on desktop it just opens
+   *  the picker like before. Lets every "open folder" button across
+   *  the app share the same UX without repeating try/catch. */
+  const tryOpenFolder = useCallback(async (): Promise<Workspace | null> => {
+    try {
+      return await openFolderPicker();
+    } catch (e) {
+      if (e instanceof WebNotSupportedError) {
+        setWebNotice(true);
+        return null;
+      }
+      throw e;
+    }
+  }, []);
 
   // Persist when the user picks a new default. We update the user's
   // current view immediately (setModel) and stash the choice as the
@@ -275,7 +296,7 @@ export function App() {
           void newThread();
           break;
         case 'open_folder': {
-          const w = await openFolderPicker();
+          const w = await tryOpenFolder();
           if (w) setWorkspace(w);
           break;
         }
@@ -324,7 +345,7 @@ export function App() {
           threads={threads}
           currentThreadId={currentId}
           onOpenFolder={async () => {
-            const w = await openFolderPicker();
+            const w = await tryOpenFolder();
             if (w) setWorkspace(w);
           }}
           onNewChat={newThread}
@@ -343,7 +364,7 @@ export function App() {
             mode={mode}
             hasWorkspace={!!workspace}
             onOpenFolder={async () => {
-              const w = await openFolderPicker();
+              const w = await tryOpenFolder();
               if (w) setWorkspace(w);
             }}
           />
@@ -358,12 +379,14 @@ export function App() {
         onClearedThreads={refreshThreads}
       />
 
+      <WebNotSupportedModal open={webNotice} onClose={() => setWebNotice(false)} />
+
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         workspace={workspace}
         onOpenFolder={async () => {
-          const w = await openFolderPicker();
+          const w = await tryOpenFolder();
           if (w) setWorkspace(w);
         }}
         onNewChat={newThread}
@@ -398,7 +421,7 @@ function Titlebar({
   onOpenSettings: () => void;
 }) {
   return (
-    <header className="titlebar flex h-11 items-center justify-between border-b border-border/40 bg-background/40 px-3 backdrop-blur-md">
+    <header className="titlebar relative z-50 flex h-11 items-center justify-between border-b border-border/40 bg-background/40 px-3 backdrop-blur-md">
       {/* pl-16 leaves clearance for macOS traffic-light buttons. */}
       <div className="flex items-center gap-2 pl-16">
         {/* Canonical qlaud monogram — dark q with red period accent.
@@ -605,10 +628,29 @@ function Sidebar({
             <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
               Workspace
             </div>
-            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              Open a folder to start. qcode reads only what you point it at —
-              your filesystem stays private until you say otherwise.
-            </p>
+            {isTauri() ? (
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                Open a folder to start. qcode reads only what you point it at —
+                your filesystem stays private until you say otherwise.
+              </p>
+            ) : (
+              <div className="mt-2 rounded-md border border-border/60 bg-muted/30 p-3">
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Web mode is chat-only — browsers can&rsquo;t read local
+                  folders. Get the desktop app to open a workspace, run
+                  shell commands, and edit files.
+                </p>
+                <a
+                  href="https://qlaud.ai/qcode"
+                  target="_blank"
+                  rel="noopener"
+                  className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-primary hover:underline"
+                >
+                  <Download className="h-3 w-3" />
+                  Download qcode →
+                </a>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -625,5 +667,57 @@ function Kbd({ children }: { children: React.ReactNode }) {
     <kbd className="rounded border border-border/60 bg-background px-1.5 py-0.5 font-sans text-[10px] tabular-nums text-muted-foreground">
       {children}
     </kbd>
+  );
+}
+
+// Surfaces when the user hits something the web build can't do
+// (folder picker today; future entries: native file watch, OS
+// keychain, etc.). The previous behavior was a window.prompt() that
+// looked broken because no path the user typed was actually
+// readable. This explains why and points to the desktop app.
+function WebNotSupportedModal({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="mx-4 w-full max-w-md rounded-xl border border-border bg-background p-6 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="grid h-10 w-10 place-items-center rounded-lg bg-primary/10 text-primary">
+          <Download className="h-5 w-5" />
+        </div>
+        <h2 className="mt-4 text-lg font-semibold tracking-tight">
+          Get the desktop app for full power
+        </h2>
+        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+          Browsers can&rsquo;t read arbitrary local folders, so qcode on the web is
+          chat-only. Download the desktop app to open a workspace, run shell
+          commands, edit files, and use the full agent loop.
+        </p>
+        <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+          <a
+            href="https://qlaud.ai/qcode"
+            target="_blank"
+            rel="noopener"
+            className="inline-flex flex-1 items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            <Download className="h-4 w-4" />
+            Download qcode
+          </a>
+          <button
+            onClick={onClose}
+            className="inline-flex flex-1 items-center justify-center rounded-md border border-border px-4 py-2 text-sm font-medium hover:border-foreground/30"
+          >
+            Continue on web
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

@@ -197,12 +197,20 @@ export function ChatSurface({
   // changes propagating through props).
   const lastLoadedRef = useRef<string | null>(null);
   useEffect(() => {
+    // Order matters: check busy FIRST. When the user sends from a
+    // brand-new thread, the sequence is setBlocks([user]) →
+    // setBusy(true) → ensureThreadId() → setCurrentId(t.id). The
+    // setCurrentId triggers a prop change here. Without the busy
+    // gate first, the (!threadId) wipe path was racing against
+    // ensureThreadId returning — wiping the user's just-sent bubble
+    // a few ms before threadId arrived. Symptom: "I keep sending hi
+    // and after sending it disappears."
+    if (busy) return;
     if (!threadId) {
       setBlocks([]);
       lastLoadedRef.current = null;
       return;
     }
-    if (busy) return;
     if (lastLoadedRef.current === threadId) return;
     lastLoadedRef.current = threadId;
     let cancelled = false;

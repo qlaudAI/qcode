@@ -20,14 +20,25 @@ export async function invoke<T = unknown>(
   return (await realInvoke(cmd, args)) as T;
 }
 
-/** Open a native folder picker. Returns the selected path or null. */
+/** Marker error so the UI can branch on "user is on the web build,
+ *  there is no folder picker because browsers can't read arbitrary
+ *  local paths" without string-matching error messages. */
+export class WebNotSupportedError extends Error {
+  constructor(feature: string) {
+    super(`${feature} requires the qcode desktop app.`);
+    this.name = 'WebNotSupportedError';
+  }
+}
+
+/** Open a native folder picker. Returns the selected path or null
+ *  when the user cancels. Throws WebNotSupportedError on the web
+ *  build — browsers can't expose arbitrary local filesystem paths,
+ *  and the previous window.prompt fallback was misleading (the user
+ *  could paste a path, but the agent couldn't actually read those
+ *  files because there's no Tauri shell to forward fs calls to). */
 export async function pickFolder(title?: string): Promise<string | null> {
   if (!isTauri()) {
-    // Browser-mode fallback — there's no native picker, so we let the
-    // user paste a path in. Keeps vite-dev workflow alive without
-    // requiring the Tauri host.
-    const v = window.prompt('Folder path:', '');
-    return v?.trim() || null;
+    throw new WebNotSupportedError('Opening a folder');
   }
   const { open } = await import('@tauri-apps/plugin-dialog');
   const result = await open({ directory: true, multiple: false, title });
