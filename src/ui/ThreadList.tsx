@@ -59,6 +59,7 @@ function Row({
   onHover?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const stamp = relativeTime(thread.updatedAt);
   return (
     <li
       onMouseEnter={onHover}
@@ -87,28 +88,65 @@ function Row({
           {thread.title}
         </span>
       </button>
-      <button
-        aria-label="Delete conversation"
-        onClick={(e) => {
-          e.stopPropagation();
-          if (confirming) {
-            onDelete();
-            setConfirming(false);
-          } else {
-            setConfirming(true);
-            setTimeout(() => setConfirming(false), 2500);
-          }
-        }}
-        className={cn(
-          'shrink-0 rounded p-1 transition-opacity',
-          confirming
-            ? 'text-primary opacity-100'
-            : 'text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-100',
-        )}
-        title={confirming ? 'Click again to confirm' : 'Delete'}
-      >
-        <Trash2 className="h-3 w-3" />
-      </button>
+      {/* Right-side rail: timestamp by default, swaps for the trash
+       *  affordance on hover. Two micro-states (idle / confirming)
+       *  animate via transition-opacity on top of the timestamp so
+       *  the user sees motion when they engage, nothing otherwise. */}
+      <div className="relative shrink-0">
+        <span
+          className={cn(
+            'pointer-events-none block text-[10px] tabular-nums text-muted-foreground/70 transition-opacity',
+            confirming
+              ? 'opacity-0'
+              : 'opacity-100 group-hover:opacity-0',
+          )}
+        >
+          {stamp}
+        </span>
+        <button
+          aria-label="Delete conversation"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (confirming) {
+              onDelete();
+              setConfirming(false);
+            } else {
+              setConfirming(true);
+              setTimeout(() => setConfirming(false), 2500);
+            }
+          }}
+          className={cn(
+            'absolute inset-y-0 right-0 grid place-items-center rounded p-1 transition-all',
+            confirming
+              ? 'text-primary opacity-100 scale-110'
+              : 'text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-100',
+          )}
+          title={confirming ? 'Click again to confirm' : 'Delete'}
+        >
+          <Trash2 className="h-3 w-3" />
+        </button>
+      </div>
     </li>
   );
+}
+
+// Compact relative-time formatter. "now" under 60s; minutes / hours /
+// days / weeks until 30 days; absolute date past that. Tuned for
+// sidebar density — single-glyph units (3h, 1w) keep rows narrow.
+function relativeTime(ms: number): string {
+  const diff = Date.now() - ms;
+  if (diff < 0) return 'now';
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return 'now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d`;
+  const wk = Math.floor(day / 7);
+  if (wk < 5) return `${wk}w`;
+  const mo = Math.floor(day / 30);
+  if (mo < 12) return `${mo}mo`;
+  return `${Math.floor(day / 365)}y`;
 }

@@ -142,6 +142,7 @@ export function ChatSurface({
   ensureThreadId,
   onTurnLanded,
   hasWorkspace,
+  workspaceName,
   onOpenFolder,
 }: {
   model: string;
@@ -159,6 +160,9 @@ export function ChatSurface({
    *  cached summary's title (first turn) and updatedAt. The user's
    *  prompt text is passed as `userText` for title derivation. */
   onTurnLanded?: (info: { userText: string | null; threadId: string }) => void;
+  /** Last segment of the workspace path. Used to personalize the
+   *  empty-state heading ("What should we build in <name>?"). */
+  workspaceName?: string;
   /** Drives the empty-state onboarding branch — when false the
    *  EmptyState pushes the user to open a folder before sending. */
   hasWorkspace: boolean;
@@ -536,6 +540,7 @@ export function ChatSurface({
               provider={m?.provider}
               memory={memory}
               hasWorkspace={hasWorkspace}
+              workspaceName={workspaceName}
               onOpenFolder={onOpenFolder}
               onPick={(s) => setInput(s)}
             />
@@ -1332,6 +1337,7 @@ function EmptyState({
   provider,
   memory,
   hasWorkspace,
+  workspaceName,
   onOpenFolder,
   onPick,
 }: {
@@ -1339,6 +1345,7 @@ function EmptyState({
   provider?: string;
   memory: ProjectMemory | null;
   hasWorkspace: boolean;
+  workspaceName?: string;
   onOpenFolder: () => void | Promise<void>;
   onPick: (s: string) => void;
 }) {
@@ -1428,13 +1435,19 @@ function EmptyState({
   }
 
   // Returning user with a workspace open — the existing canvas.
+  // Heading personalizes to the open folder so it feels like the
+  // agent is opening *this* repo, not a generic "team": "What should
+  // we build in qlaud-router?" reads like a coworker, not a tool.
+  const heading = workspaceName
+    ? `What should we build in ${workspaceName}?`
+    : 'What can the team build?';
   return (
     <div className="flex flex-col items-center pt-12 text-center">
       <div className="grid h-12 w-12 place-items-center rounded-2xl bg-primary/10 text-primary">
         <Sparkles className="h-5 w-5" />
       </div>
       <h2 className="mt-6 text-2xl font-semibold tracking-tight">
-        What can the team build?
+        {heading}
       </h2>
       <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
         Just describe it. We&rsquo;ll route to the right specialist —

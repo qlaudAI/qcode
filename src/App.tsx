@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Download, FolderOpen, Plus, Settings, Wallet } from 'lucide-react';
+import {
+  ChevronRight,
+  Download,
+  Folder,
+  FolderOpen,
+  Plus,
+  Settings,
+  Wallet,
+} from 'lucide-react';
+import { cn } from './lib/cn';
 import { QlaudMark } from './ui/QlaudMark';
 
 import {
@@ -335,6 +344,7 @@ export function App() {
             model={model}
             mode={mode}
             hasWorkspace={!!workspace}
+            workspaceName={workspace?.name}
             onOpenFolder={async () => {
               const w = await tryOpenFolder();
               if (w) setWorkspace(w);
@@ -727,20 +737,59 @@ function ProjectGroup({
   // user clicks the header to expand and pick an old conversation.
   const [open, setOpen] = useState(isActive);
   const sorted = [...threads].sort((a, b) => b.updatedAt - a.updatedAt);
+  // Open folder + chevron-down for the active group; closed folder +
+  // chevron-right for collapsed. Visual grammar matches Codex /
+  // VSCode tree views the user already has muscle memory for.
+  const FolderIcon = open ? FolderOpen : Folder;
   return (
     <li>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[11px] font-medium text-foreground/80 transition-colors hover:bg-muted/50"
+        aria-expanded={open}
+        className={cn(
+          'flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[11px] font-medium transition-colors',
+          isActive
+            ? 'text-foreground hover:bg-muted/60'
+            : 'text-foreground/80 hover:bg-muted/50',
+        )}
       >
-        <FolderOpen className="h-3 w-3 shrink-0 text-muted-foreground" />
+        <ChevronRight
+          className={cn(
+            'h-3 w-3 shrink-0 text-muted-foreground transition-transform duration-150',
+            open && 'rotate-90',
+          )}
+        />
+        <FolderIcon
+          className={cn(
+            'h-3 w-3 shrink-0 transition-colors',
+            isActive ? 'text-primary' : 'text-muted-foreground',
+          )}
+        />
         <span className="truncate">{name}</span>
-        <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">
+        {isActive && (
+          <span className="shrink-0 rounded-full bg-primary/15 px-1.5 py-0 text-[9px] font-medium uppercase tracking-wider text-primary">
+            Open
+          </span>
+        )}
+        <span
+          className={cn(
+            'ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground transition-opacity',
+            open ? 'opacity-50' : 'opacity-100',
+          )}
+        >
           {threads.length}
         </span>
       </button>
-      {open && (
-        <div className="mt-0.5 pl-3">
+      {/* Animated reveal — grid-rows trick avoids the height:auto
+       *  transition issue and keeps content from rendering when
+       *  collapsed (no a11y noise from offscreen-but-rendered rows). */}
+      <div
+        className={cn(
+          'grid transition-all duration-200',
+          open ? 'mt-0.5 grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
+        )}
+      >
+        <div className="overflow-hidden pl-3">
           <ThreadList
             threads={sorted}
             currentId={currentThreadId}
@@ -748,7 +797,7 @@ function ProjectGroup({
             onDelete={onDelete}
           />
         </div>
-      )}
+      </div>
     </li>
   );
 }
