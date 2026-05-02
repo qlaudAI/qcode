@@ -1232,7 +1232,7 @@ function ToolBundle({
   if (tools.length === 1) {
     return (
       <div className="flex pl-10">
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           <ToolCallCard call={tools[0]!.call} workspace={workspace} />
         </div>
       </div>
@@ -1243,7 +1243,7 @@ function ToolBundle({
   const anyError = tools.some((t) => t.call.status === 'error');
   return (
     <div className="flex pl-10">
-      <div className="flex-1">
+      <div className="min-w-0 flex-1">
         <div
           className={cn(
             'overflow-hidden rounded-lg border bg-background/70 backdrop-blur-sm transition-colors',
@@ -1426,7 +1426,7 @@ function BlockRow({
     if (block.call.name === 'todo_write') return null;
     return (
       <div id={`tool-${block.call.id}`} className="flex scroll-mt-4 pl-10">
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           <ToolCallCard call={block.call} workspace={workspace} />
         </div>
       </div>
@@ -1435,7 +1435,7 @@ function BlockRow({
   if (block.type === 'approval') {
     return (
       <div className="flex pl-10">
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           <ApprovalCard
             request={block.request}
             resolved={block.resolved}

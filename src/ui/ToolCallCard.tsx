@@ -140,8 +140,8 @@ export function ToolCallCard({
         <StatusIcon status={call.status} />
         <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
         <div className="min-w-0 flex-1">
-          <div className="flex items-baseline gap-2">
-            <span className="text-[12px] font-medium tabular-nums text-foreground">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <span className="shrink-0 text-[12px] font-medium tabular-nums text-foreground">
               {call.name}
             </span>
             <SummaryRow summary={summary} />
@@ -237,7 +237,7 @@ function SummaryRow({ summary }: { summary: string }) {
   const m = /^(.*?)  \+(\d+) -(\d+)$/.exec(summary);
   if (!m) {
     return (
-      <span className="truncate text-[11px] font-mono text-muted-foreground">
+      <span className="min-w-0 flex-1 truncate text-[11px] font-mono text-muted-foreground">
         {summary}
       </span>
     );
