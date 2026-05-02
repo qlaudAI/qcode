@@ -112,9 +112,7 @@ export function ToolCallCard({ call }: { call: ToolCallView }) {
             <span className="text-[12px] font-medium tabular-nums text-foreground">
               {call.name}
             </span>
-            <span className="truncate text-[11px] font-mono text-muted-foreground">
-              {summary}
-            </span>
+            <SummaryRow summary={summary} />
             {streaming && (
               <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
                 live
@@ -198,6 +196,35 @@ function Output({ call }: { call: ToolCallView }) {
 
 // ─── Status pip ────────────────────────────────────────────────────
 
+/** Render the summary string. If it carries +N -M diff stats
+ *  (separated by a double-space sentinel from summarize()), pull
+ *  them out and color them green/red for at-a-glance impact —
+ *  Codex-style. Otherwise plain mono text. */
+function SummaryRow({ summary }: { summary: string }) {
+  const m = /^(.*?)  \+(\d+) -(\d+)$/.exec(summary);
+  if (!m) {
+    return (
+      <span className="truncate text-[11px] font-mono text-muted-foreground">
+        {summary}
+      </span>
+    );
+  }
+  const [, path, added, removed] = m;
+  return (
+    <>
+      <span className="truncate text-[11px] font-mono text-muted-foreground">
+        {path}
+      </span>
+      <span className="shrink-0 text-[10.5px] tabular-nums">
+        <span className="text-emerald-600 dark:text-emerald-400">
+          +{added}
+        </span>{' '}
+        <span className="text-primary">−{removed}</span>
+      </span>
+    </>
+  );
+}
+
 function StatusIcon({ status }: { status: Status }) {
   if (status === 'running') {
     return (
@@ -217,9 +244,17 @@ function summarize(call: ToolCallView): string {
   switch (call.name) {
     case 'list_files':
     case 'read_file':
-    case 'write_file':
-    case 'edit_file':
       return typeof input.path === 'string' ? input.path : '…';
+    case 'write_file':
+    case 'edit_file': {
+      const path = typeof input.path === 'string' ? input.path : '…';
+      // Surface the +N -M diff stats from the executor's success
+      // message right in the header — Codex-style. Saves the user
+      // from having to expand the card to see the impact.
+      const stats = parseDiffStats(call.output);
+      if (!stats) return path;
+      return `${path}  ${stats}`;
+    }
     case 'glob':
       return typeof input.pattern === 'string' ? input.pattern : '…';
     case 'grep': {
@@ -270,4 +305,15 @@ function summarize(call: ToolCallView): string {
       }
       return '';
   }
+}
+
+/** Pull the diff stats line ("(+N -M)") out of the executor's
+ *  success message so the tool-card header can render them next
+ *  to the path. Returns null when the output doesn't carry
+ *  stats (e.g. browser-mode stub, error path). */
+function parseDiffStats(output: string | undefined): string | null {
+  if (!output) return null;
+  const m = /\(\+(\d+) -(\d+)\)/.exec(output);
+  if (!m) return null;
+  return `+${m[1]} -${m[2]}`;
 }

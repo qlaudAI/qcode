@@ -1,17 +1,20 @@
-// bash output format from runBash():
+// Compact bash output, Codex-style. No big black terminal block;
+// just a "Bash" label, the `$ command` line, and the relevant
+// output lines in monospace at a slightly muted color. Far less
+// visual weight than the previous full-terminal pane — bash output
+// no longer dominates the chat as a wall of green.
 //
+// Output format (from runBash):
 //   exit <N>
 //   --- stdout ---
-//   <stdout text>
+//   <stdout>
 //   --- stderr ---
-//   <stderr text>
+//   <stderr>
 //
-// We split on those headers and render two terminal-themed panes
-// (or one, when only stdout is present). Exit code goes in the
-// header with green/red coloring. Errors from outside bash (e.g.
-// the deny-list rejection) come through with is_error=true and
-// no exit/stdout/stderr structure — we render those as a plain
-// red message.
+// We split on those headers, drop the exit-line + section markers,
+// and render stdout/stderr as plain mono. Errors keep a red tint;
+// success uses muted foreground. No black background, no headers,
+// no panes — keeps it readable and skimmable.
 
 const STDOUT_RE = /\n?--- stdout ---\n/;
 const STDERR_RE = /\n?--- stderr ---\n/;
@@ -27,66 +30,49 @@ export function BashView({
   if (!parsed) {
     // Pre-execution rejection or unstructured error.
     return (
-      <pre className="m-0 max-h-44 overflow-auto whitespace-pre-wrap bg-primary/5 px-3 py-2 font-mono text-[11.5px] leading-snug text-primary">
+      <pre className="m-0 max-h-44 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-[11px] leading-snug text-primary">
         {output}
       </pre>
     );
   }
   const { exitCode, stdout, stderr } = parsed;
-  const ok = exitCode === 0 && !isError;
+  const failed = exitCode !== 0 || isError;
+  const body = stdout || stderr || '';
+  if (!body) {
+    return (
+      <div className="px-3 py-1.5 text-[11px] tabular-nums text-muted-foreground">
+        exit {exitCode} · (no output)
+      </div>
+    );
+  }
   return (
-    <div className="overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-border/40 bg-muted/30 px-3 py-1.5">
-        <span
-          className={
-            'inline-flex h-1.5 w-1.5 rounded-full ' +
-            (ok ? 'bg-emerald-500' : 'bg-rose-500')
-          }
-        />
-        <span className="text-[11px] font-medium text-foreground">
-          exit {exitCode}
-        </span>
-        <span className="ml-auto text-[10px] tabular-nums text-muted-foreground">
-          {[stdout && 'stdout', stderr && 'stderr'].filter(Boolean).join(' + ') ||
-            '(no output)'}
-        </span>
-      </div>
-      <div className="bg-[#0a0a0a] font-mono text-[11.5px] leading-snug">
-        {stdout && (
-          <Pane label="stdout" text={stdout} className="text-[#d8d8d8]" />
-        )}
-        {stderr && (
-          <Pane
-            label="stderr"
-            text={stderr}
-            className="text-rose-300 border-t border-white/10"
-          />
-        )}
-        {!stdout && !stderr && (
-          <div className="px-3 py-2 text-white/40">(no output)</div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Pane({
-  label,
-  text,
-  className,
-}: {
-  label: string;
-  text: string;
-  className?: string;
-}) {
-  return (
-    <div className={className}>
-      <div className="px-3 pt-1.5 text-[9px] font-medium uppercase tracking-widest text-white/40">
-        {label}
-      </div>
-      <pre className="m-0 max-h-72 overflow-auto whitespace-pre-wrap px-3 pb-2 pt-0.5">
-        {text || ' '}
+    <div>
+      {/* Body — plain mono, no terminal background, no panes. Failed
+       *  runs get a red tint on the whole block; successful runs use
+       *  muted-foreground (less visually loud than primary). */}
+      <pre
+        className={
+          'm-0 max-h-72 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-[11px] leading-snug ' +
+          (failed
+            ? 'bg-primary/5 text-primary'
+            : 'text-foreground/85')
+        }
+      >
+        {body}
       </pre>
+      {/* When stderr coexists with stdout, append it below in a
+       *  muted-red row. Most successful builds emit stderr-as-info
+       *  (compiler warnings, npm progress); we don't want it
+       *  styled as failure when exit is 0. */}
+      {stdout && stderr && !failed && (
+        <pre className="m-0 max-h-32 overflow-auto whitespace-pre-wrap border-t border-border/40 px-3 py-2 font-mono text-[11px] leading-snug text-muted-foreground">
+          {stderr}
+        </pre>
+      )}
+      <div className="border-t border-border/40 px-3 py-1 text-[10.5px] tabular-nums text-muted-foreground">
+        exit {exitCode}
+        {stderr && stdout && ' · stdout + stderr'}
+      </div>
     </div>
   );
 }
