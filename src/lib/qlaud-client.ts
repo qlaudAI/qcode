@@ -30,6 +30,24 @@ export type ContentBlock =
         media_type: string;
         data: string;
       };
+    }
+  | {
+      // Anthropic-shape document block — used for PDFs. Claude reads
+      // the PDF natively (vision + text extraction). qlaud's
+      // translate layer maps to per-provider equivalents; if the
+      // routed provider doesn't support PDFs, the gateway either
+      // rejects or extracts text upstream of inference (handled
+      // server-side, not the client's problem).
+      type: 'document';
+      source: {
+        type: 'base64';
+        /** application/pdf today; future-proof for other formats. */
+        media_type: string;
+        data: string;
+      };
+      /** Optional filename — surfaces in the model's view as the
+       *  document's "title", makes citations sensible. */
+      title?: string;
     };
 
 export type Message = {

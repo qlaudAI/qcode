@@ -6,6 +6,7 @@ import {
   Download,
   FileText,
   FolderOpen,
+  Paperclip,
   RotateCcw,
   Sparkles,
   Square,
@@ -18,12 +19,15 @@ import { runThreadAgent, type AgentEvent } from '../lib/agent';
 import { buildAttachmentContext } from '../lib/attachments';
 import { fetchBalance } from '../lib/billing';
 import { cn } from '../lib/cn';
+import { type AttachedImage } from '../lib/images';
 import {
-  imagesFromDrop,
-  imagesFromPaste,
-  readImageFile,
-  type AttachedImage,
-} from '../lib/images';
+  filesFromDrop,
+  filesFromPaste,
+  readUploadedFile,
+  type AttachedDocument,
+  type AttachedFile,
+  type AttachedText,
+} from '../lib/uploads';
 import { getProjectMemory, type ProjectMemory } from '../lib/memory';
 import { MODELS } from '../lib/models';
 import { planToAgentHandoff, setLastMode } from '../lib/mode-tracking';
@@ -48,7 +52,13 @@ import { ToolCallCard, type ToolCallView } from './ToolCallCard';
 // agent loop emits a stream of events that `handleEvent` translates
 // into block mutations.
 type RenderBlock =
-  | { type: 'user_text'; text: string; images?: AttachedImage[] }
+  | {
+      type: 'user_text';
+      text: string;
+      images?: AttachedImage[];
+      documents?: AttachedDocument[];
+      textFiles?: AttachedText[];
+    }
   | { type: 'assistant_text'; text: string }
   | { type: 'tool'; call: ToolCallView }
   | {
@@ -76,7 +86,13 @@ type RenderBlock =
        *  send() with the exact same input + attachments. Set null
        *  once the user has retried (or sent a new turn) so we don't
        *  show a stale Retry. */
-      retry: { text: string; images: AttachedImage[]; attached: string[] } | null;
+      retry: {
+        text: string;
+        images: AttachedImage[];
+        documents: AttachedDocument[];
+        textFiles: AttachedText[];
+        attached: string[];
+      } | null;
     }
   | {
       type: 'subagent';
@@ -149,6 +165,8 @@ export function ChatSurface({
   const [error, setError] = useState<string | null>(null);
   const [attached, setAttached] = useState<string[]>([]);
   const [images, setImages] = useState<AttachedImage[]>([]);
+  const [documents, setDocuments] = useState<AttachedDocument[]>([]);
+  const [textFiles, setTextFiles] = useState<AttachedText[]>([]);
   const [files, setFiles] = useState<string[]>([]);
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -259,6 +277,8 @@ export function ChatSurface({
   function retry(retryInputs: {
     text: string;
     images: AttachedImage[];
+    documents: AttachedDocument[];
+    textFiles: AttachedText[];
     attached: string[];
   }) {
     // Mark every still-retryable error block as resolved so we don't
@@ -271,6 +291,8 @@ export function ChatSurface({
     );
     setInput(retryInputs.text);
     setImages(retryInputs.images);
+    setDocuments(retryInputs.documents);
+    setTextFiles(retryInputs.textFiles);
     setAttached(retryInputs.attached);
     // Defer one tick so the state setters land before send() reads
     // them. send() reads from the latest closure (`text` arg + the
@@ -298,7 +320,14 @@ export function ChatSurface({
     // Allow send when there are attachments even with empty text
     // (e.g. dropping a screenshot with the implicit "what's wrong
     // here?" intent). Block when nothing at all is queued.
-    if (!userMsg && images.length === 0 && attached.length === 0) return;
+    if (
+      !userMsg &&
+      images.length === 0 &&
+      documents.length === 0 &&
+      textFiles.length === 0 &&
+      attached.length === 0
+    )
+      return;
     if (busy) return;
     setInput('');
     setError(null);
@@ -310,6 +339,8 @@ export function ChatSurface({
     const retryInputs = {
       text: userMsg,
       images: [...images],
+      documents: [...documents],
+      textFiles: [...textFiles],
       attached: [...attached],
     };
 
@@ -338,10 +369,23 @@ export function ChatSurface({
       setAttached([]);
     }
 
-    // Build the model-side content blocks: image blocks first
-    // (Anthropic best practice — vision content before the text
-    // referring to it), then the text. Display-side bubble gets a
-    // thumbnail row + the user's prose underneath.
+    // Inline any attached text/code files into the user message.
+    // Cheap, works on every routed model, no special block type.
+    // Format: fenced with the filename so the model can cite it back.
+    if (textFiles.length > 0) {
+      const fences = textFiles
+        .map(
+          (t) =>
+            `--- file: ${t.name} ---\n${t.text}\n--- end of ${t.name} ---`,
+        )
+        .join('\n\n');
+      modelText = `${fences}\n\n${modelText}`;
+    }
+
+    // Build the model-side content blocks: image + document blocks
+    // first (Anthropic best practice — vision content before the
+    // text referring to it), then the text. Display-side bubble gets
+    // chip rows for each kind + the user's prose underneath.
     const userContent: ContentBlock[] = [];
     for (const img of images) {
       userContent.push({
@@ -353,14 +397,35 @@ export function ChatSurface({
         },
       });
     }
+    for (const doc of documents) {
+      userContent.push({
+        type: 'document',
+        source: {
+          type: 'base64',
+          media_type: doc.mediaType,
+          data: doc.base64,
+        },
+        title: doc.name,
+      });
+    }
     userContent.push({ type: 'text', text: modelText });
 
     const sentImages = images.length > 0 ? images : undefined;
+    const sentDocuments = documents.length > 0 ? documents : undefined;
+    const sentTextFiles = textFiles.length > 0 ? textFiles : undefined;
     setImages([]);
+    setDocuments([]);
+    setTextFiles([]);
 
     setBlocks((b) => [
       ...b,
-      { type: 'user_text', text: displayText, images: sentImages },
+      {
+        type: 'user_text',
+        text: displayText,
+        images: sentImages,
+        documents: sentDocuments,
+        textFiles: sentTextFiles,
+      },
     ]);
     setBusy(true);
     abortRef.current = new AbortController();
@@ -519,10 +584,18 @@ export function ChatSurface({
           setAttached((prev) => (prev.includes(p) ? prev : [...prev, p]))
         }
         onDetach={(p) => setAttached((prev) => prev.filter((x) => x !== p))}
-        onAttachImage={(img) => setImages((prev) => [...prev, img])}
-        onDetachImage={(id) =>
-          setImages((prev) => prev.filter((x) => x.id !== id))
-        }
+        documents={documents}
+        textFiles={textFiles}
+        onAttachUpload={(f) => {
+          if (f.kind === 'image') setImages((prev) => [...prev, f]);
+          else if (f.kind === 'document') setDocuments((prev) => [...prev, f]);
+          else setTextFiles((prev) => [...prev, f]);
+        }}
+        onDetachUpload={(id) => {
+          setImages((prev) => prev.filter((x) => x.id !== id));
+          setDocuments((prev) => prev.filter((x) => x.id !== id));
+          setTextFiles((prev) => prev.filter((x) => x.id !== id));
+        }}
         onImageError={(msg) => setError(msg)}
       />
     </div>
@@ -756,6 +829,9 @@ function BlockRow({
   onRetry?: () => void;
 }) {
   if (block.type === 'user_text') {
+    const hasFiles =
+      (block.documents && block.documents.length > 0) ||
+      (block.textFiles && block.textFiles.length > 0);
     return (
       <div className="flex justify-end">
         <div className="flex max-w-[80%] flex-col items-end gap-2">
@@ -768,6 +844,34 @@ function BlockRow({
                   alt={img.name}
                   className="max-h-48 max-w-[180px] rounded-xl border border-border/40 object-cover shadow-sm"
                 />
+              ))}
+            </div>
+          )}
+          {hasFiles && (
+            <div className="flex flex-wrap justify-end gap-1.5">
+              {block.documents?.map((doc) => (
+                <span
+                  key={doc.id}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-background px-2 py-1 text-[11px]"
+                >
+                  <FileText className="h-3 w-3 text-primary" />
+                  <span className="font-mono text-foreground/85">{doc.name}</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    {(doc.bytes / 1024).toFixed(0)}k
+                  </span>
+                </span>
+              ))}
+              {block.textFiles?.map((t) => (
+                <span
+                  key={t.id}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-background px-2 py-1 text-[11px]"
+                >
+                  <FileText className="h-3 w-3 text-muted-foreground" />
+                  <span className="font-mono text-foreground/85">{t.name}</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    {(t.bytes / 1024).toFixed(0)}k
+                  </span>
+                </span>
               ))}
             </div>
           )}
@@ -1213,12 +1317,14 @@ function Composer({
   busy,
   attached,
   images,
+  documents,
+  textFiles,
   files,
   onLoadFiles,
   onAttach,
   onDetach,
-  onAttachImage,
-  onDetachImage,
+  onAttachUpload,
+  onDetachUpload,
   onImageError,
 }: {
   value: string;
@@ -1229,40 +1335,52 @@ function Composer({
   busy: boolean;
   attached: string[];
   images: AttachedImage[];
+  documents: AttachedDocument[];
+  textFiles: AttachedText[];
   files: string[];
   onLoadFiles: () => void;
   onAttach: (path: string) => void;
   onDetach: (path: string) => void;
-  onAttachImage: (img: AttachedImage) => void;
-  onDetachImage: (id: string) => void;
+  onAttachUpload: (f: AttachedFile) => void;
+  onDetachUpload: (id: string) => void;
   onImageError: (message: string) => void;
 }) {
   const [dragging, setDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  async function ingestImageFiles(list: File[]) {
+  async function ingestUploadedFiles(list: File[]) {
     for (const f of list) {
-      const result = await readImageFile(f);
+      const result = await readUploadedFile(f);
       if ('reason' in result) {
-        onImageError(result.message);
-        return;
+        onImageError(result.message); // shared error channel
+        continue;
       }
-      onAttachImage(result);
+      onAttachUpload(result);
     }
   }
 
   function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
-    const list = imagesFromPaste(e.nativeEvent);
+    const list = filesFromPaste(e.nativeEvent);
     if (list.length === 0) return;
     e.preventDefault();
-    void ingestImageFiles(list);
+    void ingestUploadedFiles(list);
   }
 
   function onDrop(e: React.DragEvent) {
     setDragging(false);
-    const list = imagesFromDrop(e.nativeEvent);
+    const list = filesFromDrop(e.nativeEvent);
     if (list.length === 0) return;
     e.preventDefault();
-    void ingestImageFiles(list);
+    void ingestUploadedFiles(list);
+  }
+
+  function onPickFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    const list = e.target.files ? Array.from(e.target.files) : [];
+    if (list.length === 0) return;
+    void ingestUploadedFiles(list);
+    // Reset so picking the same file twice in a row still triggers
+    // change.
+    e.target.value = '';
   }
   // The mention-token at-or-before the cursor, or null when there's
   // no active @-mention. Tracked on every change.
@@ -1392,7 +1510,10 @@ function Composer({
                 : 'border-border focus-within:border-foreground/20',
             )}
           >
-            {(attached.length > 0 || images.length > 0) && (
+            {(attached.length > 0 ||
+              images.length > 0 ||
+              documents.length > 0 ||
+              textFiles.length > 0) && (
               <div className="flex flex-wrap items-center gap-1.5 border-b border-border/40 px-3 py-2">
                 {images.map((img) => (
                   <span
@@ -1408,9 +1529,51 @@ function Composer({
                       {img.name}
                     </span>
                     <button
-                      onClick={() => onDetachImage(img.id)}
+                      onClick={() => onDetachUpload(img.id)}
                       className="grid h-4 w-4 place-items-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
                       aria-label={`Remove ${img.name}`}
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </span>
+                ))}
+                {documents.map((doc) => (
+                  <span
+                    key={doc.id}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-muted/60 py-0.5 pl-1.5 pr-1 text-[11px]"
+                  >
+                    <FileText className="h-3 w-3 text-primary" />
+                    <span className="max-w-[180px] truncate font-mono text-foreground/85">
+                      {doc.name}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {(doc.bytes / 1024).toFixed(0)}k
+                    </span>
+                    <button
+                      onClick={() => onDetachUpload(doc.id)}
+                      className="grid h-4 w-4 place-items-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                      aria-label={`Remove ${doc.name}`}
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </span>
+                ))}
+                {textFiles.map((t) => (
+                  <span
+                    key={t.id}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-muted/60 py-0.5 pl-1.5 pr-1 text-[11px]"
+                  >
+                    <FileText className="h-3 w-3 text-muted-foreground" />
+                    <span className="max-w-[180px] truncate font-mono text-foreground/85">
+                      {t.name}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {(t.bytes / 1024).toFixed(0)}k
+                    </span>
+                    <button
+                      onClick={() => onDetachUpload(t.id)}
+                      className="grid h-4 w-4 place-items-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                      aria-label={`Remove ${t.name}`}
                     >
                       <X className="h-2.5 w-2.5" />
                     </button>
@@ -1446,11 +1609,30 @@ function Composer({
               className="block w-full resize-none rounded-2xl bg-transparent px-4 py-3 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60"
             />
             <div className="flex items-center justify-between border-t border-border/40 px-3 py-2">
-              <span className="text-[11px] text-muted-foreground">
-                {dragging
-                  ? 'Drop image to attach'
-                  : `${modelLabel} · ⏎ to send · @ files · paste/drop images`}
-              </span>
+              <div className="flex items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/*,.md,.markdown,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.xml,.html,.css,.scss,.js,.jsx,.mjs,.cjs,.ts,.tsx,.py,.rb,.go,.rs,.java,.kt,.swift,.c,.cc,.cpp,.h,.hpp,.sh,.bash,.zsh,.fish,.ps1,.bat,.sql,.graphql,.proto,.env,.ini,.conf,.cfg,.lock,.log"
+                  className="hidden"
+                  onChange={onPickFiles}
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="grid h-7 w-7 place-items-center rounded-md border border-border/60 bg-background text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
+                  aria-label="Attach files"
+                  title="Attach images, PDFs, or text files"
+                >
+                  <Paperclip className="h-3.5 w-3.5" />
+                </button>
+                <span className="text-[11px] text-muted-foreground">
+                  {dragging
+                    ? 'Drop to attach'
+                    : `${modelLabel} · ⏎ to send · @ files · paste/drop · images, PDFs, text`}
+                </span>
+              </div>
               {busy ? (
                 <button
                   onClick={onStop}
@@ -1464,7 +1646,11 @@ function Composer({
                 <button
                   onClick={() => onSend(value)}
                   disabled={
-                    !value.trim() && attached.length === 0 && images.length === 0
+                    !value.trim() &&
+                    attached.length === 0 &&
+                    images.length === 0 &&
+                    documents.length === 0 &&
+                    textFiles.length === 0
                   }
                   className="grid h-7 w-7 place-items-center rounded-md bg-primary text-primary-foreground transition-all hover:bg-primary/90 active:scale-95 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
                   aria-label="Send"
