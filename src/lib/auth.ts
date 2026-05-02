@@ -114,6 +114,9 @@ export function setProfile(p: Profile): void {
  *  was missing — `await openExternal` rejected silently, the click
  *  handler ate the rejection, and sign-in looked frozen. Never again. */
 export async function startSignIn(): Promise<void> {
+  // Fire before any IO — even if the redirect fails or the user
+  // bails halfway, we still see they clicked.
+  void import('./analytics').then((a) => a.posthog.capture('sign_in_started'));
   const cb = isTauri()
     ? 'qcode://auth'
     : `${window.location.origin}/auth`;

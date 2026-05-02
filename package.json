@@ -1,6 +1,6 @@
 {
   "name": "qcode",
-  "version": "0.1.0-alpha.22",
+  "version": "0.1.0-alpha.23",
   "private": true,
   "description": "The multi-model coding agent. Bring any model — Claude, GPT, Llama, DeepSeek — to your codebase. Powered by qlaud.",
   "type": "module",
@@ -23,6 +23,7 @@
     "@tauri-apps/plugin-updater": "^2.0.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.460.0",
+    "posthog-js": "^1.372.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^2.5.4"

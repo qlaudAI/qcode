@@ -35,6 +35,7 @@ import {
 import { submitToolResult } from './tool-results';
 import { createRemoteThread } from './threads';
 import { getSettings } from './settings';
+import { posthog } from './analytics';
 
 const SYSTEM_PROMPT_AGENT = `You are qcode, a multi-model coding agent running on the user's desktop.
 
@@ -478,6 +479,12 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
           // very next subagent.
           const subagentModel =
             getSettings().subagentModel ?? opts.model;
+          posthog.capture('subagent_spawned', {
+            parent_model: opts.model,
+            subagent_model: subagentModel,
+            description_chars: (inputObj.description ?? '').length,
+            prompt_chars: (inputObj.prompt ?? '').length,
+          });
           await runSubagentForTask({
             parentThreadId: opts.threadId,
             parentToolUseId: info.toolUseId,

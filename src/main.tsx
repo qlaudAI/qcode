@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 
 import { App } from './App';
+import { initAnalytics, posthog } from './lib/analytics';
 import { consumeAuthCallback, hydrateAuth } from './lib/auth';
 import { isTauri } from './lib/tauri';
 import './styles.css';
@@ -22,6 +23,10 @@ if (isTauri()) {
 //      (browser) read so React's first render decides authed vs
 //      sign-in gate accurately.
 async function boot() {
+  // Init analytics first so we capture the auth-callback path (the
+  // user just came back from qlaud.ai/cli-auth) and the boot itself.
+  initAnalytics();
+  posthog.capture('app_boot');
   await consumeAuthCallback();
   await hydrateAuth();
   ReactDOM.createRoot(document.getElementById('root')!).render(

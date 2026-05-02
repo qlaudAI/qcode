@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 
 import { isTauri } from '../lib/tauri';
+import { posthog } from '../lib/analytics';
 
 import { runThreadAgent, type AgentEvent } from '../lib/agent';
 import { buildAttachmentContext } from '../lib/attachments';
@@ -427,6 +428,18 @@ export function ChatSurface({
         textFiles: sentTextFiles,
       },
     ]);
+    // Telemetry — metadata only, no chat content. Lets us see model
+    // mix, attachment usage, and where in the funnel users drop off.
+    posthog.capture('turn_sent', {
+      model,
+      mode,
+      has_workspace: !!workspace,
+      image_count: sentImages?.length ?? 0,
+      document_count: sentDocuments?.length ?? 0,
+      text_file_count: sentTextFiles?.length ?? 0,
+      attached_workspace_files: retryInputs.attached.length,
+      message_chars: userMsg.length,
+    });
     setBusy(true);
     abortRef.current = new AbortController();
 
@@ -489,9 +502,18 @@ export function ChatSurface({
             durationMs: Date.now() - startMs,
           },
         ]);
+        posthog.capture('turn_completed', {
+          model,
+          mode,
+          input_tokens: usage.inputTokens,
+          output_tokens: usage.outputTokens,
+          cost_usd: cost,
+          duration_ms: Date.now() - startMs,
+        });
       }
     } catch (e) {
       const code = e instanceof Error ? e.message : 'unknown';
+      posthog.capture('turn_failed', { model, mode, code });
       // Inline error block with retry context. Image-error / network
       // banner state stays for transient toasts that don't make sense
       // to "retry" (image too big, etc.).

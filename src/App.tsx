@@ -11,6 +11,7 @@ import {
   type Profile,
 } from './lib/auth';
 import { isTauri, WebNotSupportedError } from './lib/tauri';
+import { posthog } from './lib/analytics';
 import { fetchBalance } from './lib/billing';
 import { startDeepLinkListener } from './lib/deep-link';
 import {
@@ -85,14 +86,18 @@ export function App() {
   const onModelChange = useCallback((slug: string) => {
     setModel(slug);
     patchSettings({ defaultModel: slug });
+    posthog.capture('model_picked', { model: slug });
   }, []);
 
   const onModeChange = useCallback((next: AgentMode) => {
     setMode(next);
     patchSettings({ mode: next });
+    posthog.capture('mode_toggled', { mode: next });
   }, []);
 
   const handleSignOut = useCallback(async () => {
+    posthog.capture('signed_out');
+    posthog.reset();
     await clearAuth();
     setCurrentWorkspace(null);
     setAuthed(false);
@@ -196,6 +201,15 @@ export function App() {
   useEffect(() => {
     if (authed) void refreshBalance();
   }, [authed, refreshBalance]);
+
+  // Link the anonymous PostHog person to the qlaud user so signed-in
+  // events land on the right profile + the pre-signin events from
+  // the same browser get attributed correctly.
+  useEffect(() => {
+    if (authed && profile?.user_id) {
+      posthog.identify(profile.user_id, { email: profile.email });
+    }
+  }, [authed, profile?.user_id, profile?.email]);
 
   // Cross-tab storage sync (vite-dev convenience).
   useEffect(() => {
