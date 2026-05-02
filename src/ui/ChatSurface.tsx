@@ -292,14 +292,20 @@ export function ChatSurface({
   useEffect(() => {
     const prev = lastThreadIdRef.current;
     lastThreadIdRef.current = threadId;
-    if (prev !== threadId && busy) {
+    // CRITICAL: guard on `prev` truthiness. The first send on a
+    // brand-new chat starts with threadId=null, then ensureThreadId
+    // creates the remote thread and the prop transitions null →
+    // real-id mid-stream. That's NOT a thread switch — it's the
+    // initial id assignment. Without this guard the invalidator
+    // bumps runId, every subsequent SSE event gets filtered by the
+    // onEvent runId guard, and the live stream silently disappears
+    // (user has to refresh to see the canonical history).
+    if (prev && prev !== threadId && busy) {
       activeRunIdRef.current += 1;
       rejectAllApprovals();
       setBusy(false);
-      if (prev) {
-        void invalidateThreadMessages(prev);
-        if (lastLoadedRef.current === prev) lastLoadedRef.current = null;
-      }
+      void invalidateThreadMessages(prev);
+      if (lastLoadedRef.current === prev) lastLoadedRef.current = null;
     }
   }, [threadId, busy]);
 
