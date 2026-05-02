@@ -239,6 +239,17 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
   type PendingToolUse = { name: string; input: unknown };
   const pending = new Map<string, PendingToolUse>();
 
+  // Doom-loop guard. Sliding window of the last DOOM_WINDOW dispatches
+  // (name + JSON-keyed input). If the next dispatch makes all three
+  // identical, surface an approval prompt instead of running it again.
+  // Pattern from opencode's session/processor.ts — saves the user
+  // from infinite-bash situations when a stream gets wedged or the
+  // model loops on a failing tool. Per-run scoped: a fresh window for
+  // every user turn, since "stuck" only makes sense within one run.
+  const DOOM_WINDOW = 3;
+  type DispatchKey = { name: string; inputKey: string };
+  const recentDispatches: DispatchKey[] = [];
+
   let totalInput = 0;
   let totalOutput = 0;
   let currentIteration = 1;
@@ -391,6 +402,47 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
           name: stash.name,
           input: stash.input,
         };
+
+        // Doom-loop check: would this make DOOM_WINDOW identical
+        // dispatches in a row? Ask the user before running. On reject,
+        // POST a tool_result that tells the model the loop was halted
+        // so it replans instead of re-emitting the same call.
+        const inputKey = stableInputKey(stash.input);
+        const dispatchKey: DispatchKey = { name: stash.name, inputKey };
+        const wouldDoomLoop =
+          recentDispatches.length >= DOOM_WINDOW - 1 &&
+          recentDispatches
+            .slice(-(DOOM_WINDOW - 1))
+            .every(
+              (d) => d.name === dispatchKey.name && d.inputKey === dispatchKey.inputKey,
+            );
+        if (wouldDoomLoop) {
+          const req: ApprovalRequest = {
+            kind: 'doom_loop',
+            toolName: stash.name,
+            inputPreview: previewInput(stash.input),
+            repeats: DOOM_WINDOW,
+          };
+          opts.onEvent({ type: 'approval_pending', id: info.toolUseId, request: req });
+          const decision = await opts.onApproval(info.toolUseId, req);
+          opts.onEvent({ type: 'approval_resolved', id: info.toolUseId, decision });
+          if (decision === 'reject') {
+            recentDispatches.length = 0;
+            await safeSubmit(opts.threadId, info.toolUseId, {
+              output:
+                'Halted by user: the agent was about to repeat this exact tool call for the third time in a row. Stop and try a different approach — the previous attempts did not change the situation.',
+              isError: true,
+            });
+            return;
+          }
+          // User chose to continue; clear the window so a single
+          // approved repeat doesn't immediately re-trigger on the next
+          // dispatch. The model gets one fresh shot before we ask again.
+          recentDispatches.length = 0;
+        }
+        recentDispatches.push(dispatchKey);
+        if (recentDispatches.length > DOOM_WINDOW) recentDispatches.shift();
+
         try {
           const result: ToolResult = await executeTool(call, {
             workspace: opts.workspace,
@@ -462,6 +514,34 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
 
   // Drop any leftover approval handles — covers abort mid-tool.
   void currentIteration; // currently informational; UI may use later
+}
+
+/** Cheap key for a tool input, used by the doom-loop detector to
+ *  decide whether two dispatches are "the same call." A doom-loop is
+ *  the model emitting the same call verbatim, so plain JSON.stringify
+ *  (preserving key order) catches it; we don't need full canonical
+ *  ordering. Falls back to String(input) on serialization failure
+ *  (cyclic refs shouldn't happen for tool inputs but the detector
+ *  must not crash the agent if they do). */
+function stableInputKey(input: unknown): string {
+  try {
+    return JSON.stringify(input);
+  } catch {
+    return String(input);
+  }
+}
+
+/** Compact one-line-ish preview of a tool input for the doom-loop
+ *  approval card. Truncates to keep the card scannable. */
+function previewInput(input: unknown): string {
+  let s: string;
+  try {
+    s = JSON.stringify(input, null, 2);
+  } catch {
+    s = String(input);
+  }
+  if (s.length > 400) s = s.slice(0, 400) + '\n…';
+  return s;
 }
 
 /** Poll the pending-tool-use Map for a short window before giving

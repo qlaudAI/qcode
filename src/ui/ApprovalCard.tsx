@@ -1,4 +1,11 @@
-import { Check, FilePlus, FileText, Terminal, X } from 'lucide-react';
+import {
+  AlertTriangle,
+  Check,
+  FilePlus,
+  FileText,
+  Terminal,
+  X,
+} from 'lucide-react';
 
 import { cn } from '../lib/cn';
 import type { ApprovalRequest } from '../lib/tools';
@@ -17,6 +24,8 @@ export type ApprovalCardProps = {
 export function ApprovalCard(props: ApprovalCardProps) {
   const { request } = props;
   if (request.kind === 'bash') return <BashCard {...props} request={request} />;
+  if (request.kind === 'doom_loop')
+    return <DoomLoopCard {...props} request={request} />;
   return <FileChangeCard {...props} request={request} />;
 }
 
@@ -97,6 +106,48 @@ function BashCard(
   );
 }
 
+// ─── Doom loop ──────────────────────────────────────────────────────
+
+function DoomLoopCard(
+  props: ApprovalCardProps & {
+    request: Extract<ApprovalRequest, { kind: 'doom_loop' }>;
+  },
+) {
+  const { request, onAllow, onReject, resolved } = props;
+  return (
+    <div className="overflow-hidden rounded-lg border border-amber-500/40 bg-amber-50/60 shadow-[0_2px_8px_rgba(0,0,0,0.04),0_12px_28px_rgba(0,0,0,0.06)] dark:bg-amber-950/30">
+      <header className="flex items-center gap-2 border-b border-amber-500/30 bg-amber-100/50 px-3 py-2 dark:bg-amber-900/30">
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-400" />
+        <span className="text-[12px] font-medium tracking-tight text-amber-900 dark:text-amber-200">
+          Possible stuck loop
+        </span>
+        <span className="ml-auto text-[10.5px] tabular-nums text-amber-800/80 dark:text-amber-300/80">
+          {request.repeats}× in a row
+        </span>
+      </header>
+      <div className="space-y-1.5 px-3 py-2.5 text-[12px] leading-relaxed text-foreground/85">
+        <p>
+          The agent is about to call{' '}
+          <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
+            {request.toolName}
+          </code>{' '}
+          with the same input it just used. Continue, or stop the run?
+        </p>
+        <pre className="m-0 max-h-32 overflow-auto rounded border border-border/40 bg-background/60 px-2 py-1.5 font-mono text-[10.5px] text-muted-foreground">
+          {request.inputPreview}
+        </pre>
+      </div>
+      <Footer
+        resolved={resolved}
+        onAllow={onAllow}
+        onReject={onReject}
+        allowLabel="Continue anyway"
+        rejectLabel="Stop"
+      />
+    </div>
+  );
+}
+
 // ─── Shared footer ─────────────────────────────────────────────────
 
 function Footer({
@@ -104,11 +155,13 @@ function Footer({
   onAllow,
   onReject,
   allowLabel,
+  rejectLabel = 'Reject',
 }: {
   resolved?: 'allow' | 'reject';
   onAllow: () => void;
   onReject: () => void;
   allowLabel: string;
+  rejectLabel?: string;
 }) {
   if (resolved === 'allow') {
     return (
@@ -130,7 +183,7 @@ function Footer({
         onClick={onReject}
         className="rounded-md border border-border bg-background px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:border-foreground/30"
       >
-        Reject
+        {rejectLabel}
       </button>
       <button
         onClick={onAllow}

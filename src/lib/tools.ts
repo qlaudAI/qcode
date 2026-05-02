@@ -72,6 +72,19 @@ export type ApprovalRequest =
       kind: 'bash';
       command: string;
       cwd: string;
+    }
+  | {
+      // Doom-loop guard: surfaced when the agent is about to dispatch
+      // the same tool with the same input three times in a row. Lets
+      // the user break a stuck cycle (or confirm it really should
+      // proceed) instead of watching it spin. Pattern from opencode's
+      // session/processor.ts.
+      kind: 'doom_loop';
+      toolName: string;
+      /** Pretty-printed input for display only — not used for matching. */
+      inputPreview: string;
+      /** How many identical consecutive dispatches we've seen. */
+      repeats: number;
     };
 
 export type ApprovalDecision = 'allow' | 'reject';
