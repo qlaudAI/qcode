@@ -60,7 +60,7 @@ type RenderBlock =
       documents?: AttachedDocument[];
       textFiles?: AttachedText[];
     }
-  | { type: 'assistant_text'; text: string }
+  | { type: 'assistant_text'; text: string; skill?: { slug: string; role: string } | null; resolvedModel?: string }
   | { type: 'tool'; call: ToolCallView }
   | {
       type: 'approval';
@@ -114,25 +114,27 @@ type RenderBlock =
 type PendingResolver = (decision: ApprovalDecision) => void;
 
 // Sample prompts for the empty-state. Each one is calibrated to
-// show off a real qcode differentiator the moment the user clicks
-// it — task tool / subagents, plan mode, multi-model, persistent
-// bash, project memory. Avoids generic "list files" prompts that
-// every other AI coding tool shows.
+// secretly invoke a specific engineer on the team — the user
+// describes a goal in their own words, the server-side classifier
+// auto-routes to the right specialist (Staff for plans, Reviewer
+// for bugs, etc.), and the green-checkmark UX makes the team feel
+// alive. The user never has to learn a slash command.
 const SAMPLE_PROMPTS = [
-  'Audit the auth flow and list every file that touches it',
-  'Plan a refactor: extract API client logic into its own module',
-  'Run the test suite and explain any failures',
-  'Find every TODO in the repo and group them by area',
+  'Plan a refactor of the auth flow',          // → Staff Engineer
+  'Review my recent changes for bugs',         // → Code Reviewer
+  'Audit this for OWASP issues',               // → Security
+  'Build a 30-second launch video with Remotion', // → Marketing
 ];
 
-// Web build has no workspace + no tools, so the file/grep prompts
-// above don't apply. These showcase what a chat-only build CAN do:
-// review pasted code, explain concepts, compare options.
+// Web build has no workspace + no tools — the engineers can't
+// actually grep / run tests / deploy. Frame prompts that play to
+// chat-only strengths: paste-in code review, conceptual questions,
+// architecture discussions.
 const WEB_SAMPLE_PROMPTS = [
   'Review this code for bugs (paste it after)',
-  'Explain when to use Server Components vs Client Components',
-  'Compare Cloudflare Workers vs AWS Lambda vs Vercel Edge',
-  'Walk me through how OAuth 2.0 works, end to end',
+  'Plan how I should structure my next API',
+  'Audit this snippet for OWASP issues (paste it after)',
+  'Explain the tradeoffs of App Router vs Pages Router',
 ];
 
 export function ChatSurface({
@@ -646,6 +648,33 @@ function handleEvent(
         // straight to a tool call we don't render the empty block.
         return [...blocks, { type: 'assistant_text', text: '' }];
 
+      case 'skill_resolved': {
+        // Stamp the active engineer onto the most-recent assistant
+        // block so the attribution renders above their answer. No-op
+        // when no assistant block exists yet (skill_resolved comes
+        // BEFORE turn_start for the first turn — we'll buffer it
+        // by lazy-attaching at next turn_start, but for the common
+        // case the empty assistant_text is already there).
+        const out = [...blocks];
+        const lastIdx = out.length - 1;
+        const last = out[lastIdx];
+        if (last?.type === 'assistant_text') {
+          out[lastIdx] = {
+            ...last,
+            skill: e.skill,
+            resolvedModel: e.resolvedModel,
+          };
+        } else {
+          out.push({
+            type: 'assistant_text',
+            text: '',
+            skill: e.skill,
+            resolvedModel: e.resolvedModel,
+          });
+        }
+        return out;
+      }
+
       case 'text': {
         const out = [...blocks];
         const last = out[out.length - 1];
@@ -1106,6 +1135,7 @@ function BlockRow({
       <div className="flex gap-3">
         <Avatar />
         <div className="flex-1 pt-0.5">
+          {block.skill && <SkillAttribution skill={block.skill} model={block.resolvedModel} />}
           <TypingDots />
         </div>
       </div>
@@ -1116,10 +1146,46 @@ function BlockRow({
     <div className="flex gap-3">
       <Avatar />
       <div className="flex-1 pt-0.5">
+        {block.skill && <SkillAttribution skill={block.skill} model={block.resolvedModel} />}
         <Markdown source={block.text} />
       </div>
     </div>
   );
+}
+
+// Small "Reviewed by Code Reviewer · Claude Sonnet 4.6" header that
+// appears above an assistant response when a specialist took the turn.
+// Subtle on purpose — informative, not loud. Click-through to settings
+// for "always pin this engineer for the conversation" comes later.
+function SkillAttribution({
+  skill,
+  model,
+}: {
+  skill: { slug: string; role: string };
+  model?: string;
+}) {
+  return (
+    <div className="mb-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+      <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-2 py-0.5 font-medium text-foreground/85">
+        <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />
+        {skill.role}
+      </span>
+      {model && (
+        <span className="font-mono opacity-70">
+          · {prettyModelName(model)}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function prettyModelName(slug: string): string {
+  // Best-effort cosmetic shortening so "claude-opus-4-7" reads as
+  // "Claude Opus 4.7". Falls through to the slug when we can't
+  // decompose it cleanly.
+  const m = slug.match(/^claude-([a-z]+)-(\d+)-(\d+)$/);
+  if (m) return `Claude ${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}`;
+  return slug;
 }
 
 function Avatar() {
@@ -1395,12 +1461,12 @@ function EmptyState({
         <Sparkles className="h-5 w-5" />
       </div>
       <h2 className="mt-6 text-2xl font-semibold tracking-tight">
-        What should we build?
+        What can the team build?
       </h2>
-      <p className="mt-2 text-sm text-muted-foreground">
-        Connected to{' '}
-        <span className="font-medium text-foreground">{modelLabel}</span>
-        {provider ? ` · ${provider}` : ''}
+      <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
+        Just describe it. We&rsquo;ll route to the right specialist —
+        Staff, Reviewer, QA, DevOps, Security, Designer, Frontend,
+        Backend, or Marketing — and tell you who&rsquo;s on it.
       </p>
       {memory && (
         <div

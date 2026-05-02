@@ -72,6 +72,14 @@ const MAX_LOOPS = 16; // hard ceiling; with write tools, real tasks need more tu
 
 export type AgentEvent =
   | { type: 'turn_start'; turn: number }
+  | {
+      type: 'skill_resolved';
+      /** null = no specialist; default qcode prompt ran. */
+      skill: { slug: string; role: string } | null;
+      /** Actual upstream model that ran (may differ from picked
+       *  when a skill forced a swap). */
+      resolvedModel: string;
+    }
   | { type: 'text'; text: string }
   | {
       type: 'tool_call';
@@ -440,6 +448,12 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
       clientTools,
       toolsMode: opts.enableConnectors ? 'dynamic' : undefined,
       signal: opts.signal,
+      onSkillResolved: (info) =>
+        opts.onEvent({
+          type: 'skill_resolved',
+          skill: info.skill,
+          resolvedModel: info.resolvedModel,
+        }),
       onTextDelta: (chunk) => opts.onEvent({ type: 'text', text: chunk }),
       onToolUse: (block) => {
         pending.set(block.id, { name: block.name, input: block.input });

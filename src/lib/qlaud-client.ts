@@ -247,6 +247,15 @@ export type ThreadStreamHandlers = {
    *  unless they want a per-turn divider in the UI. */
   onTextDelta: (chunk: string) => void;
   onToolUse: (block: { id: string; name: string; input: unknown }) => void;
+  /** Fires once early in the stream with the engineer that handled
+   *  this turn (read from qlaud's response headers). Null when no
+   *  specialist matched + the default qcode prompt ran. The model
+   *  string is the actual upstream slug — may differ from what the
+   *  user picked, when a skill forced a model swap. */
+  onSkillResolved?: (info: {
+    skill: { slug: string; role: string } | null;
+    resolvedModel: string;
+  }) => void;
   /** Fires at every model turn's message_start. inputTokens is the
    *  prompt-token count for THAT iteration. */
   onMessageStart?: (info: { inputTokens?: number }) => void;
@@ -360,6 +369,21 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
   if (!res.ok || !res.body) {
     const txt = await res.text().catch(() => '');
     throw new Error(`upstream_${res.status}:${txt.slice(0, 200)}`);
+  }
+
+  // Surface the engineer + the resolved model immediately, before
+  // any text deltas arrive. Lets the UI render the attribution
+  // header / "active engineer" pill while the model is still
+  // streaming its first tokens.
+  if (opts.onSkillResolved) {
+    const skillSlug = res.headers.get('x-qlaud-active-skill');
+    const skillRole = res.headers.get('x-qlaud-active-skill-role');
+    const resolvedModel = res.headers.get('x-qlaud-resolved-model') ?? '';
+    opts.onSkillResolved({
+      skill:
+        skillSlug && skillRole ? { slug: skillSlug, role: skillRole } : null,
+      resolvedModel,
+    });
   }
 
   type ToolUseAccum = { id: string; name: string; jsonText: string };
