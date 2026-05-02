@@ -297,11 +297,16 @@ export function ChatSurface({
       lastLoadedRef.current = null;
       return;
     }
-    if (lastLoadedRef.current === threadId) return;
     if (!messagesQuery.data) return;
-    // Query keys on threadId, so messagesQuery.data is always for
-    // the active thread (Query handles cross-thread isolation
-    // internally). No additional guard needed.
+    // Normal navigation: skip if we've already rendered this thread
+    // once (avoids the post-send overwrite that strips usage pills).
+    // Resume case: when the thread is in-flight (we're polling for
+    // a server-side-finishing turn), bypass the gate — every poll
+    // refetch needs to land in the UI the moment qlaud persists the
+    // new assistant turn, otherwise the user sees the canonical
+    // history frozen at switch-away time.
+    const polling = isInFlight(threadId);
+    if (!polling && lastLoadedRef.current === threadId) return;
     lastLoadedRef.current = threadId;
     setBlocks(historyToBlocks(messagesQuery.data.messages));
     setCompaction(messagesQuery.data.compaction);
