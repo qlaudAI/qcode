@@ -184,6 +184,19 @@ export function ChatSurface({
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const approvalsRef = useRef<Map<string, PendingResolver>>(new Map());
+  // Monotonic run id. Bumped on every send + on every thread switch.
+  // Each onEvent callback closes over the run id it was created
+  // with; if the live ref drifts past it (because the user aborted,
+  // switched thread, or sent a new turn before the old stream
+  // unwound), the callback bails. Without this guard, a late SSE
+  // event from an aborted thread can stomp the active thread's
+  // blocks state — symptom is messages bleeding across threads
+  // when the user clicks Stop and switches fast.
+  const activeRunIdRef = useRef(0);
+  // Capture-at-send-time threadId. setBlocks calls in send() check
+  // it against the live `threadId` prop; mismatch = thread changed
+  // while a request was in flight, drop the result.
+  const lastSendThreadRef = useRef<string | null>(null);
 
   // Lazy-load the workspace file index on first focus into the
   // composer. Cheaper than indexing on mount when the user might
@@ -242,6 +255,22 @@ export function ChatSurface({
   // the next thread-switch covers it.
   const messagesQuery = useThreadMessagesQuery(busy ? null : threadId);
   const lastLoadedRef = useRef<string | null>(null);
+  // Thread-switch invalidator. Bumping the run id here aborts any
+  // in-flight send + makes its still-streaming events no-ops, so
+  // navigating away from a slow turn doesn't leak its blocks into
+  // the new thread. Pair with abortRef.abort() to cut the network
+  // stream too — abort is best-effort (server may finish), but the
+  // run-id check guarantees we won't render the leftover events.
+  useEffect(() => {
+    if (lastSendThreadRef.current && lastSendThreadRef.current !== threadId) {
+      activeRunIdRef.current += 1;
+      abortRef.current?.abort();
+      for (const resolve of approvalsRef.current.values()) resolve('reject');
+      approvalsRef.current.clear();
+      setBusy(false);
+    }
+  }, [threadId]);
+
   useEffect(() => {
     if (busy) return;
     if (!threadId) {
@@ -251,6 +280,14 @@ export function ChatSurface({
     }
     if (lastLoadedRef.current === threadId) return;
     if (!messagesQuery.data) return;
+    // Belt-and-suspenders: confirm the data we have actually
+    // belongs to the thread we want. Query keys this on threadId
+    // so it should always match, but if a previous queryFn lands
+    // late after a fast thread switch, this guard means we don't
+    // paint stale history.
+    if (lastSendThreadRef.current && lastSendThreadRef.current !== threadId) {
+      return;
+    }
     lastLoadedRef.current = threadId;
     setBlocks(historyToBlocks(messagesQuery.data.messages));
     setCompaction(messagesQuery.data.compaction);
@@ -434,6 +471,12 @@ export function ChatSurface({
     });
     setBusy(true);
     abortRef.current = new AbortController();
+    // Bump run id and capture for this send. Every callback below
+    // checks `runId === activeRunIdRef.current` before touching
+    // state — if the user aborts, switches threads, or sends a new
+    // turn, the ref bumps and stale callbacks become no-ops.
+    activeRunIdRef.current += 1;
+    const runId = activeRunIdRef.current;
 
     // Snapshot wallet balance + start time for the cost-from-delta
     // calc on the usage pill. qlaud doesn't ship cost on the SSE
@@ -447,6 +490,11 @@ export function ChatSurface({
       // the active id when there is one, otherwise creates a remote
       // thread and updates the sidebar before resolving.
       const id = await ensureThreadId();
+      lastSendThreadRef.current = id;
+      // Thread changed (user navigated) between send press and the
+      // thread-id resolution. Don't keep going — the user's looking
+      // at a different conversation.
+      if (runId !== activeRunIdRef.current) return;
 
       await runThreadAgent({
         threadId: id,
@@ -459,15 +507,29 @@ export function ChatSurface({
         enableConnectors: getSettings().enableConnectors,
         signal: abortRef.current.signal,
         onEvent: (e) => {
+          // Stale-run guard: drop events from any run that's been
+          // superseded (user switched threads, aborted, re-sent).
+          // Without this, a late tool_done from an aborted thread
+          // mutates the active thread's blocks.
+          if (runId !== activeRunIdRef.current) return;
           if (e.type === 'finished') lastUsage = e.usage;
           handleEvent(e, setBlocks);
         },
         onApproval: (toolUseId, _request) =>
           new Promise<ApprovalDecision>((resolve) => {
+            // If this run is no longer active by the time the model
+            // asks for approval, auto-reject so the executor can
+            // unwind. Otherwise the user would see an approval card
+            // for a turn they already abandoned.
+            if (runId !== activeRunIdRef.current) {
+              resolve('reject');
+              return;
+            }
             approvalsRef.current.set(toolUseId, resolve);
           }),
       });
 
+      if (runId !== activeRunIdRef.current) return;
       onTurnLanded?.({ userText: userMsg || null, threadId: id });
       // Remember which mode this turn ran in so the next send can
       // detect a plan → agent transition.
@@ -478,6 +540,10 @@ export function ChatSurface({
       // markup included); token counts come from the SSE stream.
       if (lastUsage) {
         const postBalance = (await fetchBalance())?.balanceUsd ?? null;
+        // Stale-run guard: if the user navigated away while we were
+        // fetching the post-turn balance, drop the usage append —
+        // the active thread doesn't own this turn's cost.
+        if (runId !== activeRunIdRef.current) return;
         const usage: { inputTokens: number; outputTokens: number } = lastUsage;
         const cost =
           preBalance != null && postBalance != null
@@ -528,9 +594,16 @@ export function ChatSurface({
   }
 
   function stop() {
+    // Bumping the run id is what actually makes "Stop" definitive.
+    // abort() asks the network to give up, but late events from the
+    // server side can still arrive (SSE buffering); the run-id
+    // check in onEvent ensures they're discarded instead of
+    // mutating blocks the user is now reading fresh.
+    activeRunIdRef.current += 1;
     abortRef.current?.abort();
     for (const resolve of approvalsRef.current.values()) resolve('reject');
     approvalsRef.current.clear();
+    setBusy(false);
   }
 
   const empty = blocks.length === 0;

@@ -632,8 +632,25 @@ async function safeSubmit(
 ): Promise<void> {
   try {
     await submitToolResult(threadId, toolUseId, payload);
-  } catch {
-    // Swallowed deliberately — see comment above.
+  } catch (e) {
+    // We DO swallow — the parked dispatcher times out server-side
+    // after 60s and the model sees an upstream timeout. But we used
+    // to swallow silently, which made it impossible to tell the
+    // difference between "all good" and "every tool result is
+    // failing to post" (CORS, auth churn, network down). Log loud
+    // so devtools / PostHog has a trail; ship to analytics so we
+    // can spot patterns across users.
+    const reason = e instanceof Error ? e.message : 'unknown';
+    console.warn(
+      `[agent] submitToolResult failed for tool_use_id=${toolUseId}: ${reason}`,
+    );
+    void import('./analytics').then((a) =>
+      a.posthog.capture('tool_result_post_failed', {
+        thread_id: threadId,
+        tool_use_id: toolUseId,
+        reason,
+      }),
+    );
   }
 }
 

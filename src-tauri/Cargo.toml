@@ -1,6 +1,6 @@
 [package]
 name = "qcode"
-version = "0.1.0-alpha.38"
+version = "0.1.0-alpha.39"
 description = "qcode — multi-model coding agent powered by qlaud"
 authors = ["qlaud <support@qlaud.ai>"]
 license = "MIT"

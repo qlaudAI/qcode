@@ -16,6 +16,41 @@ import type { ToolDef } from './tools';
 
 const BASE = (import.meta.env.VITE_QLAUD_BASE as string | undefined) ?? 'https://api.qlaud.ai';
 
+// Idle timeout for the SSE byte stream. If the upstream goes silent
+// for this long mid-response (network blip, server crash, missed
+// message_stop frame, mobile-radio sleep), we cancel the reader and
+// surface as a clean error instead of hanging on TypingDots forever.
+// 90s covers the slowest legitimate gap we've measured (cold start
+// on a 1M-context Opus call) with margin; anything longer is dead.
+const SSE_IDLE_MS = 90_000;
+
+/** Race reader.read() against an idle timer. On timeout, cancel the
+ *  reader (which terminates the stream cleanly) and return done=true
+ *  so the consumer loop exits. The caller then synthesizes a stop
+ *  event downstream (stopReason: 'incomplete') so the agent loop
+ *  unwinds instead of awaiting the dead stream. */
+async function readWithIdleTimeout<T>(
+  reader: ReadableStreamDefaultReader<T>,
+): Promise<ReadableStreamReadResult<T>> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<ReadableStreamReadResult<T>>((resolve) => {
+    timer = setTimeout(() => {
+      console.warn(
+        `[qlaud-client] SSE stream idle for ${SSE_IDLE_MS}ms — cancelling`,
+      );
+      reader
+        .cancel(new Error('sse_idle_timeout'))
+        .catch(() => undefined);
+      resolve({ value: undefined, done: true });
+    }, SSE_IDLE_MS);
+  });
+  try {
+    return await Promise.race([reader.read(), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
@@ -125,7 +160,11 @@ export async function streamMessage(opts: StreamOpts): Promise<void> {
   let buffer = '';
 
   while (true) {
-    const { value, done } = await reader.read();
+    // Idle watchdog: if no bytes arrive for SSE_IDLE_MS, the stream
+    // is functionally dead (network blip, server crash, missed
+    // message_stop). Cancel and bail with stopReason='incomplete'
+    // so the agent loop doesn't hang on TypingDots forever.
+    const { value, done } = await readWithIdleTimeout(reader);
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
 
@@ -399,7 +438,7 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
   let buffer = '';
 
   while (true) {
-    const { value, done } = await reader.read();
+    const { value, done } = await readWithIdleTimeout(reader);
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
 
