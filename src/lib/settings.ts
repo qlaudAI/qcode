@@ -29,13 +29,26 @@ export type Settings = {
    *  alongside the meta-tools in the same request. Off by default
    *  because most users don't have connectors configured yet. */
   enableConnectors: boolean;
+  /** Model used for `task` subagent spawns. Subagents do bounded
+   *  scout work (find auth files, audit imports, summarize a
+   *  module) — they don't need the same firepower as the parent.
+   *  Default: a cheap model. Set to null to use the parent's model
+   *  (the old behavior). The user picks in Settings → Subagent.
+   *
+   *  Cost math: a 5-call planning loop on Opus + 4 subagent dives
+   *  on Opus is ~$0.50. Same on Opus parent + DeepSeek-Chat
+   *  subagents is ~$0.12 — same final answer, 4x cheaper. */
+  subagentModel: string | null;
 };
+
+const DEFAULT_SUBAGENT_MODEL = 'claude-haiku-4-5';
 
 const DEFAULTS: Settings = {
   defaultModel: DEFAULT_MODEL,
   autoUpdate: true,
   mode: 'agent',
   enableConnectors: false,
+  subagentModel: DEFAULT_SUBAGENT_MODEL,
 };
 
 export function getSettings(): Settings {

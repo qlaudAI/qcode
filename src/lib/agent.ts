@@ -34,6 +34,7 @@ import {
 } from './tools';
 import { submitToolResult } from './tool-results';
 import { createRemoteThread } from './threads';
+import { getSettings } from './settings';
 
 const SYSTEM_PROMPT_AGENT = `You are qcode, a multi-model coding agent running on the user's desktop.
 
@@ -469,12 +470,20 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
           const stash = pending.get(info.toolUseId);
           const inputObj =
             (stash?.input as { description?: string; prompt?: string }) ?? {};
+          // Subagent runs default to a cheap model — bounded scout
+          // work doesn't need flagship pricing. Falls back to the
+          // parent's model when the user has explicitly set
+          // subagentModel:null in settings (old behavior). Read on
+          // dispatch so toggling the setting takes effect on the
+          // very next subagent.
+          const subagentModel =
+            getSettings().subagentModel ?? opts.model;
           await runSubagentForTask({
             parentThreadId: opts.threadId,
             parentToolUseId: info.toolUseId,
             description: inputObj.description ?? '',
             prompt: inputObj.prompt ?? '',
-            model: opts.model,
+            model: subagentModel,
             mode: opts.mode,
             workspace: opts.workspace,
             enableConnectors: opts.enableConnectors,

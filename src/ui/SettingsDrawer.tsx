@@ -150,6 +150,31 @@ export function SettingsDrawer({
               The title-bar Agent / Plan toggle overrides this for the
               current session.
             </p>
+
+            <FieldLabel>Subagent model</FieldLabel>
+            <select
+              value={settings.subagentModel ?? '__parent__'}
+              onChange={(e) =>
+                update(
+                  'subagentModel',
+                  e.target.value === '__parent__' ? null : e.target.value,
+                )
+              }
+              className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/30"
+            >
+              <option value="__parent__">Same as parent (no override)</option>
+              {MODELS.map((m) => (
+                <option key={m.slug} value={m.slug}>
+                  {m.label} · {m.provider} · {m.tier}
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] text-muted-foreground">
+              The `task` tool spawns a subagent for bounded scout work
+              (find files, summarize a module). Pick a cheap model here
+              to keep subagent fan-out from running up the bill — the
+              parent stays on whatever you picked above.
+            </p>
           </Section>
 
           <Section title="Updates">
