@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  qcode DMG installer background.
+  Canvas: 660 × 420 (matches windowSize in tauri.conf.json).
+  Layout:
+    • App icon overlay lands at (180, 220) — Tauri renders the .app
+      bundle there. We leave that area visually clean.
+    • Applications symlink lands at (480, 220) — same.
+    • Center column holds the arrow + drag cue.
+  Brand: HeroBackdrop's signature warm-gradient family,
+  matching qlaud.ai's marketing palette.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 420" width="660" height="420">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fff7f0"/>
+      <stop offset="40%" stop-color="#ffe1d4"/>
+      <stop offset="75%" stop-color="#e6d8ff"/>
+      <stop offset="100%" stop-color="#cfd8ff"/>
+    </linearGradient>
+    <radialGradient id="spotTL" cx="0.18" cy="0.12" r="0.55">
+      <stop offset="0%" stop-color="#ff7a3c" stop-opacity="0.45"/>
+      <stop offset="60%" stop-color="#ff7a3c" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="spotBR" cx="0.85" cy="0.85" r="0.55">
+      <stop offset="0%" stop-color="#5b4bd6" stop-opacity="0.18"/>
+      <stop offset="60%" stop-color="#5b4bd6" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#1a1a4e" stroke-width="0.5" stroke-opacity="0.05"/>
+    </pattern>
+  </defs>
+
+  <!-- Layered backdrop -->
+  <rect width="660" height="420" fill="url(#bg)"/>
+  <rect width="660" height="420" fill="url(#spotTL)"/>
+  <rect width="660" height="420" fill="url(#spotBR)"/>
+  <rect width="660" height="420" fill="url(#grid)"/>
+
+  <!-- Top branding strip: q-monogram + qcode wordmark + ALPHA pill -->
+  <g transform="translate(28, 28)">
+    <rect width="26" height="26" rx="6.5" fill="#0a0a0a"/>
+    <circle cx="9.7" cy="11.4" r="4" stroke="#ffffff" stroke-width="2" fill="none"/>
+    <rect x="13.4" y="8.9" width="2.85" height="13" fill="#ffffff"/>
+    <circle cx="20.3" cy="20.3" r="1.4" fill="#ef4444"/>
+
+    <text x="36" y="19" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif"
+          font-size="17" font-weight="600" fill="#0a0a0a" letter-spacing="-0.3">qcode</text>
+
+    <g transform="translate(90, 4)">
+      <rect width="52" height="20" rx="10" fill="#ef4444" fill-opacity="0.13" stroke="#ef4444" stroke-opacity="0.35" stroke-width="0.6"/>
+      <text x="26" y="14" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+            font-size="9.5" font-weight="700" fill="#ef4444" text-anchor="middle" letter-spacing="0.9">ALPHA</text>
+    </g>
+  </g>
+
+  <!-- Right-side label: version stamp -->
+  <text x="632" y="46" font-family="ui-monospace, 'SF Mono', monospace"
+        font-size="11" font-weight="500" fill="#1a1a4e" fill-opacity="0.5"
+        text-anchor="end" letter-spacing="0.2">v0.1.0-alpha</text>
+
+  <!-- Drag hint above the arrow -->
+  <text x="330" y="155" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+        font-size="14" font-weight="500" fill="#1a1a4e" fill-opacity="0.7"
+        text-anchor="middle" letter-spacing="0.1">
+    Drag qcode into Applications to install
+  </text>
+
+  <!-- Big bold arrow → from app icon position to Applications.
+       Solid stroke, no gradient — needs to read at a glance. -->
+  <g transform="translate(248, 220)" stroke="#1a1a4e" stroke-opacity="0.78" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="0" y1="0" x2="148" y2="0" stroke-width="3"/>
+    <path d="M 138 -10 L 156 0 L 138 10" stroke-width="3"/>
+  </g>
+
+  <!-- Subtle "drop here" hint near the Applications icon -->
+  <text x="480" y="320" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+        font-size="11" font-weight="500" fill="#1a1a4e" fill-opacity="0.45"
+        text-anchor="middle" letter-spacing="0.5">
+    APPLICATIONS
+  </text>
+
+  <!-- Subtle source label near the app icon position -->
+  <text x="180" y="320" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+        font-size="11" font-weight="500" fill="#1a1a4e" fill-opacity="0.45"
+        text-anchor="middle" letter-spacing="0.5">
+    QCODE
+  </text>
+
+  <!-- Bottom tagline -->
+  <text x="330" y="378" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+        font-size="13" font-weight="500" fill="#1a1a4e" fill-opacity="0.6"
+        text-anchor="middle" letter-spacing="0.1">
+    The multi-model coding agent · powered by qlaud
+  </text>
+  <text x="330" y="396" font-family="ui-monospace, monospace"
+        font-size="10" font-weight="400" fill="#1a1a4e" fill-opacity="0.4"
+        text-anchor="middle" letter-spacing="0.3">
+    qlaud.ai/qcode
+  </text>
+</svg>
