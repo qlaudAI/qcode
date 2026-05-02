@@ -122,6 +122,11 @@ type RenderBlock =
       parentToolUseId: string;
       /** User-facing description from the parent's task input. */
       description: string;
+      /** Which named agent the orchestrator dispatched. Drives the
+       *  card label + role icon. Optional for back-compat when
+       *  loading old persisted threads that pre-date the registry. */
+      agentType?: string;
+      agentLabel?: string;
       status: 'running' | 'done' | 'error';
       /** Final text the subagent returned. Populated on subagent_done. */
       summary: string | null;
@@ -958,6 +963,8 @@ function reduceBlocks(blocks: RenderBlock[], e: AgentEvent): RenderBlock[] {
             type: 'subagent',
             parentToolUseId: e.parentToolUseId,
             description: e.description,
+            agentType: e.agentType,
+            agentLabel: e.agentLabel,
             status: 'running',
             summary: null,
             innerBlocks: [],
@@ -1827,7 +1834,7 @@ function SubagentBlock({
             )}
           />
           <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-            Subagent
+            {block.agentLabel || 'Agent'}
           </span>
           <span className="min-w-0 truncate text-[12px] font-medium text-foreground">
             {block.description || '(no description)'}

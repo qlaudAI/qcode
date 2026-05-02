@@ -13,6 +13,7 @@
 //      when the user clicks Allow or Reject
 //   4. Executor runs (or skips) based on the decision
 
+import { AGENTS, resolveAgentType, type AgentType } from './agents';
 import { envSystemSection, probeEnv } from './env-probe';
 import { getProjectMemory, memorySystemSection } from './memory';
 import {
@@ -23,8 +24,6 @@ import {
 import {
   ALL_TOOLS,
   READ_TOOLS,
-  SUBAGENT_READ_TOOLS,
-  SUBAGENT_TOOLS,
   executeTool,
   type ApprovalDecision,
   type ApprovalRequest,
@@ -134,6 +133,11 @@ export type AgentEvent =
       type: 'subagent_start';
       parentToolUseId: string;
       description: string;
+      /** Which named agent the orchestrator dispatched. Lets the UI
+       *  show the role label ("Verifier", "Explorer", ...) instead
+       *  of the generic "Subagent". */
+      agentType: AgentType;
+      agentLabel: string;
     }
   | {
       type: 'subagent_event';
@@ -194,6 +198,11 @@ export type RunThreadAgentOpts = {
    *  divider. Approvals and tool cards still bubble up — the user
    *  needs to see + approve every write the subagent attempts. */
   isSubagent?: boolean;
+  /** Named-agent type for subagent runs. Selects the tool subset
+   *  (per AGENTS[type].toolNames) and is forwarded to the server so
+   *  the focused persona prompt applies. Ignored when isSubagent is
+   *  false. */
+  subagentType?: AgentType;
   signal?: AbortSignal;
   onEvent: (e: AgentEvent) => void;
   onApproval: (
@@ -235,16 +244,21 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
     : [null, null];
   const systemPrompt =
     basePrompt + memorySystemSection(memory) + envSystemSection(env);
-  // Subagent runs strip `task` from the tool list (depth-1 cap)
-  // and stick to read-only tools when the parent is in plan mode
-  // — the subagent inherits the parent's safety posture.
-  const baseTools = opts.isSubagent
-    ? planMode
-      ? SUBAGENT_READ_TOOLS
-      : SUBAGENT_TOOLS
-    : planMode
-      ? READ_TOOLS
-      : ALL_TOOLS;
+  // Tool selection:
+  // - Orchestrator (parent): plan mode → READ_TOOLS, otherwise ALL_TOOLS.
+  // - Subagent: filter ALL_TOOLS to the named agent's toolNames so a
+  //   Verifier can't write_file, an Explorer can't bash, etc. Stripping
+  //   `task` is implicit — no agent's toolNames list includes it
+  //   (depth-1 cap).
+  let baseTools;
+  if (opts.isSubagent && opts.subagentType) {
+    const allowed = new Set(AGENTS[opts.subagentType].toolNames);
+    baseTools = ALL_TOOLS.filter((t) => allowed.has(t.name));
+  } else if (planMode) {
+    baseTools = READ_TOOLS;
+  } else {
+    baseTools = ALL_TOOLS;
+  }
   const clientTools = opts.workspace ? toClientTools(baseTools) : [];
 
   // Stash tool inputs as they stream in (onToolUse) so we have them
@@ -307,6 +321,10 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
   const qlaudRuntime = {
     plan_mode: planMode,
     is_subagent: !!opts.isSubagent,
+    // Forward the named-agent type so the server swaps in the
+    // focused persona (Explorer / Verifier / Builder / Planner /
+    // Reviewer) instead of the orchestrator's full SYSTEM_PROMPT_AGENT.
+    agent_type: opts.isSubagent ? opts.subagentType : undefined,
     memory: memory ? { source: memory.source, text: memory.text } : undefined,
     env: env
       ? {
@@ -379,24 +397,32 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
         if (info.name === 'task' && !opts.isSubagent) {
           const stash = pending.get(info.toolUseId);
           const inputObj =
-            (stash?.input as { description?: string; prompt?: string }) ?? {};
-          // Subagent runs default to a cheap model — bounded scout
-          // work doesn't need flagship pricing. Falls back to the
-          // parent's model when the user has explicitly set
-          // subagentModel:null in settings (old behavior). Read on
-          // dispatch so toggling the setting takes effect on the
-          // very next subagent.
-          const subagentModel =
-            getSettings().subagentModel ?? opts.model;
+            (stash?.input as {
+              description?: string;
+              prompt?: string;
+              agent_type?: unknown;
+            }) ?? {};
+          const agentType = resolveAgentType(inputObj.agent_type);
+          const agentDef = AGENTS[agentType];
+          // Read-only / cheap agents (Explorer, Verifier, Reviewer)
+          // route to the user's configured subagentModel; flagship
+          // agents (Builder, Planner) inherit the parent's model so
+          // their judgment doesn't degrade. useCheapModel:false +
+          // subagentModel:null both result in inheriting the parent.
+          const subagentModel = agentDef.useCheapModel
+            ? (getSettings().subagentModel ?? opts.model)
+            : opts.model;
           posthog.capture('subagent_spawned', {
             parent_model: opts.model,
             subagent_model: subagentModel,
+            agent_type: agentType,
             description_chars: (inputObj.description ?? '').length,
             prompt_chars: (inputObj.prompt ?? '').length,
           });
           await runSubagentForTask({
             parentThreadId: opts.threadId,
             parentToolUseId: info.toolUseId,
+            agentType,
             description: inputObj.description ?? '',
             prompt: inputObj.prompt ?? '',
             model: subagentModel,
@@ -696,6 +722,9 @@ async function safeSubmit(
 async function runSubagentForTask(args: {
   parentThreadId: string;
   parentToolUseId: string;
+  /** Which named agent to dispatch. Selects the tool subset client-
+   *  side and the persona prompt server-side. */
+  agentType: AgentType;
   description: string;
   prompt: string;
   model: string;
@@ -710,13 +739,16 @@ async function runSubagentForTask(args: {
   ) => Promise<ApprovalDecision>;
   autoApprove?: import('./settings').AutoApproveMode;
 }): Promise<void> {
-  // Tell the parent UI a subagent is starting so it can render a
-  // "Subagent: <description>" card. The corresponding subagent_done
-  // event fires below.
+  const agentDef = AGENTS[args.agentType];
+  // Tell the parent UI an agent is starting so it can render the
+  // labeled card ("Verifier: confirm scaffold landed"). agent_type
+  // rides along so the UI can show the role + pick the right icon.
   args.onEvent({
     type: 'subagent_start',
     parentToolUseId: args.parentToolUseId,
     description: args.description,
+    agentType: args.agentType,
+    agentLabel: agentDef.label,
   });
 
   let childThreadId: string;
@@ -726,6 +758,7 @@ async function runSubagentForTask(args: {
         parent_thread_id: args.parentThreadId,
         parent_tool_use_id: args.parentToolUseId,
         kind: 'subagent',
+        agent_type: args.agentType,
         description: args.description,
       },
     });
@@ -740,7 +773,7 @@ async function runSubagentForTask(args: {
       summary: msg,
     });
     await safeSubmit(args.parentThreadId, args.parentToolUseId, {
-      output: `Subagent failed to start: ${msg}`,
+      output: `${agentDef.label} failed to start: ${msg}`,
       isError: true,
     });
     return;
@@ -758,6 +791,10 @@ async function runSubagentForTask(args: {
       mode: args.mode,
       enableConnectors: args.enableConnectors,
       isSubagent: true,
+      // Agent type flows into qlaud_runtime so the server swaps in
+      // the focused persona prompt for this run. Client also reads
+      // it to filter the tool list (see runThreadAgent).
+      subagentType: args.agentType,
       signal: args.signal,
       autoApprove: args.autoApprove,
       onApproval: args.onApproval,

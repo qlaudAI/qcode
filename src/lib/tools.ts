@@ -197,39 +197,43 @@ export const TODO_TOOL: ToolDef = {
   },
 };
 
-// `task` belongs to neither READ_TOOLS nor WRITE_TOOLS — it's a
-// meta-tool that delegates work to a child agent. The child runs
-// with the same workspace + tools (minus task itself, no recursion)
-// and returns a single text summary. Use cases:
-//   - Investigations the parent doesn't want to read raw output for
-//     ("find every reference to X" → child returns a summary)
-//   - Fan-out: parent kicks off 3 task() calls, each handles a slice
-//   - Plan-then-execute: parent plans, dispatches a task to do the
-//     heavy edit work, gets a final report
+// `task` is the orchestrator's dispatch primitive. The model picks an
+// agent type (Explorer / Verifier / Builder / Planner / Reviewer) and
+// hands off a self-contained prompt; the named agent runs in a fresh
+// remote thread with its own focused system prompt + tool subset, then
+// returns a text summary. Multiple task calls in one turn run in
+// parallel via the SSE fire-and-forget dispatch path.
 //
-// Implementation: client-dispatched. agent.ts intercepts the tool
-// dispatch and runs streamThreadMessage against a fresh remote
-// thread instead of executeTool. Approval prompts from the child
-// surface in the same UI so the user always sees + approves writes.
+// Implementation: client-dispatched. agent.ts intercepts the dispatch,
+// resolves agent_type to a tool subset (from lib/agents.ts) + flips
+// the qlaud_runtime.agent_type so the server applies the focused
+// persona prompt. Approval prompts from the child surface in the same
+// UI so the user always sees + approves writes.
 export const TASK_TOOL: ToolDef = {
   name: 'task',
   description:
-    "Spawn a sub-agent to handle a focused investigation or self-contained sub-task. The sub-agent has the same workspace and tools as you do (except it can't recurse — no nested tasks), but starts with empty context: it sees only the prompt you write. Use when:\n- The task needs extensive exploration whose intermediate output would bloat your context (\"find auth files\", \"map the routing layer\")\n- You want to fan out parallel investigations across the codebase\n- A self-contained refactor that's clearer with a fresh agent (\"replace deprecated imports across these files\")\n\nThe sub-agent's prompt must stand alone — include file paths, what to look for, and what success looks like. Returns the sub-agent's final text response. Don't use for one-shot tools like a single read_file or grep — call those directly.",
+    "Dispatch a named agent to a focused subtask. Pick the right one for the job:\n\n• explorer — read-only investigation (find references, map architecture). Returns markdown summary with file:line citations. Use when answering would balloon your context (\"find every caller of X\", \"map the auth layer\").\n• verifier — confirm a code change actually landed and the project's check command passes. Run AFTER write_file/edit_file or after a foreground bash that timed out — don't trust 'I think it worked'. Returns PASS/FAIL with specifics.\n• builder — self-contained execution with full toolkit (write/edit/bash/browser/verify). Use for \"scaffold X\", \"add feature Y\", \"refactor Z\" — the Builder owns the whole edit→verify loop.\n• planner — read-only proposal-style plan. Use before a Builder when the change is ambiguous; Planner returns a file-by-file plan you pass into Builder.\n• reviewer — read-only audit for bugs / security / perf. Returns ranked findings with file:line and severity.\n\nMultiple task calls in one assistant message run IN PARALLEL — fan out independent work rather than serializing. The agent doesn't see this conversation; the prompt must stand alone (file paths, what to look for, success criteria). Don't use task for one-shot operations (one read_file, one grep) — call those directly.",
   input_schema: {
     type: 'object',
     properties: {
+      agent_type: {
+        type: 'string',
+        enum: ['explorer', 'verifier', 'builder', 'planner', 'reviewer'],
+        description:
+          'Which agent to dispatch. See the tool description for when to pick each.',
+      },
       description: {
         type: 'string',
         description:
-          'Short 3-7 word noun phrase shown to the user (e.g. "Audit auth flow", "Find dead exports"). Imperative.',
+          'Short 3-7 word noun phrase shown to the user (e.g. "Audit auth flow", "Verify scaffold landed", "Find dead exports").',
       },
       prompt: {
         type: 'string',
         description:
-          "Self-contained prompt for the sub-agent. The sub-agent doesn't see this conversation; everything it needs has to be here.",
+          "Self-contained prompt for the agent. The agent doesn't see this conversation; everything it needs has to be here.",
       },
     },
-    required: ['description', 'prompt'],
+    required: ['agent_type', 'description', 'prompt'],
   },
 };
 
