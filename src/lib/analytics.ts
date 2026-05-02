@@ -15,7 +15,12 @@
 //
 // Env vars (Vite — set at build time):
 //   VITE_POSTHOG_PROJECT_TOKEN  phc_… token (same as the dashboard)
-//   VITE_POSTHOG_HOST           https://us.i.posthog.com (default)
+//   VITE_POSTHOG_HOST           defaults to https://p.qlaud.ai
+//                               (our first-party reverse proxy in
+//                                apps/edge/src/index.ts → us.i.posthog.com).
+//                               Bypasses ad-blockers that filter
+//                               *.posthog.com and keeps analytics
+//                               first-party from the user's POV.
 
 import posthog from 'posthog-js';
 
@@ -26,10 +31,14 @@ export function initAnalytics(): void {
   if (!key) return; // unset = no-op (local dev, missing config)
   const host =
     (import.meta.env.VITE_POSTHOG_HOST as string | undefined) ??
-    'https://us.i.posthog.com';
+    'https://p.qlaud.ai';
 
   posthog.init(key, {
     api_host: host,
+    // Even though `api_host` is our proxy, link-outs from PostHog UI
+    // tooltips (e.g. "view this user in PostHog") should target
+    // PostHog's actual UI host, not our proxy.
+    ui_host: 'https://us.posthog.com',
     person_profiles: 'identified_only',
     capture_pageview: true,
     capture_pageleave: true,
