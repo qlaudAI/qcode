@@ -430,6 +430,11 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
       content: opts.content,
       system: systemPrompt,
       qlaudRuntime,
+      // Server-side tool resolution: send the names, qlaud expands +
+      // applies plan-mode / subagent subset rules. We still send the
+      // full `clientTools` defs as the legacy fallback so a worker
+      // rollback to a pre-this-PR version keeps qcode functional.
+      clientToolNames: baseTools.map((t) => t.name),
       clientTools,
       toolsMode: opts.enableConnectors ? 'dynamic' : undefined,
       signal: opts.signal,

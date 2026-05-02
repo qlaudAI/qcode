@@ -296,6 +296,14 @@ export type ThreadStreamOpts = ThreadStreamHandlers & {
       rg?: 'sidecar' | 'system' | null;
     };
   };
+  /** Server-resolved client tools. Client says "I implement these
+   *  tool names locally"; qlaud expands to canonical schemas + applies
+   *  plan-mode / subagent subset rules. Result: tweaking a tool's
+   *  description or shifting the read/write boundary ships via
+   *  `wrangler deploy` instead of a desktop release. Old qlaud workers
+   *  that don't know about this field fall back to the legacy
+   *  `clientTools` (full inline defs) we still send below. */
+  clientToolNames?: string[];
 };
 
 export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void> {
@@ -314,6 +322,9 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
     body.client_tools = opts.clientTools;
   }
   if (opts.qlaudRuntime) body.qlaud_runtime = opts.qlaudRuntime;
+  if (opts.clientToolNames && opts.clientToolNames.length > 0) {
+    body.client_tool_names = opts.clientToolNames;
+  }
 
   const res = await fetch(`${BASE}/v1/threads/${encodeURIComponent(opts.threadId)}/messages`, {
     method: 'POST',
