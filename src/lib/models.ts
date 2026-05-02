@@ -87,3 +87,31 @@ export const MODELS: ModelEntry[] = [
 ];
 
 export const DEFAULT_MODEL = 'claude-sonnet-4-6';
+
+// Approximate context windows in tokens — used by the composer's
+// usage indicator ("32k / 200k") and the auto-compaction headroom
+// calculation. Keep this aligned with the upstream provider docs;
+// when in doubt, prefer the smaller number so we trigger compaction
+// sooner rather than overshooting and 4xx-ing.
+const CONTEXT_WINDOWS: Record<string, number> = {
+  'claude-opus-4-7': 200_000,
+  'claude-opus-4-7[1m]': 1_000_000,
+  'claude-sonnet-4-6': 1_000_000,
+  'claude-haiku-4-5': 200_000,
+  'claude-haiku-4-5-20251001': 200_000,
+  'gpt-5.4': 200_000,
+  'gpt-5.4-mini': 128_000,
+  'deepseek-chat': 128_000,
+  'deepseek-reasoner': 64_000,
+  'kimi-k2.6': 200_000,
+  'qwen-coder-plus': 128_000,
+  'gemini-3-pro-preview': 2_000_000,
+};
+
+/** Look up the (approximate) context window for a model slug. Falls
+ *  back to a conservative 200k when we don't know the model — the
+ *  indicator stays informative without claiming a window we can't
+ *  guarantee. */
+export function contextWindowFor(slug: string): number {
+  return CONTEXT_WINDOWS[slug] ?? 200_000;
+}

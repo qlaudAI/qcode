@@ -429,6 +429,14 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
           workspace: env.workspace,
           tools: env.tools,
           rg: env.rg,
+          git: env.git
+            ? {
+                branch: env.git.branch,
+                dirty: env.git.dirty,
+                recent_commits: env.git.recentCommits,
+                remote: env.git.remote,
+              }
+            : null,
         }
       : undefined,
   };

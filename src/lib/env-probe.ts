@@ -32,6 +32,23 @@ export type EnvSnapshot = {
   /** Where ripgrep came from. 'sidecar' = bundled with qcode;
    *  'system' = user's PATH; null = neither (slow JS walker active). */
   rg: 'sidecar' | 'system' | null;
+  /** Git context for the workspace, when it's a git repo. Captured
+   *  once per session (cached); stale only matters if the user
+   *  switches branches mid-session — they can hit /reset to refresh. */
+  git: {
+    branch: string;
+    /** True when there are uncommitted changes (`git status --porcelain`
+     *  returned anything). The agent uses this to decide whether to
+     *  warn before destructive operations or recommend committing
+     *  first. */
+    dirty: boolean;
+    /** Last 3 commit subject lines, newest first. Gives the model
+     *  recent-context awareness without bloating the prompt. */
+    recentCommits: string[];
+    /** `git remote get-url origin` value when present — lets the
+     *  model link issues / PRs to the right repo without asking. */
+    remote: string | null;
+  } | null;
 };
 
 const PROBES = [
@@ -114,7 +131,51 @@ async function doProbe(workspace: string): Promise<EnvSnapshot> {
   }
 
   const rg = await ripgrepSource();
-  return { platform, arch, osVersion, workspace, tools, rg };
+  const git = isTauri() ? await probeGit(workspace) : null;
+  return { platform, arch, osVersion, workspace, tools, rg, git };
+}
+
+/** Probe git context in a single pipelined bash call so the cost is
+ *  one round-trip, not four. Sentinels separate each probe's output
+ *  so we attribute lines correctly even when one of them errors out
+ *  (e.g. no remote configured). Returns null when the workspace
+ *  isn't a git repo. */
+async function probeGit(
+  workspace: string,
+): Promise<EnvSnapshot['git']> {
+  const cmd = [
+    'git rev-parse --is-inside-work-tree 2>/dev/null || echo NOT_GIT',
+    'echo __QCODE_GIT_BRANCH__',
+    'git branch --show-current 2>/dev/null',
+    'echo __QCODE_GIT_DIRTY__',
+    'git status --porcelain 2>/dev/null | head -1',
+    'echo __QCODE_GIT_LOG__',
+    'git log -3 --pretty=format:%s 2>/dev/null',
+    'echo __QCODE_GIT_REMOTE__',
+    'git remote get-url origin 2>/dev/null || echo',
+  ].join('\n');
+  let stdout: string;
+  try {
+    const r = await runBashSession({ workspace, command: cmd, timeoutMs: 5_000 });
+    stdout = r.stdout;
+  } catch {
+    return null;
+  }
+  if (!/__QCODE_GIT_BRANCH__/.test(stdout)) return null;
+  const head = stdout.split('__QCODE_GIT_BRANCH__')[0] ?? '';
+  if (head.includes('NOT_GIT')) return null;
+
+  const after = stdout.split('__QCODE_GIT_BRANCH__')[1] ?? '';
+  const [branchSection, dirtySection, logSection, remoteSection] =
+    after.split(/__QCODE_GIT_DIRTY__|__QCODE_GIT_LOG__|__QCODE_GIT_REMOTE__/);
+  const branch = (branchSection ?? '').trim() || 'HEAD';
+  const dirty = !!(dirtySection ?? '').trim();
+  const recentCommits = (logSection ?? '')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s && !s.startsWith('__'));
+  const remote = ((remoteSection ?? '').trim() || null) as string | null;
+  return { branch, dirty, recentCommits, remote };
 }
 
 /** Compose the system-prompt section. Returns empty string when the
@@ -154,6 +215,21 @@ export function envSystemSection(env: EnvSnapshot | null): string {
     lines.push('ripgrep: bundled (use freely for fast file search via grep/glob)');
   } else if (env.rg === 'system') {
     lines.push('ripgrep: system (fast file search active)');
+  }
+
+  if (env.git) {
+    const gitBits: string[] = [`branch ${env.git.branch}`];
+    if (env.git.dirty) gitBits.push('uncommitted changes present');
+    else gitBits.push('clean working tree');
+    if (env.git.remote) gitBits.push(`origin ${env.git.remote}`);
+    lines.push(`Git: ${gitBits.join(' · ')}`);
+    if (env.git.recentCommits.length > 0) {
+      lines.push('Recent commits:');
+      for (const c of env.git.recentCommits) lines.push(`  · ${c}`);
+    }
+    lines.push(
+      'Git practice: when the user asks to "commit", "ship", or "push": stage with `git add <files>` (NOT `-A` — avoid sweeping in untracked secrets), write a present-tense subject under 72 chars, body in imperative voice. Match the recent-commit style above. Use `git status` + `git diff --stat` to verify scope before committing. NEVER force-push without explicit ask. NEVER `git commit --amend` on already-pushed commits unless the user confirms.',
+    );
   }
 
   return `\n\n## Environment\n${lines.join('\n')}`;

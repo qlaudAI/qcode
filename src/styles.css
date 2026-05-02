@@ -42,4 +42,21 @@
     -webkit-app-region: no-drag;
     app-region: no-drag;
   }
+  /* Soft fade+slide for the rotating one-liners that show up under
+     the typing dots after 6s. The component re-keys on phase
+     change, which restarts the animation each time the quip
+     swaps — gentle ambient motion, not attention-grabbing. */
+  .qcode-quip {
+    animation: qcode-quip-in 500ms ease-out;
+  }
+  @keyframes qcode-quip-in {
+    from {
+      opacity: 0;
+      transform: translateY(2px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
 }

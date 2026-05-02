@@ -3,6 +3,8 @@ import {
   AlertCircle,
   ArrowUp,
   BookOpen,
+  Check,
+  ChevronDown,
   Download,
   FileText,
   FolderOpen,
@@ -31,7 +33,7 @@ import {
   type AttachedText,
 } from '../lib/uploads';
 import { getProjectMemory, type ProjectMemory } from '../lib/memory';
-import { MODELS } from '../lib/models';
+import { MODELS, contextWindowFor } from '../lib/models';
 import { planToAgentHandoff, setLastMode } from '../lib/mode-tracking';
 import { getSettings } from '../lib/settings';
 import type { ContentBlock, Message } from '../lib/qlaud-client';
@@ -561,6 +563,7 @@ export function ChatSurface({
                   summarizedThroughSeq={compaction.summarizedThroughSeq}
                 />
               )}
+              <TodoListPanel blocks={blocks} />
               {blocks.map((b, i) => (
                 <BlockRow
                   key={i}
@@ -595,6 +598,13 @@ export function ChatSurface({
         workspaceName={workspaceName}
         branch={branch}
         mode={mode}
+        // Latest usage block's inputTokens is the closest proxy for
+        // "current conversation size" — it's what the model just
+        // received (history + system + this turn). Show against the
+        // model's context window so the user sees headroom shrink
+        // and knows when to /compact or start a new chat.
+        contextUsed={latestInputTokens(blocks)}
+        contextMax={contextWindowFor(model)}
         onSend={send}
         onStop={stop}
         busy={busy}
@@ -1027,6 +1037,10 @@ function BlockRow({
     );
   }
   if (block.type === 'tool') {
+    // todo_write is rendered by the sticky TodoListPanel above the
+    // message stream — no per-block card. Hide it here so the user
+    // sees one canonical source of truth, not a tool log + a panel.
+    if (block.call.name === 'todo_write') return null;
     return (
       <div className="flex pl-10">
         <div className="flex-1">
@@ -1186,12 +1200,77 @@ function Avatar() {
   );
 }
 
+// Curated programmer one-liners. Tasteful, single-line, dev-tone.
+// No vendor jokes, no cruelty, no inside-baseball that requires a
+// CS degree. Order is shuffled per session so the same joke doesn't
+// always greet the user first.
+const THINKING_QUIPS = [
+  'Compiling neurons…',
+  'Asking the rubber duck for a second opinion.',
+  '99 little bugs in the code, take one down, patch it around — 117 little bugs in the code.',
+  'Counting semicolons. There are too many.',
+  'Doing tabs vs. spaces in my head. It\u2019s tabs.',
+  'Looking up "is it Friday yet?" — no.',
+  'Reading the docs. (For real this time.)',
+  '`git blame`-ing past me.',
+  'Pretending I read the spec.',
+  'Reticulating splines.',
+  'Pair-programming with my doubts.',
+  'It\u2019s probably a cache issue. It\u2019s always a cache issue.',
+  'Convincing the linter we\u2019re friends.',
+  'Negotiating with the type system.',
+  'Searching Stack Overflow archives like it\u2019s 2014.',
+  'There are only two hard things — naming things, and naming things.',
+  'Yes, it works on my machine.',
+];
+
+function shuffled<T>(arr: readonly T[]): T[] {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j]!, a[i]!];
+  }
+  return a;
+}
+
+// Animated typing-dots, plus a light one-liner that fades in only
+// after 6s of silence (so fast turns never see it). Rotates every
+// 5s for as long as the agent is still thinking. Jokes are ambient
+// — they're the side-character, not the headliner. Cap visible
+// length so a long quip doesn't reflow the bubble.
 function TypingDots() {
+  const [phase, setPhase] = useState(0);
+  const [showQuip, setShowQuip] = useState(false);
+  const quipsRef = useRef<string[]>(shuffled(THINKING_QUIPS));
+
+  useEffect(() => {
+    const startTimer = setTimeout(() => setShowQuip(true), 6_000);
+    const rotateTimer = setInterval(
+      () => setPhase((p) => (p + 1) % quipsRef.current.length),
+      5_000,
+    );
+    return () => {
+      clearTimeout(startTimer);
+      clearInterval(rotateTimer);
+    };
+  }, []);
+
+  const quip = quipsRef.current[phase] ?? '';
   return (
-    <div className="flex h-5 items-center gap-1">
-      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:0ms]" />
-      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:200ms]" />
-      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:400ms]" />
+    <div className="flex flex-col gap-1.5">
+      <div className="flex h-5 items-center gap-1">
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:0ms]" />
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:200ms]" />
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:400ms]" />
+      </div>
+      {showQuip && (
+        <span
+          key={phase}
+          className="qcode-quip max-w-md text-[11.5px] italic leading-snug text-muted-foreground/70"
+        >
+          {quip}
+        </span>
+      )}
     </div>
   );
 }
@@ -1338,10 +1417,204 @@ function CompactionIndicator({
   );
 }
 
+// Latest input-token count across the blocks list — represents the
+// most recent "what the model just received" snapshot, which is the
+// best proxy for current conversation size given that we don't get
+// a separate "context length" signal from the upstream API.
+function latestInputTokens(blocks: RenderBlock[]): number {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    if (b?.type === 'usage' && b.inputTokens > 0) return b.inputTokens;
+  }
+  return 0;
+}
+
 function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
   return `${Math.round(n / 1000)}k`;
+}
+
+// Compact context-usage indicator. Shows token count vs the model's
+// context window, with a 4-segment progress bar that escalates from
+// muted → primary → amber → destructive as the conversation fills.
+// At 80%+ we surface "compact" hint copy so the user knows what to
+// say to qcode to free up room.
+function ContextUsageChip({ used, max }: { used: number; max: number }) {
+  const pct = Math.min(100, Math.round((used / max) * 100));
+  const tone =
+    pct >= 90
+      ? 'text-destructive border-destructive/30 bg-destructive/5'
+      : pct >= 75
+        ? 'text-amber-700 dark:text-amber-400 border-amber-500/30 bg-amber-500/10'
+        : 'text-foreground/80 border-border/60 bg-background/60';
+  const barTone =
+    pct >= 90 ? 'bg-destructive' : pct >= 75 ? 'bg-amber-500' : 'bg-primary';
+  return (
+    <span
+      className={cn(
+        'hidden items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10.5px] font-medium tabular-nums sm:inline-flex',
+        tone,
+      )}
+      title={`Conversation context: ${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%)${pct >= 75 ? ' — say "compact this" to summarize older turns' : ''}`}
+    >
+      <span className="inline-flex h-1 w-10 overflow-hidden rounded-full bg-muted">
+        <span
+          className={cn('h-full transition-all duration-300', barTone)}
+          style={{ width: `${pct}%` }}
+        />
+      </span>
+      {formatTokens(used)} / {formatTokens(max)}
+    </span>
+  );
+}
+
+// Sticky checklist panel rendered above the chat blocks. The latest
+// `todo_write` tool call's input is the canonical state — we walk
+// the rendered blocks in reverse, find the most recent one, and
+// project it. No separate store; the message history IS the truth.
+//
+// The panel auto-collapses when every item is `completed` so a
+// finished checklist doesn't permanently eat vertical space; the
+// summary stays visible (e.g. "5/5 done") so the user knows they
+// landed on a clean slate.
+type TodoItem = {
+  content: string;
+  activeForm: string;
+  status: 'pending' | 'in_progress' | 'completed';
+};
+
+function TodoListPanel({ blocks }: { blocks: RenderBlock[] }) {
+  const [collapsedManually, setCollapsedManually] = useState<boolean | null>(
+    null,
+  );
+
+  // Walk blocks in reverse; first todo_write tool call wins.
+  let latest: TodoItem[] | null = null;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    if (b?.type !== 'tool' || b.call.name !== 'todo_write') continue;
+    const input = b.call.input as { todos?: unknown };
+    if (Array.isArray(input?.todos)) {
+      latest = input.todos.filter(
+        (t): t is TodoItem =>
+          !!t &&
+          typeof t === 'object' &&
+          typeof (t as TodoItem).content === 'string',
+      );
+      break;
+    }
+  }
+  if (!latest || latest.length === 0) return null;
+
+  const done = latest.filter((t) => t.status === 'completed').length;
+  const total = latest.length;
+  const allDone = done === total;
+  const inProgress = latest.find((t) => t.status === 'in_progress');
+  // Auto-collapse on completion, expand on first non-completed item.
+  // User toggle (manual) overrides until the next list change resets it.
+  const autoCollapsed = allDone;
+  const collapsed = collapsedManually ?? autoCollapsed;
+
+  return (
+    <div className="rounded-xl border border-border/60 bg-background/70 px-4 py-3 backdrop-blur-sm">
+      <button
+        type="button"
+        onClick={() => setCollapsedManually(!collapsed)}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <span
+          className={cn(
+            'inline-flex h-1.5 w-1.5 shrink-0 rounded-full',
+            allDone
+              ? 'bg-emerald-500'
+              : inProgress
+                ? 'bg-primary animate-pulse'
+                : 'bg-muted-foreground/40',
+          )}
+          aria-hidden
+        />
+        <span className="text-[12px] font-medium text-foreground">
+          {allDone
+            ? 'All done'
+            : inProgress
+              ? inProgress.activeForm
+              : 'Plan'}
+        </span>
+        <span className="text-[11px] tabular-nums text-muted-foreground">
+          {done}/{total}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          {/* Compact progress bar — total width tracks completion %. */}
+          <div className="hidden h-1 w-24 overflow-hidden rounded-full bg-muted sm:block">
+            <div
+              className={cn(
+                'h-full rounded-full transition-all duration-300',
+                allDone ? 'bg-emerald-500' : 'bg-primary',
+              )}
+              style={{ width: `${(done / total) * 100}%` }}
+            />
+          </div>
+          <ChevronDown
+            className={cn(
+              'h-3.5 w-3.5 text-muted-foreground transition-transform',
+              collapsed && '-rotate-90',
+            )}
+          />
+        </div>
+      </button>
+      {!collapsed && (
+        <ul className="mt-3 space-y-1.5">
+          {latest.map((t, i) => (
+            <li key={i} className="flex items-start gap-2 text-[12.5px]">
+              <TodoStatusIcon status={t.status} />
+              <span
+                className={cn(
+                  'flex-1 leading-snug transition-colors',
+                  t.status === 'completed'
+                    ? 'text-muted-foreground line-through decoration-muted-foreground/40'
+                    : t.status === 'in_progress'
+                      ? 'text-foreground font-medium'
+                      : 'text-foreground/85',
+                )}
+              >
+                {t.status === 'in_progress' ? t.activeForm : t.content}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function TodoStatusIcon({ status }: { status: TodoItem['status'] }) {
+  if (status === 'completed') {
+    return (
+      <span
+        className="mt-1 grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+        aria-hidden
+      >
+        <Check className="h-2.5 w-2.5" />
+      </span>
+    );
+  }
+  if (status === 'in_progress') {
+    return (
+      <span
+        className="mt-1 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center"
+        aria-hidden
+      >
+        <span className="h-2 w-2 animate-pulse rounded-full bg-primary" />
+      </span>
+    );
+  }
+  return (
+    <span
+      className="mt-1 h-3.5 w-3.5 shrink-0 rounded-full border border-muted-foreground/30"
+      aria-hidden
+    />
+  );
 }
 
 function EmptyState({
@@ -1562,6 +1835,8 @@ function Composer({
   workspaceName,
   branch,
   mode,
+  contextUsed,
+  contextMax,
   onSend,
   onStop,
   busy,
@@ -1590,6 +1865,12 @@ function Composer({
   branch?: string | null;
   /** Active mode — drives the secondary pill ("Plan" / "Agent"). */
   mode?: 'agent' | 'plan';
+  /** Latest input-token count from the usage stream. Drives the
+   *  context-usage chip ("32k / 200k · 16%") so users see how much
+   *  headroom remains before auto-compaction kicks in. */
+  contextUsed?: number;
+  /** Active model's context window in tokens. */
+  contextMax?: number;
   onSend: (v: string) => void;
   onStop: () => void;
   busy: boolean;
@@ -1934,6 +2215,14 @@ function Composer({
                     >
                       {modelLabel}
                     </span>
+                    {contextUsed != null &&
+                      contextMax != null &&
+                      contextUsed > 0 && (
+                        <ContextUsageChip
+                          used={contextUsed}
+                          max={contextMax}
+                        />
+                      )}
                     <span className="hidden text-[10.5px] text-muted-foreground sm:inline">
                       ⏎ to send · @ files
                     </span>

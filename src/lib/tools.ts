@@ -151,6 +151,39 @@ export const READ_TOOLS: ToolDef[] = [
   },
 ];
 
+// `todo_write` is the agent's persistent checklist. The latest tool
+// call's `todos` input IS the current state — we render it as a
+// sticky panel above the chat. No filesystem dispatch needed; the
+// executor just acks. Persistence rides for free on the message
+// history (qlaud thread is canonical), so the panel survives reload
+// and cross-device sync without a separate store.
+export const TODO_TOOL: ToolDef = {
+  name: 'todo_write',
+  description:
+    "Maintain a structured checklist of work for the current task. Call this tool whenever you start a non-trivial multi-step task, when you finish a step, when you discover new sub-tasks, or when the user changes scope. Always pass the FULL list (not a delta) — the latest call replaces the prior list.\n\nWhen to use:\n- Tasks with 3+ distinct steps or actions\n- Multi-file refactors, new feature implementations, anything that branches\n- After receiving new instructions — capture them as todos\n- Mark items completed IMMEDIATELY after finishing (don't batch — the user sees the update live)\n- Exactly ONE item should be in_progress at a time\n\nWhen NOT to use:\n- Single-step tasks (read one file, run one command, answer one question)\n- Purely conversational replies\n\nStatus values: pending (not started), in_progress (working on now), completed (done).",
+  input_schema: {
+    type: 'object',
+    properties: {
+      todos: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            content: { type: 'string' },
+            activeForm: { type: 'string' },
+            status: {
+              type: 'string',
+              enum: ['pending', 'in_progress', 'completed'],
+            },
+          },
+          required: ['content', 'activeForm', 'status'],
+        },
+      },
+    },
+    required: ['todos'],
+  },
+};
+
 // `task` belongs to neither READ_TOOLS nor WRITE_TOOLS — it's a
 // meta-tool that delegates work to a child agent. The child runs
 // with the same workspace + tools (minus task itself, no recursion)
@@ -372,6 +405,7 @@ export const ALL_TOOLS = [
   ...BROWSER_TOOLS,
   ...WRITE_TOOLS,
   TASK_TOOL,
+  TODO_TOOL,
 ];
 
 /** Subagent-mode tool list. The child agent gets every tool the
@@ -448,6 +482,12 @@ export async function executeTool(
       case 'browser_type':
       case 'browser_console':
         return await runBrowser(call);
+      case 'todo_write':
+        // Pure ack — the rendering layer reads the call's input
+        // directly from the message history. We return a tiny
+        // confirmation so the model sees the call landed and can
+        // continue without confusion.
+        return ok(call.id, 'Todo list updated.');
       default:
         return err(call.id, `Unknown tool: ${call.name}`);
     }
