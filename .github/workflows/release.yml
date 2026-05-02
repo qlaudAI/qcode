@@ -155,6 +155,41 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.nsis.zip
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.nsis.zip.sig
 
+  # Tell the qlaud edge worker to rebuild its release manifest in KV.
+  # The dashboard's /qcode/download/* and /qcode/release-channels/*
+  # routes both read from that manifest, so this is what makes a new
+  # version visible to users (humans clicking download + existing
+  # installs auto-updating) within seconds of the build job finishing.
+  # Without this hook the manifest still refreshes hourly via the cron
+  # in apps/edge — this just shortens the window.
+  notify-qlaud:
+    name: Refresh qlaud release manifest
+    runs-on: ubuntu-22.04
+    needs: build
+    if: success()
+    steps:
+      - name: POST /webhooks/qcode-release-refresh
+        env:
+          QCODE_REFRESH_TOKEN: ${{ secrets.QCODE_REFRESH_TOKEN }}
+        run: |
+          if [ -z "$QCODE_REFRESH_TOKEN" ]; then
+            echo "QCODE_REFRESH_TOKEN secret not set — skipping. Add it under repo secrets to enable instant manifest refresh." >&2
+            exit 0
+          fi
+          # Don't fail the workflow if the refresh hook is unreachable —
+          # the hourly cron will pick up the release within an hour.
+          # We still want a clear log line either way.
+          status=$(curl -sS -o /tmp/refresh.json -w '%{http_code}' \
+            -X POST \
+            -H "authorization: Bearer $QCODE_REFRESH_TOKEN" \
+            -H "content-type: application/json" \
+            https://api.qlaud.ai/webhooks/qcode-release-refresh) || status="000"
+          echo "refresh status: $status"
+          cat /tmp/refresh.json || true
+          if [ "$status" != "200" ]; then
+            echo "::warning::Manifest refresh returned $status — relying on the hourly cron."
+          fi
+
 # ─── First-release checklist ──────────────────────────────────────
 #
 # 1. Generate a Tauri signing key pair on your machine:
