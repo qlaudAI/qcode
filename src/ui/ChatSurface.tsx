@@ -56,7 +56,7 @@ import { Markdown } from './Markdown';
 import { MentionMenu, getMentionResults } from './MentionMenu';
 import { ToolCallCard, type ToolCallView } from './ToolCallCard';
 import { RightRail, type RightRailView } from './RightRail';
-import { loadEarlierMessages } from '../lib/queries';
+import { invalidateThreadMessages, loadEarlierMessages } from '../lib/queries';
 
 // Each "block" rendered in the chat is the smallest UI unit. The
 // agent loop emits a stream of events that `handleEvent` translates
@@ -257,13 +257,14 @@ export function ChatSurface({
   const messagesQuery = useThreadMessagesQuery(busy ? null : threadId);
   const lastLoadedRef = useRef<string | null>(null);
   // Thread-switch invalidator. If a thread switch happens WHILE we
-  // were busy streaming, abort the in-flight stream + bump the run
-  // id so any late events become no-ops. When idle, switching is
-  // free — just re-runs the message-load effect below for the new
-  // threadId. Gates on `busy`, not on lastSendThreadRef, because
-  // the latter sticks at the last-sent thread forever and was
-  // incorrectly blocking switches once the user had ever sent
-  // anything (symptom: "tabs/sessions locked after first send").
+  // were busy streaming, abort the local SSE listener + bump the
+  // run id so any late events become no-ops. The qlaud edge worker
+  // keeps the upstream call alive via waitUntil, so the turn still
+  // finishes + persists server-side — invalidate the abandoned
+  // thread's messages query so a return visit pulls the canonical
+  // history (including the now-finished response). Without this,
+  // staleTime:Infinity on the messages cache means switching back
+  // shows the pre-send empty state forever.
   const lastThreadIdRef = useRef(threadId);
   useEffect(() => {
     const prev = lastThreadIdRef.current;
@@ -273,6 +274,15 @@ export function ChatSurface({
       abortRef.current?.abort();
       rejectAllApprovals();
       setBusy(false);
+      if (prev) {
+        // Mark the abandoned thread's history as stale. Also reset
+        // lastLoadedRef for that thread so the message-load effect
+        // re-runs when the user comes back. Without resetting it
+        // would still match (we set it = id during send) and the
+        // load would silently bail.
+        void invalidateThreadMessages(prev);
+        if (lastLoadedRef.current === prev) lastLoadedRef.current = null;
+      }
     }
   }, [threadId, busy]);
 
