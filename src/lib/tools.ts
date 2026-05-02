@@ -488,6 +488,16 @@ const BASH_SAFE_PATTERNS: RegExp[] = [
   /^\s*(ls|cat|head|tail|grep|find|which|where|pwd|echo|stat|file|wc|sort|uniq|cut|awk|sed|tree|du|df|ps|env|printenv|date)\b/,
   // Git read-only ops (status, log, diff, show, branch listing, etc.)
   /^\s*git\s+(status|log|diff|show|branch|remote|ls-files|blame|describe|reflog|stash\s+list|tag\s+(-l|--list)?|fetch|config\s+(?!--global))/,
+  // Git reversible workspace ops — checkout/switch refuse to clobber
+  // dirty state by default, stash is the user-recoverable save, restore
+  // is per-file and only undoes uncommitted changes. Excludes any `--`
+  // long flag (negative lookahead) so destructive forms like
+  // `git checkout -- file` or `git checkout --force` still hit the
+  // approval gate. Commit/push/merge/rebase/reset/cherry-pick/clean
+  // intentionally NOT included — those mutate history or destroy data.
+  /^\s*git\s+(checkout|switch)(\s+(?!--)\S+)+\s*$/,
+  /^\s*git\s+stash(\s+(push|pop|apply|drop|show))?\s*$/,
+  /^\s*git\s+restore\s+(?!--)\S+\s*$/,
   // Package-manager safe ops — install/test/build/lint/typecheck/format/dev are workspace-scoped
   /^\s*(pnpm|npm|yarn|bun)\s+(install|i|add|remove|test|t|build|run|dev|start|typecheck|tc|lint|format|fmt|exec|x|outdated|why|list|ls|info|view|audit|update|upgrade)\b/,
   // Runtime version checks
