@@ -57,6 +57,11 @@ import { MentionMenu, getMentionResults } from './MentionMenu';
 import { ToolCallCard, type ToolCallView } from './ToolCallCard';
 import { RightRail, type RightRailView } from './RightRail';
 import { invalidateThreadMessages, loadEarlierMessages } from '../lib/queries';
+import {
+  clearInFlight,
+  isInFlight,
+  markInFlight,
+} from '../lib/in-flight';
 
 // Each "block" rendered in the chat is the smallest UI unit. The
 // agent loop emits a stream of events that `handleEvent` translates
@@ -510,6 +515,12 @@ export function ChatSurface({
       // disappeared." The streamed blocks ARE canonical; we don't
       // need to round-trip the server to learn what we just rendered.
       lastLoadedRef.current = id;
+      // Track this send as in-flight so if the user navigates away
+      // mid-stream, switching back triggers a poll until qlaud's
+      // server-side persisted assistant turn shows up. Cleared on
+      // success in the finally block; left in place if the user
+      // abandons (server keeps running via waitUntil).
+      markInFlight(id);
       // Thread changed (user navigated) between send press and the
       // thread-id resolution. Don't keep going — the user's looking
       // at a different conversation.
@@ -603,6 +614,14 @@ export function ChatSurface({
         },
       ]);
     } finally {
+      // If this run was superseded (user switched threads or sent a
+      // new turn), the server is still working on the abandoned
+      // thread. Leave it in the in-flight set so a return visit
+      // polls until the assistant turn lands. If the run completed
+      // normally, clear it.
+      if (runId === activeRunIdRef.current && lastSendThreadRef.current) {
+        clearInFlight(lastSendThreadRef.current);
+      }
       setBusy(false);
       abortRef.current = null;
       // Drop any leftover resolvers — covers the case where streaming
@@ -644,6 +663,9 @@ export function ChatSurface({
             <div className="flex flex-col gap-5">
               {messagesQuery.data?.hasMore && threadId && (
                 <LoadEarlierButton threadId={threadId} />
+              )}
+              {threadId && !busy && isInFlight(threadId) && (
+                <ResumeIndicator />
               )}
               {compaction && (
                 <CompactionIndicator
@@ -1491,6 +1513,22 @@ function SubagentBlock({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// Indicator shown when the user lands on a thread that has an
+// in-flight send running server-side. qlaud's edge worker is still
+// processing the upstream call (waitUntil keeps it alive even
+// though we disconnected); the messages query is polling every
+// 2s and will swap this for the canonical assistant turn the
+// moment it lands.
+function ResumeIndicator() {
+  return (
+    <div className="mx-auto inline-flex items-center gap-2 rounded-full border border-border/60 bg-background/70 px-3 py-1.5 text-[11px] text-muted-foreground">
+      <span className="inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+      Still working on the previous turn — the response will appear
+      here when it lands.
     </div>
   );
 }

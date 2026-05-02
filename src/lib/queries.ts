@@ -22,6 +22,11 @@ import {
 import { fetchAccount, type AccountInfo } from './account';
 import { fetchBalance, type BalanceInfo } from './billing';
 import {
+  clearInFlight,
+  hasLanded,
+  isInFlight,
+} from './in-flight';
+import {
   createRemoteThread,
   deleteRemoteThread,
   getRemoteThreadMessages,
@@ -138,14 +143,42 @@ export function useThreadsQuery(opts: {
 /** Per-thread history. The cache lives in Query (not localStorage):
  *  threads can be long, blobs are large, and messages compact server-
  *  side anyway. staleTime is high — once we've loaded a thread, we
- *  trust it for the session unless explicitly invalidated (after
- *  send completes via onTurnLanded). */
+ *  trust it for the session unless explicitly invalidated.
+ *
+ *  refetchInterval kicks in when the thread is in-flight (a send
+ *  was started + then abandoned by the user navigating away). The
+ *  qlaud edge worker keeps the upstream call alive via waitUntil
+ *  and persists the assistant turn server-side; we poll the
+ *  messages endpoint every 2s until that turn lands, at which
+ *  point hasLanded() returns true and clearInFlight() stops the
+ *  polling. From the user's perspective: come back to a thread
+ *  where you abandoned a slow turn, see the finished answer
+ *  appear within a few seconds. */
 export function useThreadMessagesQuery(threadId: string | null) {
   return useQuery({
     queryKey: threadId ? qk.threadMessages(threadId) : ['threads', '_none_'],
     enabled: !!threadId,
     queryFn: () => getRemoteThreadMessages(threadId as string),
     staleTime: Infinity, // server-side compaction owns freshness
+    refetchInterval: (query) => {
+      if (!threadId || !isInFlight(threadId)) return false;
+      // Sample the latest data — if the assistant turn has landed,
+      // clear the in-flight marker and stop polling. Otherwise
+      // poll every 2s up to the 2-minute timeout (managed in
+      // isInFlight via startedAt comparison).
+      const data = query.state.data;
+      if (data) {
+        const messages = data.messages.map((m, i) => ({
+          role: m.role,
+          seq: i, // synthetic — we don't track per-message seq client-side
+        }));
+        if (hasLanded(threadId, messages)) {
+          clearInFlight(threadId);
+          return false;
+        }
+      }
+      return 2_000;
+    },
   });
 }
 
