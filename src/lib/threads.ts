@@ -27,7 +27,7 @@ export type ThreadSummary = {
   updatedAt: number;
   /** Workspace path the thread was scoped to at creation time. Empty
    *  / undefined = pure chat (no codebase). The sidebar splits
-   *  threads into "Projects" (has workspacePath) and "Chats" using
+   *  threads into "Workspaces" (has workspacePath) and "Chats" using
    *  this field. Persisted both locally and in the qlaud thread's
    *  metadata so it survives reinstalls. */
   workspacePath?: string;

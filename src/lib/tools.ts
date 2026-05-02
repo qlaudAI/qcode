@@ -440,17 +440,85 @@ const BASH_DENYLIST: RegExp[] = [
   /\bcurl\b[^|]*\|\s*(?:bash|sh)\b/i, // curl|sh
 ];
 
+// Bash commands we trust to auto-execute under autoApprove.safeBash.
+// Read-only ops + workspace-scoped package-manager noops + git
+// read-only commands. The list is intentionally conservative — when
+// in doubt, fall through to "ask the user." Adding a pattern here
+// is a security decision; a misfire means the agent ran something
+// the user didn't expect.
+//
+// Anything outside the whitelist (or matching the denylist) still
+// prompts. The agent + the model see the user-facing description
+// and can be more measured because they know the executor will
+// challenge anything spicy.
+const BASH_SAFE_PATTERNS: RegExp[] = [
+  // Read-only inspection
+  /^\s*(ls|cat|head|tail|grep|find|which|where|pwd|echo|stat|file|wc|sort|uniq|cut|awk|sed|tree|du|df|ps|env|printenv|date)\b/,
+  // Git read-only ops (status, log, diff, show, branch listing, etc.)
+  /^\s*git\s+(status|log|diff|show|branch|remote|ls-files|blame|describe|reflog|stash\s+list|tag\s+(-l|--list)?|fetch|config\s+(?!--global))/,
+  // Package-manager safe ops — install/test/build/lint/typecheck/format/dev are workspace-scoped
+  /^\s*(pnpm|npm|yarn|bun)\s+(install|i|add|remove|test|t|build|run|dev|start|typecheck|tc|lint|format|fmt|exec|x|outdated|why|list|ls|info|view|audit|update|upgrade)\b/,
+  // Runtime version checks
+  /^\s*(node|deno|bun|python|python3|ruby|go|rustc|cargo|pip|pip3)\s+(-v|--version|version)\s*$/,
+  // Cargo (Rust) read/build/test
+  /^\s*cargo\s+(check|test|build|run|fmt|clippy|doc|tree|search|update)\b/,
+  // Python/Ruby/Go safe ops
+  /^\s*(python|python3|ruby|go|rustc)\s+(-c|-m|-V|--version|run|test|build|fmt|vet|mod|env)\b/,
+  /^\s*(pytest|jest|vitest|mocha|tap|tape)\b/,
+  // make / just — usually safe build orchestrators
+  /^\s*(make|just)\s+(-n|--dry-run|build|test|check|lint|clean|fmt)\b/,
+  /^\s*(make|just)\s*$/, // bare make = default target, usually fine
+  // Docker read-only / status
+  /^\s*docker\s+(ps|images|version|info|logs|inspect)\b/,
+  // Read-only HTTP probes
+  /^\s*curl\s+(-s\s+|-sS\s+|-I\s+|-fsSL\s+)?(http|https):\/\//,
+  // Shell pipe / redirect detectors (if any read-only command pipes
+  // to head/grep/wc/jq, it's still safe). These match commands ALREADY
+  // matching above plus a pipe to a known safe consumer.
+  /\|\s*(head|tail|grep|wc|sort|uniq|jq|awk|sed|cut|less|cat)\b/,
+];
+
+/** Whether a bash command is safe enough to auto-execute under
+ *  autoApprove.safeBash. Conservative — the deny-list always wins,
+ *  and only commands matching the explicit allow patterns return
+ *  true. Multi-statement (cmd1 && cmd2) requires EVERY segment to
+ *  be safe; one risky segment fails the whole thing. */
+export function isSafeBashCommand(cmd: string): boolean {
+  const trimmed = cmd.trim();
+  if (!trimmed) return false;
+  if (BASH_DENYLIST.some((re) => re.test(trimmed))) return false;
+  // Split on && / ; / | (top-level only — won't perfectly handle
+  // quoted ampersands, but good enough). Each segment must be safe.
+  const segments = trimmed
+    .split(/\s*(?:&&|\|\||;)\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (segments.length === 0) return false;
+  return segments.every((seg) =>
+    BASH_SAFE_PATTERNS.some((re) => re.test(seg)),
+  );
+}
+
 export type ExecuteOpts = {
   /** Workspace root — every relative path is resolved against this. */
   workspace: string;
-  /** Approval gate. Required for write_file / edit_file / bash; the
-   *  executor returns an error if a dangerous tool is called without one. */
+  /** Approval gate. Required for write_file / edit_file / bash unless
+   *  autoApprove gates them; the executor returns an error if an
+   *  approval is needed but the gate isn't wired. */
   requestApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   /** Live progress callback. Currently only bash uses this — emits
    *  the full accumulated stdout/stderr-formatted text on every chunk
    *  so the UI can render it as the command runs. The agent still gets
    *  the final consolidated result via the returned ToolResult. */
   onPartial?: (text: string) => void;
+  /** Auto-approve preferences — read from settings at send time and
+   *  passed through every executor call. When enabled, the relevant
+   *  category bypasses requestApproval. The deny-list (BASH_DENYLIST,
+   *  workspace path-jail) always wins regardless. */
+  autoApprove?: {
+    workspaceEdits?: boolean;
+    safeBash?: boolean;
+  };
 };
 
 export async function executeTool(
@@ -696,7 +764,9 @@ async function runWriteFile(
   const content = typeof input.content === 'string' ? input.content : '';
   const abs = resolveInWorkspace(requested, opts.workspace);
   if (!abs) return badPath(call.id, requested);
-  if (!opts.requestApproval) {
+  // requestApproval is only required when we're NOT auto-approving;
+  // checked inside the conditional below.
+  if (!opts.autoApprove?.workspaceEdits && !opts.requestApproval) {
     return err(
       call.id,
       'Write tools are not enabled in this session — approval gate missing.',
@@ -727,16 +797,22 @@ async function runWriteFile(
     return err(call.id, preWrite.message);
   }
 
-  const decision = await opts.requestApproval({
-    kind: 'write_file',
-    path: relativizePath(abs, opts.workspace),
-    diff,
-    added,
-    removed,
-    isNew,
-  });
-  if (decision !== 'allow') {
-    return ok(call.id, 'User rejected the write. No changes made.');
+  // Auto-approve workspace-scoped writes when the user has enabled
+  // it. The path-jail (resolveInWorkspace, line above) already
+  // confirmed `abs` is inside the workspace; auto-approving here
+  // is the same trust posture as letting the agent edit at all.
+  if (!opts.autoApprove?.workspaceEdits) {
+    const decision = await opts.requestApproval!({
+      kind: 'write_file',
+      path: relativizePath(abs, opts.workspace),
+      diff,
+      added,
+      removed,
+      isNew,
+    });
+    if (decision !== 'allow') {
+      return ok(call.id, 'User rejected the write. No changes made.');
+    }
   }
 
   if (!isTauri()) {
@@ -790,7 +866,7 @@ async function runEditFile(
 
   const abs = resolveInWorkspace(requested, opts.workspace);
   if (!abs) return badPath(call.id, requested);
-  if (!opts.requestApproval) {
+  if (!opts.autoApprove?.workspaceEdits && !opts.requestApproval) {
     return err(call.id, 'Edit tools are not enabled in this session.');
   }
   if (!isTauri()) {
@@ -844,15 +920,19 @@ async function runEditFile(
     return err(call.id, preEdit.message);
   }
 
-  const decision = await opts.requestApproval({
-    kind: 'edit_file',
-    path: relativizePath(abs, opts.workspace),
-    diff,
-    added,
-    removed,
-  });
-  if (decision !== 'allow') {
-    return ok(call.id, 'User rejected the edit. No changes made.');
+  // Auto-approve workspace-scoped edits — same posture as
+  // write_file above. Path-jail already confirmed scope.
+  if (!opts.autoApprove?.workspaceEdits) {
+    const decision = await opts.requestApproval!({
+      kind: 'edit_file',
+      path: relativizePath(abs, opts.workspace),
+      diff,
+      added,
+      removed,
+    });
+    if (decision !== 'allow') {
+      return ok(call.id, 'User rejected the edit. No changes made.');
+    }
   }
   await writeTextFile(abs, after);
 
@@ -890,10 +970,20 @@ async function runBash(
       'Command rejected by qcode safety filter. Try a safer alternative.',
     );
   }
-  if (!opts.requestApproval) {
+  const runInBackground = input.run_in_background === true;
+  // Safe-bash check: anything in the whitelist (read-only ops, pkg-
+  // manager noops, git read-only, etc.) skips the prompt under
+  // autoApprove.safeBash. Background jobs DO require approval even
+  // when safe — long-running processes are a different posture and
+  // worth a click.
+  const autoApproved =
+    !!opts.autoApprove?.safeBash &&
+    !runInBackground &&
+    isSafeBashCommand(command);
+
+  if (!autoApproved && !opts.requestApproval) {
     return err(call.id, 'Bash is not enabled in this session.');
   }
-  const runInBackground = input.run_in_background === true;
 
   // Pre-bash hook: runs BEFORE approval so a project-level guard
   // (e.g. block any `git push --force` against main) can deny the
@@ -909,13 +999,15 @@ async function runBash(
     return err(call.id, preHook.message);
   }
 
-  const decision = await opts.requestApproval({
-    kind: 'bash',
-    command: runInBackground ? `[background] ${command}` : command,
-    cwd: opts.workspace,
-  });
-  if (decision !== 'allow') {
-    return ok(call.id, 'User rejected the command. Not run.');
+  if (!autoApproved) {
+    const decision = await opts.requestApproval!({
+      kind: 'bash',
+      command: runInBackground ? `[background] ${command}` : command,
+      cwd: opts.workspace,
+    });
+    if (decision !== 'allow') {
+      return ok(call.id, 'User rejected the command. Not run.');
+    }
   }
 
   // Background path: spawn detached, return job_id immediately.

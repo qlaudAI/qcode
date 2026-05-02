@@ -72,13 +72,16 @@ export function ToolCallCard({ call }: { call: ToolCallView }) {
   const [open, setOpenState] = useState(false);
   const Icon = ICONS[call.name] ?? Wrench;
   const summary = summarize(call);
-  // Show the output panel as soon as there's output, even mid-stream.
-  // Auto-expand on the first chunk while running so the user sees
-  // bash progress without clicking; stop auto-managing once the user
-  // toggles it themselves.
   const hasOutput = (call.output?.length ?? 0) > 0;
+  // Auto-expand DURING streaming so users see bash progress without
+  // clicking; auto-collapse once status flips to done/error to stop
+  // bash output walls dominating the chat. Errors stay open so the
+  // failure is visible. The user-toggle ref takes over the moment
+  // they click, so manual choice persists across re-renders.
   const streaming = call.status === 'running' && hasOutput;
-  const effectivelyOpen = userToggled ? open : streaming || open;
+  const errored = call.status === 'error';
+  const autoOpen = streaming || errored;
+  const effectivelyOpen = userToggled ? open : autoOpen;
   function setOpen(next: boolean) {
     setUserToggled(true);
     setOpenState(next);

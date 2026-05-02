@@ -214,6 +214,42 @@ export function SettingsDrawer({
             </p>
           </Section>
 
+          <Section title="Auto-approve">
+            <Toggle
+              label="Auto-execute workspace edits"
+              checked={settings.autoApprove.workspaceEdits}
+              onChange={(v) =>
+                update('autoApprove', { ...settings.autoApprove, workspaceEdits: v })
+              }
+            />
+            <p className="text-[11px] text-muted-foreground">
+              When on, write_file and edit_file run without asking
+              you to click <em>Allow</em> for every change. The path-
+              jail still rejects writes outside the open workspace,
+              so the trust boundary is the workspace itself.
+            </p>
+            <Toggle
+              label="Auto-execute safe shell commands"
+              checked={settings.autoApprove.safeBash}
+              onChange={(v) =>
+                update('autoApprove', { ...settings.autoApprove, safeBash: v })
+              }
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Auto-runs read-only commands ({' '}
+              <span className="font-mono">ls</span>,{' '}
+              <span className="font-mono">cat</span>,{' '}
+              <span className="font-mono">git status</span>), test/
+              build runners ({' '}
+              <span className="font-mono">pnpm install</span>,{' '}
+              <span className="font-mono">pnpm test</span>), and
+              version checks. Anything destructive (deletions,{' '}
+              <span className="font-mono">git push --force</span>,{' '}
+              <span className="font-mono">curl | sh</span>) still
+              prompts. Background jobs prompt regardless.
+            </p>
+          </Section>
+
           <Section title="Updates">
             <Toggle
               label="Auto-check for updates on launch"

@@ -170,6 +170,14 @@ export type RunAgentOpts = {
     toolUseId: string,
     request: ApprovalRequest,
   ) => Promise<ApprovalDecision>;
+  /** Auto-approve preferences forwarded to executeTool — when set,
+   *  the relevant categories (workspace edits, safe-bash whitelist)
+   *  bypass requestApproval. ChatSurface reads these from settings
+   *  at send time so toggling takes effect on the next turn. */
+  autoApprove?: {
+    workspaceEdits?: boolean;
+    safeBash?: boolean;
+  };
 };
 
 export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
@@ -295,6 +303,7 @@ export async function runAgent(opts: RunAgentOpts): Promise<Message[]> {
       const call: ToolCall = { id: tu.id, name: tu.name, input: tu.input };
       const result: ToolResult = await executeTool(call, {
         workspace: opts.workspace,
+        autoApprove: opts.autoApprove,
         requestApproval: async (req) => {
           opts.onEvent({ type: 'approval_pending', id: tu.id, request: req });
           const decision = await opts.onApproval(tu.id, req);
@@ -369,6 +378,12 @@ export type RunThreadAgentOpts = {
     toolUseId: string,
     request: ApprovalRequest,
   ) => Promise<ApprovalDecision>;
+  /** Auto-approve forwarded to executeTool. Subagents inherit the
+   *  parent's settings unless overridden. */
+  autoApprove?: {
+    workspaceEdits?: boolean;
+    safeBash?: boolean;
+  };
 };
 
 /** Anthropic-shape tool defs → the inline ClientToolDef the qlaud
@@ -530,6 +545,7 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
             signal: opts.signal,
             onEvent: opts.onEvent,
             onApproval: opts.onApproval,
+            autoApprove: opts.autoApprove,
           });
           return;
         }
@@ -568,6 +584,7 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
         try {
           const result: ToolResult = await executeTool(call, {
             workspace: opts.workspace,
+            autoApprove: opts.autoApprove,
             requestApproval: async (req) => {
               opts.onEvent({
                 type: 'approval_pending',
@@ -722,6 +739,7 @@ async function runSubagentForTask(args: {
     toolUseId: string,
     request: ApprovalRequest,
   ) => Promise<ApprovalDecision>;
+  autoApprove?: { workspaceEdits?: boolean; safeBash?: boolean };
 }): Promise<void> {
   // Tell the parent UI a subagent is starting so it can render a
   // "Subagent: <description>" card. The corresponding subagent_done
@@ -772,6 +790,7 @@ async function runSubagentForTask(args: {
       enableConnectors: args.enableConnectors,
       isSubagent: true,
       signal: args.signal,
+      autoApprove: args.autoApprove,
       onApproval: args.onApproval,
       onEvent: (e) => {
         // Stream the child's events into the parent UI, tagged so

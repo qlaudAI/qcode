@@ -570,6 +570,7 @@ export function ChatSurface({
       // at a different conversation.
       if (runId !== activeRunIdRef.current) return;
 
+      const settingsAtSend = getSettings();
       await runThreadAgent({
         threadId: id,
         model,
@@ -578,7 +579,8 @@ export function ChatSurface({
         content: userContent,
         // Read at send time so toggling the setting takes effect on
         // the very next turn without a remount.
-        enableConnectors: getSettings().enableConnectors,
+        enableConnectors: settingsAtSend.enableConnectors,
+        autoApprove: settingsAtSend.autoApprove,
         signal: abortRef.current.signal,
         onEvent: (e) => {
           // Stale-run guard: drop events from any run that's been

@@ -915,7 +915,7 @@ function Sidebar({
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pt-4">
-        <ProjectsSection
+        <WorkspacesSection
           threads={visibleThreads}
           currentThreadId={currentThreadId}
           activeWorkspacePath={workspace?.path ?? null}
@@ -1039,7 +1039,7 @@ function SidebarFilter({
 // open workspace floats to the top + auto-expands; other projects
 // collapse so the sidebar doesn't drown in old folders. "Chats"
 // (no workspace) render in their own section below — see Sidebar.
-function ProjectsSection({
+function WorkspacesSection({
   threads,
   currentThreadId,
   activeWorkspacePath,
@@ -1084,11 +1084,11 @@ function ProjectsSection({
   return (
     <div>
       <div className="px-2 pb-2 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-        Projects
+        Workspaces
       </div>
       <ul className="space-y-2">
         {sorted.map(([path, g]) => (
-          <ProjectGroup
+          <WorkspaceGroup
             key={path}
             name={g.name}
             threads={g.threads}
@@ -1104,7 +1104,7 @@ function ProjectsSection({
   );
 }
 
-function ProjectGroup({
+function WorkspaceGroup({
   name,
   threads,
   isActive,

@@ -48,6 +48,28 @@ export type Settings = {
   subagentModel: string | null;
   /** Theme — 'system' follows the OS pref, 'light' / 'dark' lock it. */
   theme: Theme;
+  /** Auto-approve mode. When the agent calls a tool that's
+   *  workspace-scoped + non-destructive, just run it instead of
+   *  prompting the user for every step. The whole point of an
+   *  agent is to do the work; clicking "Allow" 50 times in a
+   *  session defeats that. Dangerous operations (the BASH_DENYLIST
+   *  patterns + writes outside the workspace) ALWAYS still require
+   *  approval regardless of these flags.
+   *
+   *  Defaults to ON for both because that's the agent experience
+   *  the user paid for. Toggle off in Settings for "watch every
+   *  step" mode. */
+  autoApprove: {
+    /** write_file + edit_file when target is inside the workspace.
+     *  We already path-jail; auto-approving inside that jail is
+     *  the same trust posture as letting the agent edit at all. */
+    workspaceEdits: boolean;
+    /** bash commands that match the safe-prefix whitelist (read-
+     *  only ops, package-manager noops, git read-only, etc).
+     *  Anything outside the whitelist still prompts. The full
+     *  whitelist lives in lib/tools.ts:isSafeBash. */
+    safeBash: boolean;
+  };
 };
 
 const DEFAULT_SUBAGENT_MODEL = 'claude-haiku-4-5';
@@ -59,6 +81,10 @@ const DEFAULTS: Settings = {
   enableConnectors: false,
   subagentModel: DEFAULT_SUBAGENT_MODEL,
   theme: 'system',
+  autoApprove: {
+    workspaceEdits: true,
+    safeBash: true,
+  },
 };
 
 export function getSettings(): Settings {
@@ -67,7 +93,14 @@ export function getSettings(): Settings {
   if (!raw) return { ...DEFAULTS };
   try {
     const parsed = JSON.parse(raw) as Partial<Settings>;
-    return { ...DEFAULTS, ...parsed };
+    // Deep-merge nested objects so a stored partial doesn't drop
+    // fields we add later (autoApprove.* would have been dropped
+    // for users who saved settings before the field existed).
+    return {
+      ...DEFAULTS,
+      ...parsed,
+      autoApprove: { ...DEFAULTS.autoApprove, ...(parsed.autoApprove ?? {}) },
+    };
   } catch {
     return { ...DEFAULTS };
   }
