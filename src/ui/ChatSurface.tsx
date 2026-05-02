@@ -6,6 +6,7 @@ import {
   Download,
   FileText,
   FolderOpen,
+  GitBranch,
   Paperclip,
   RotateCcw,
   Sparkles,
@@ -42,6 +43,7 @@ import {
   getCurrentWorkspace,
   listAllFiles,
 } from '../lib/workspace';
+import { readGitInfo } from '../lib/git-info';
 import { ApprovalCard } from './ApprovalCard';
 import { Markdown } from './Markdown';
 import { MentionMenu, getMentionResults } from './MentionMenu';
@@ -182,6 +184,7 @@ export function ChatSurface({
   const [textFiles, setTextFiles] = useState<AttachedText[]>([]);
   const [files, setFiles] = useState<string[]>([]);
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
+  const [branch, setBranch] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const approvalsRef = useRef<Map<string, PendingResolver>>(new Map());
@@ -210,15 +213,21 @@ export function ChatSurface({
 
   // Load project memory (qcode.md / CLAUDE.md) once per workspace so
   // the empty state can show what context the model will pick up.
+  // Also pulls the git branch (if any) so the composer chip surface
+  // can show "main" / "feat/foo" without spawning a child process.
   useEffect(() => {
     const ws = getCurrentWorkspace();
     if (!ws) {
       setMemory(null);
+      setBranch(null);
       return;
     }
     let cancelled = false;
     void getProjectMemory(ws.path).then((m) => {
       if (!cancelled) setMemory(m);
+    });
+    void readGitInfo(ws.path).then((g) => {
+      if (!cancelled) setBranch(g.branch);
     });
     return () => {
       cancelled = true;
@@ -533,7 +542,7 @@ export function ChatSurface({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl px-4 py-8">
+        <div className="mx-auto max-w-3xl px-3 py-6 sm:px-4 sm:py-8">
           {empty ? (
             <EmptyState
               modelLabel={m?.label ?? model}
@@ -584,6 +593,7 @@ export function ChatSurface({
         onChange={setInput}
         modelLabel={m?.label ?? model}
         workspaceName={workspaceName}
+        branch={branch}
         mode={mode}
         onSend={send}
         onStop={stop}
@@ -1363,9 +1373,9 @@ function EmptyState({
     // to a confusing modal.
     if (!isTauri()) {
       return (
-        <div className="flex flex-col items-center pt-12 text-center">
+        <div className="flex flex-col items-center pt-6 text-center sm:pt-12">
           <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
-          <h2 className="mt-6 text-2xl font-semibold tracking-tight">
+          <h2 className="mt-5 text-xl font-semibold tracking-tight sm:mt-6 sm:text-2xl">
             Welcome to qcode chat
           </h2>
           <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
@@ -1399,9 +1409,9 @@ function EmptyState({
     }
 
     return (
-      <div className="flex flex-col items-center pt-12 text-center">
+      <div className="flex flex-col items-center pt-6 text-center sm:pt-12">
         <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
-        <h2 className="mt-6 text-2xl font-semibold tracking-tight">
+        <h2 className="mt-5 text-xl font-semibold tracking-tight sm:mt-6 sm:text-2xl">
           Welcome to qcode
         </h2>
         <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
@@ -1448,7 +1458,7 @@ function EmptyState({
       <div className="grid h-12 w-12 place-items-center rounded-2xl bg-primary/10 text-primary">
         <Sparkles className="h-5 w-5" />
       </div>
-      <h2 className="mt-6 text-2xl font-semibold tracking-tight">
+      <h2 className="mt-5 px-2 text-xl font-semibold tracking-tight sm:mt-6 sm:text-2xl">
         {heading}
       </h2>
       <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
@@ -1471,7 +1481,7 @@ function EmptyState({
           </span>
         </div>
       )}
-      <div className="mt-10 grid w-full max-w-2xl gap-2 text-left">
+      <div className="mt-8 grid w-full max-w-2xl gap-2 text-left sm:mt-10">
         {SAMPLE_PROMPTS.map((s) => (
           <button
             key={s}
@@ -1481,6 +1491,33 @@ function EmptyState({
             {s}
           </button>
         ))}
+      </div>
+      {/* Secondary actions — Codex has a similar quiet row below the
+       *  prompt list ("Connect to GitHub", "Connect your favorite
+       *  apps"). We keep it project-relevant: switch folder for when
+       *  the user wants to point qcode somewhere else, and a soft
+       *  link to qlaud's connector marketplace for app integrations
+       *  the agent can call (Slack, Linear, Notion, etc.). */}
+      <div className="mt-3 flex w-full max-w-2xl flex-wrap items-center justify-center gap-3 text-[11.5px] text-muted-foreground">
+        <button
+          onClick={() => void onOpenFolder()}
+          className="inline-flex items-center gap-1.5 transition-colors hover:text-foreground"
+        >
+          <FolderOpen className="h-3 w-3" />
+          Switch folder
+        </button>
+        <span className="text-border" aria-hidden>
+          ·
+        </span>
+        <a
+          href="https://qlaud.ai/connectors"
+          target="_blank"
+          rel="noopener"
+          className="inline-flex items-center gap-1.5 transition-colors hover:text-foreground"
+        >
+          <Sparkles className="h-3 w-3" />
+          Connect apps to your team
+        </a>
       </div>
     </div>
   );
@@ -1523,6 +1560,7 @@ function Composer({
   onChange,
   modelLabel,
   workspaceName,
+  branch,
   mode,
   onSend,
   onStop,
@@ -1546,6 +1584,10 @@ function Composer({
    *  composer footer so the user always sees what folder qcode is
    *  about to act on — no "wait, which repo?" surprises. */
   workspaceName?: string;
+  /** Current git branch (or short SHA if detached) — null when the
+   *  workspace isn't a git repo. Adds the third pill in the footer
+   *  so the user catches "I'm on main, not feat/X" before sending. */
+  branch?: string | null;
   /** Active mode — drives the secondary pill ("Plan" / "Agent"). */
   mode?: 'agent' | 'plan';
   onSend: (v: string) => void;
@@ -1695,7 +1737,7 @@ function Composer({
   }
 
   return (
-    <div className="border-t border-border/40 bg-background/70 px-4 py-4 backdrop-blur-md">
+    <div className="border-t border-border/40 bg-background/70 px-3 py-3 backdrop-blur-md sm:px-4 sm:py-4">
       <div className="mx-auto max-w-3xl">
         <div className="relative">
           {mention && (
@@ -1858,6 +1900,15 @@ function Composer({
                       >
                         <FolderOpen className="h-2.5 w-2.5 shrink-0 text-muted-foreground" />
                         <span className="truncate">{workspaceName}</span>
+                      </span>
+                    )}
+                    {branch && (
+                      <span
+                        className="hidden max-w-[120px] items-center gap-1 truncate rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-[10.5px] font-medium text-foreground/80 sm:inline-flex"
+                        title={`Git branch: ${branch}`}
+                      >
+                        <GitBranch className="h-2.5 w-2.5 shrink-0 text-muted-foreground" />
+                        <span className="truncate font-mono">{branch}</span>
                       </span>
                     )}
                     {mode && (

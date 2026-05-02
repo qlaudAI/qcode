@@ -4,6 +4,7 @@ import {
   Download,
   Folder,
   FolderOpen,
+  Menu,
   Plus,
   Search as SearchIcon,
   Settings,
@@ -66,6 +67,12 @@ export function App() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Mobile sidebar visibility. On md+ breakpoints the sidebar is
+  // always visible (the layout uses flex). On narrow widths it
+  // becomes an off-canvas drawer the user toggles via the hamburger
+  // in the titlebar; auto-closes on thread pick so the chat surface
+  // takes full width after navigation.
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   // Set true when the user clicked something that requires the
   // desktop app (folder picker, etc.) on the web build. Renders an
   // inline notice with a download CTA instead of failing silently.
@@ -320,21 +327,47 @@ export function App() {
         workspaceName={workspace?.name}
         onRefreshBalance={refreshBalance}
         onOpenSettings={() => setSettingsOpen(true)}
+        onToggleSidebar={() => setMobileSidebarOpen((v) => !v)}
       />
 
-      <div className="flex flex-1 overflow-hidden">
-        <Sidebar
-          workspace={workspace}
-          threads={threads}
-          currentThreadId={currentId}
-          onOpenFolder={async () => {
-            const w = await tryOpenFolder();
-            if (w) setWorkspace(w);
-          }}
-          onNewChat={newThread}
-          onPickThread={switchThread}
-          onDeleteThread={removeThread}
-        />
+      <div className="relative flex flex-1 overflow-hidden">
+        {/* Scrim — only renders + intercepts taps when the drawer is
+         *  open on narrow widths. md+ never sees it. */}
+        {mobileSidebarOpen && (
+          <button
+            aria-label="Close sidebar"
+            onClick={() => setMobileSidebarOpen(false)}
+            className="absolute inset-0 z-30 bg-black/30 backdrop-blur-sm md:hidden"
+          />
+        )}
+        <div
+          className={cn(
+            // Mobile: off-canvas drawer that slides in over the chat
+            // surface. md+: in-flow column (transform reset to 0).
+            'absolute inset-y-0 left-0 z-40 w-72 max-w-[85vw] transform transition-transform duration-200 md:static md:w-64 md:max-w-none md:translate-x-0 md:transition-none',
+            mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full',
+          )}
+        >
+          <Sidebar
+            workspace={workspace}
+            threads={threads}
+            currentThreadId={currentId}
+            onOpenFolder={async () => {
+              setMobileSidebarOpen(false);
+              const w = await tryOpenFolder();
+              if (w) setWorkspace(w);
+            }}
+            onNewChat={() => {
+              setMobileSidebarOpen(false);
+              void newThread();
+            }}
+            onPickThread={(id) => {
+              setMobileSidebarOpen(false);
+              switchThread(id);
+            }}
+            onDeleteThread={removeThread}
+          />
+        </div>
         <main className="flex min-h-0 flex-1 flex-col bg-background/85 backdrop-blur-sm">
           <ChatSurface
             threadId={currentId}
@@ -395,6 +428,7 @@ function Titlebar({
   workspaceName,
   onRefreshBalance,
   onOpenSettings,
+  onToggleSidebar,
 }: {
   model: string;
   onModelChange: (slug: string) => void;
@@ -404,11 +438,24 @@ function Titlebar({
   profile: { email: string; user_id: string; balance_usd?: number } | null;
   workspaceName?: string;
   onOpenSettings: () => void;
+  onToggleSidebar?: () => void;
 }) {
   return (
     <header className="titlebar relative z-50 flex h-11 items-center justify-between border-b border-border/40 bg-background/40 px-3 backdrop-blur-md">
-      {/* pl-16 leaves clearance for macOS traffic-light buttons. */}
-      <div className="flex items-center gap-2 pl-16">
+      {/* pl-16 leaves clearance for macOS traffic-light buttons.
+       *  On mobile/web we lose the traffic-lights and pick up a
+       *  hamburger that toggles the off-canvas sidebar. */}
+      <div className="flex items-center gap-2 md:pl-16">
+        {onToggleSidebar && (
+          <button
+            type="button"
+            aria-label="Toggle sidebar"
+            onClick={onToggleSidebar}
+            className="no-drag grid h-8 w-8 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:hidden"
+          >
+            <Menu className="h-4 w-4" />
+          </button>
+        )}
         {/* Canonical qlaud monogram — dark q with red period accent.
             Same source as qlaud.ai/icon.svg. */}
         <QlaudMark className="h-5 w-5 rounded shadow-sm" />
@@ -418,18 +465,25 @@ function Titlebar({
         </span>
         {workspaceName && (
           <>
-            <span className="mx-2 text-muted-foreground/60">/</span>
-            <span className="text-xs text-muted-foreground">
+            <span className="mx-2 hidden text-muted-foreground/60 sm:inline">/</span>
+            <span className="hidden truncate text-xs text-muted-foreground sm:inline">
               {workspaceName}
             </span>
           </>
         )}
       </div>
 
-      <div className="no-drag flex items-center gap-2">
-        <ModeToggle value={mode} onChange={onModeChange} />
+      <div className="no-drag flex items-center gap-1.5 sm:gap-2">
+        {/* Hide mode toggle + spend bar on the smallest widths so the
+         *  titlebar doesn't wrap. Both still reachable: mode via
+         *  composer pill, balance via Settings. */}
+        <div className="hidden sm:block">
+          <ModeToggle value={mode} onChange={onModeChange} />
+        </div>
         <ModelPicker value={model} onChange={onModelChange} />
-        <SpendBar profile={profile} onRefresh={onRefreshBalance} />
+        <div className="hidden sm:block">
+          <SpendBar profile={profile} onRefresh={onRefreshBalance} />
+        </div>
         <button
           aria-label="Settings"
           className="grid h-7 w-7 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
