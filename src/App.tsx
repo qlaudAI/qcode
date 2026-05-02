@@ -124,7 +124,14 @@ export function App() {
    *  the app share the same UX without repeating try/catch. */
   const tryOpenFolder = useCallback(async (): Promise<Workspace | null> => {
     try {
-      return await openFolderPicker();
+      const w = await openFolderPicker();
+      // Picker resolved to a workspace — if there's an active thread,
+      // start a new chat so the just-picked folder doesn't get
+      // grafted onto a thread that was created against a different
+      // workspace. Threads are tied to their workspace; the user
+      // wanting a different folder = wanting a different chat.
+      if (w) setCurrentId(null);
+      return w;
     } catch (e) {
       if (e instanceof WebNotSupportedError) {
         setWebNotice(true);
@@ -319,9 +326,35 @@ export function App() {
     setCurrentId(null);
   }, []);
 
-  const switchThread = useCallback((id: string) => {
-    setCurrentId(id);
-  }, []);
+  const switchThread = useCallback(
+    (id: string) => {
+      setCurrentId(id);
+      // Tie workspace to the thread. The thread's workspacePath is
+      // canonical — every send POSTs paths against it, every diff
+      // resolves against it, every bash runs in it. Letting the
+      // active workspace drift away from the loaded thread leads to
+      // "the agent wrote to /test/app while the UI's workspace was
+      // /other and the file tree showed nothing" confusion the user
+      // was hitting in practice. Now: pick a thread, get its workspace.
+      const list = queryClient.getQueryData<ThreadSummary[]>(qk.threads);
+      const t = list?.find((x) => x.id === id);
+      if (t?.workspacePath && t.workspacePath !== workspace?.path) {
+        const ws: Workspace = {
+          path: t.workspacePath,
+          name: t.workspaceName ?? t.workspacePath.split('/').pop() ?? 'project',
+        };
+        setWorkspace(ws);
+        setCurrentWorkspace(ws);
+      } else if (!t?.workspacePath && workspace) {
+        // Thread has no workspace (pure chat) — clear active so
+        // file/bash tools fail loudly instead of silently writing
+        // into the previously-open folder.
+        setWorkspace(null);
+        setCurrentWorkspace(null);
+      }
+    },
+    [workspace?.path],
+  );
 
   // Optimistic delete via Query mutation — sidebar updates the
   // moment the user clicks; cache rolls back if the network errors.
@@ -543,7 +576,7 @@ export function App() {
             onDeleteThread={removeThread}
           />
         </div>
-        <main className="flex min-h-0 flex-1 flex-col bg-background/85 backdrop-blur-sm">
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-background/85 backdrop-blur-sm">
           <ChatSurface
             threadId={currentId}
             ensureThreadId={ensureThreadId}

@@ -85,7 +85,43 @@ export async function openFolderPicker(): Promise<Workspace | null> {
   void getMatcher(path);
   void getProjectMemory(path);
   void probeEnv(path);
+  // Initialize git on fresh folders so the agent has history to walk
+  // (git log / git diff / git blame) and the user can revert anything
+  // qcode writes. Idempotent: skipped when .git already exists, so
+  // re-opening an existing repo is a no-op.
+  void initGitIfFresh(path);
   return w;
+}
+
+/** Run `git init` in the workspace if it isn't already a git repo.
+ *  Best-effort: any failure (no git installed, fs error, permissions)
+ *  is logged but doesn't block the workspace from opening. The first
+ *  commit is the user's responsibility — we don't auto-commit so we
+ *  don't surprise them with a tree that thinks they meant to track
+ *  things they didn't. */
+async function initGitIfFresh(workspacePath: string): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { exists } = await import('@tauri-apps/plugin-fs');
+    if (await exists(`${workspacePath}/.git`)) return;
+    const { Command } = await import('@tauri-apps/plugin-shell');
+    // -q so the "Initialized empty Git repository in ..." line doesn't
+    // ride out via the shell channel and surprise anyone watching the
+    // logs. Branch name follows the user's git default; we don't
+    // override (some users have main, some master, some custom).
+    const result = await Command.create('bash', ['-c', 'git init -q'], {
+      cwd: workspacePath,
+    }).execute();
+    if (result.code !== 0) {
+      console.warn(
+        `[workspace] git init failed in ${workspacePath} (exit ${result.code}): ${result.stderr}`,
+      );
+    }
+  } catch (e) {
+    console.warn(
+      `[workspace] git init skipped: ${e instanceof Error ? e.message : 'unknown'}`,
+    );
+  }
 }
 
 /** Walk the workspace recursively and return relative file paths.
