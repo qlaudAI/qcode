@@ -3,6 +3,7 @@ import {
   AlertCircle,
   Camera,
   Check,
+  CheckCircle2,
   ChevronRight,
   Eye,
   FilePlus,
@@ -65,6 +66,10 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   qlaud_get_tool_schemas: Wrench,
   qlaud_multi_execute: Play,
   qlaud_manage_connections: Plug,
+  // verify runs the project's check command (typecheck/test/lint).
+  // Same icon as the "approved" footer state — passes the eye-test
+  // when scrolling: green checkmark = "the agent verified its work".
+  verify: CheckCircle2,
 };
 
 export function ToolCallCard({
@@ -190,6 +195,7 @@ function Output({ call }: { call: ToolCallView }) {
         />
       );
     case 'bash':
+    case 'verify':
       return <BashView output={output} isError={call.status === 'error'} />;
     case 'browser_navigate':
     case 'browser_snapshot':
@@ -327,6 +333,19 @@ function summarize(call: ToolCallView, workspace: string | null): string {
       const action = typeof input.action === 'string' ? input.action : '?';
       const tool = typeof input.tool === 'string' ? input.tool : '';
       return tool ? `${action} ${tool}` : action;
+    }
+    case 'verify': {
+      // Pull the resolved command + pass/fail from the output's first
+      // two lines (set in tools.ts:runVerify). Lets the user scan a
+      // bundle and see "verify (package.json): pnpm run check — PASSED"
+      // without expanding the card.
+      const out = call.output ?? '';
+      const m = /^verify \([^)]+\): (.+?)\n(PASSED|FAILED[^\n]*)/.exec(out);
+      if (m) {
+        const [, cmd, status] = m;
+        return `${cmd} — ${status}`;
+      }
+      return call.status === 'running' ? 'running…' : '…';
     }
     default:
       for (const [, v] of Object.entries(input)) {

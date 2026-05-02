@@ -413,12 +413,26 @@ export const WRITE_TOOLS: ToolDef[] = [
   },
 ];
 
+// `verify` runs the project's check command — what the user runs
+// before claiming a change is done. Auto-detects from qcode.md
+// (`verify: <cmd>` line) → package.json scripts → lang defaults →
+// otherwise tells the model to ask the user. Read-tier (no approval,
+// no mutations); just runs a command and reports pass/fail. The
+// system prompt requires this after any write_file/edit_file.
+export const VERIFY_TOOL: ToolDef = {
+  name: 'verify',
+  description:
+    "Run the project's verification command (typecheck / tests / lint) and report whether it passed. Auto-detects the right command from qcode.md (a `verify: <cmd>` line wins), then package.json scripts (in order: `check`, `typecheck`, `test`, `lint`), then language defaults (`cargo check`, `go build ./...`). Use this after every write_file or edit_file before saying the task is done — code that doesn't typecheck isn't done. Returns the resolved command, exit code, and trimmed output. No args.",
+  input_schema: { type: 'object', properties: {} },
+};
+
 export const ALL_TOOLS = [
   ...READ_TOOLS,
   ...BROWSER_TOOLS,
   ...WRITE_TOOLS,
   TASK_TOOL,
   TODO_TOOL,
+  VERIFY_TOOL,
 ];
 
 /** Subagent-mode tool list. The child agent gets every tool the
@@ -428,8 +442,13 @@ export const ALL_TOOLS = [
  *  tool. Read-mode subagents drop write tools too, mirroring Plan.
  *  Browser tools ride along in both — a "verify this page renders"
  *  subagent is the canonical use case. */
-export const SUBAGENT_TOOLS = [...READ_TOOLS, ...BROWSER_TOOLS, ...WRITE_TOOLS];
-export const SUBAGENT_READ_TOOLS = [...READ_TOOLS, ...BROWSER_TOOLS];
+export const SUBAGENT_TOOLS = [
+  ...READ_TOOLS,
+  ...BROWSER_TOOLS,
+  ...WRITE_TOOLS,
+  VERIFY_TOOL,
+];
+export const SUBAGENT_READ_TOOLS = [...READ_TOOLS, ...BROWSER_TOOLS, VERIFY_TOOL];
 
 // ─── Executor ───────────────────────────────────────────────────────
 
@@ -569,6 +588,8 @@ export async function executeTool(
         // confirmation so the model sees the call landed and can
         // continue without confusion.
         return ok(call.id, 'Todo list updated.');
+      case 'verify':
+        return await runVerify(call, opts);
       default:
         return err(call.id, `Unknown tool: ${call.name}`);
     }
@@ -1212,6 +1233,146 @@ async function runBrowser(call: ToolCall): Promise<ToolResult> {
     content: summary,
     is_error: !!result.isError,
   };
+}
+
+// ─── Verify ────────────────────────────────────────────────────────
+//
+// Runs the project's check command. Detection is intentionally
+// simple — most projects fall into one of three cases (qcode.md
+// directive, package.json scripts, lang default), and a fourth
+// "couldn't tell" path that asks the user to configure. We don't
+// cache: re-detect each call so adding a script or editing qcode.md
+// takes effect on the next verify without a session restart.
+
+const VERIFY_TIMEOUT_MS = 360_000; // 6 min — same as bash; covers a real test run
+
+async function runVerify(
+  call: ToolCall,
+  opts: ExecuteOpts,
+): Promise<ToolResult> {
+  const resolved = await resolveVerifyCommand(opts.workspace);
+  if (!resolved) {
+    return err(
+      call.id,
+      "No verify command could be detected. Add a `verify: <command>` line to qcode.md, OR add a `check`/`typecheck`/`test`/`lint` script to package.json. Until then, run your check manually with bash and tell the user what command they should set as the project's verify.",
+    );
+  }
+  const result = await runBashSession({
+    workspace: opts.workspace,
+    command: resolved.command,
+    onPartial: opts.onPartial,
+    timeoutMs: VERIFY_TIMEOUT_MS,
+  });
+  if (result.timedOut) {
+    return err(
+      call.id,
+      `Verify (${resolved.source}: ${resolved.command}) exceeded ${VERIFY_TIMEOUT_MS / 1000}s. Partial output:\n${result.stdout}${result.stderr ? '\n[stderr]\n' + result.stderr : ''}`,
+    );
+  }
+  const passed = result.exitCode === 0;
+  const head =
+    `verify (${resolved.source}): ${resolved.command}\n` +
+    `${passed ? 'PASSED' : `FAILED (exit ${result.exitCode})`}\n`;
+  const body =
+    (result.stdout ? `--- stdout ---\n${result.stdout}` : '') +
+    (result.stderr ? `${result.stdout ? '\n' : ''}--- stderr ---\n${result.stderr}` : '');
+  return passed
+    ? ok(call.id, head + body)
+    : err(call.id, head + body);
+}
+
+type VerifyResolved = {
+  command: string;
+  /** Where the command came from. Shown in the result so the model
+   *  + the user can both see why this command ran. */
+  source: 'qcode.md' | 'package.json' | 'cargo' | 'go' | 'python';
+};
+
+async function resolveVerifyCommand(
+  workspace: string,
+): Promise<VerifyResolved | null> {
+  if (!isTauri()) return null;
+
+  // 1. qcode.md `verify:` line — explicit user override always wins.
+  const memCmd = await readQcodeMdVerify(workspace);
+  if (memCmd) return { source: 'qcode.md', command: memCmd };
+
+  // 2. package.json scripts in priority order.
+  const pkgCmd = await readPackageJsonVerify(workspace);
+  if (pkgCmd) return { source: 'package.json', command: pkgCmd };
+
+  // 3. Language defaults — only when the project file exists. Order:
+  //    Rust → Go → Python (likely-correct) — first hit wins. Skipped
+  //    for projects that ship none of these.
+  const { exists } = await import('@tauri-apps/plugin-fs');
+  if (await exists(`${workspace}/Cargo.toml`)) {
+    return { source: 'cargo', command: 'cargo check' };
+  }
+  if (await exists(`${workspace}/go.mod`)) {
+    return { source: 'go', command: 'go build ./...' };
+  }
+  if (await exists(`${workspace}/pyproject.toml`)) {
+    return { source: 'python', command: 'python -m compileall -q .' };
+  }
+  return null;
+}
+
+async function readQcodeMdVerify(workspace: string): Promise<string | null> {
+  const { exists, readTextFile } = await import('@tauri-apps/plugin-fs');
+  for (const name of ['qcode.md', 'QCODE.md', 'CLAUDE.md']) {
+    const path = `${workspace}/${name}`;
+    if (!(await exists(path))) continue;
+    let raw: string;
+    try {
+      raw = await readTextFile(path);
+    } catch {
+      continue;
+    }
+    // Match `verify: <cmd>` on its own line. Anchored to start-of-line
+    // so a markdown sentence "to verify: run pnpm test" doesn't match.
+    const m = /^[ \t]*verify:[ \t]*(.+?)[ \t]*$/m.exec(raw);
+    if (m && m[1]) return m[1];
+    return null; // first existing memory file wins; don't fall through
+  }
+  return null;
+}
+
+async function readPackageJsonVerify(
+  workspace: string,
+): Promise<string | null> {
+  const { exists, readTextFile } = await import('@tauri-apps/plugin-fs');
+  const path = `${workspace}/package.json`;
+  if (!(await exists(path))) return null;
+  let raw: string;
+  try {
+    raw = await readTextFile(path);
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const scripts =
+    parsed && typeof parsed === 'object' && parsed !== null
+      ? ((parsed as { scripts?: Record<string, string> }).scripts ?? null)
+      : null;
+  if (!scripts) return null;
+  const pm = await detectPackageManager(workspace);
+  for (const name of ['check', 'typecheck', 'test', 'lint']) {
+    if (typeof scripts[name] === 'string') return `${pm} run ${name}`;
+  }
+  return null;
+}
+
+async function detectPackageManager(workspace: string): Promise<'pnpm' | 'npm' | 'yarn' | 'bun'> {
+  const { exists } = await import('@tauri-apps/plugin-fs');
+  if (await exists(`${workspace}/pnpm-lock.yaml`)) return 'pnpm';
+  if (await exists(`${workspace}/yarn.lock`)) return 'yarn';
+  if (await exists(`${workspace}/bun.lockb`)) return 'bun';
+  return 'npm';
 }
 
 // ─── Path helpers ──────────────────────────────────────────────────

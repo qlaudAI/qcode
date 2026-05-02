@@ -1315,6 +1315,7 @@ function bundleSummary(
     else if (name === 'write_file' || name === 'edit_file') bump('edits');
     else if (name.startsWith('browser_')) bump('browser');
     else if (name === 'task') bump('subagents');
+    else if (name === 'verify') bump('verifies');
     else bump('other');
   }
   const parts: string[] = [];
@@ -1334,6 +1335,10 @@ function bundleSummary(
   }
   if (counts.browser)
     parts.push(`${counts.browser} browser ${counts.browser === 1 ? 'action' : 'actions'}`);
+  if (counts.verifies)
+    parts.push(
+      `${counts.verifies === 1 ? 'verified' : `verified ${counts.verifies}×`}`,
+    );
   if (counts.subagents)
     parts.push(`${counts.subagents} ${counts.subagents === 1 ? 'subagent' : 'subagents'}`);
   if (counts.other)
