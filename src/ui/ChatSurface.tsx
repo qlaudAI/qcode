@@ -5,6 +5,7 @@ import {
   BookOpen,
   Check,
   ChevronDown,
+  ChevronRight,
   Download,
   FileText,
   FolderOpen,
@@ -736,22 +737,34 @@ export function ChatSurface({
                 />
               )}
               <TodoListPanel blocks={blocks} />
-              {blocks.map((b, i) => (
-                <BlockRow
-                  key={i}
-                  block={b}
-                  busy={busy && i === blocks.length - 1}
-                  onAllow={() =>
-                    b.type === 'approval' ? decide(b.id, 'allow') : undefined
-                  }
-                  onReject={() =>
-                    b.type === 'approval' ? decide(b.id, 'reject') : undefined
-                  }
-                  onRetry={() => {
-                    if (b.type === 'error' && b.retry) retry(b.retry);
-                  }}
-                />
-              ))}
+              {groupBlocks(blocks).map((group, gi) => {
+                if (group.type === 'tool-bundle') {
+                  return (
+                    <ToolBundle
+                      key={`bundle-${gi}`}
+                      tools={group.tools}
+                    />
+                  );
+                }
+                const b = group.block;
+                const i = group.index;
+                return (
+                  <BlockRow
+                    key={i}
+                    block={b}
+                    busy={busy && i === blocks.length - 1}
+                    onAllow={() =>
+                      b.type === 'approval' ? decide(b.id, 'allow') : undefined
+                    }
+                    onReject={() =>
+                      b.type === 'approval' ? decide(b.id, 'reject') : undefined
+                    }
+                    onRetry={() => {
+                      if (b.type === 'error' && b.retry) retry(b.retry);
+                    }}
+                  />
+                );
+              })}
             </div>
           )}
         </div>
@@ -1159,6 +1172,157 @@ function mapError(code: string): ErrorPresentation {
 }
 
 // ─── Render rows ───────────────────────────────────────────────────
+
+// Group consecutive tool blocks for the bundled-actions UI
+// (Codex pattern). Walks the blocks list once; tool blocks that
+// are NOT todo_write (its own sticky panel) collect into a
+// bundle until any non-tool block breaks the run. Returns a
+// flat list of either {block, index} singles or {tools} bundles
+// — the outer render maps over this so single-tool bundles
+// still render as one chip (consistent UX) and multi-tool runs
+// collapse into "Ran 2 commands, read 4 files, edited 3 files."
+type BlockGroup =
+  | { type: 'single'; block: RenderBlock; index: number }
+  | { type: 'tool-bundle'; tools: Array<Extract<RenderBlock, { type: 'tool' }>> };
+
+function groupBlocks(blocks: RenderBlock[]): BlockGroup[] {
+  const out: BlockGroup[] = [];
+  let bundle: Array<Extract<RenderBlock, { type: 'tool' }>> = [];
+  const flushBundle = () => {
+    if (bundle.length === 0) return;
+    out.push({ type: 'tool-bundle', tools: bundle });
+    bundle = [];
+  };
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    if (!b) continue;
+    if (b.type === 'tool' && b.call.name !== 'todo_write') {
+      bundle.push(b);
+      continue;
+    }
+    flushBundle();
+    out.push({ type: 'single', block: b, index: i });
+  }
+  flushBundle();
+  return out;
+}
+
+// Bundle of consecutive tool calls — Codex's pattern. Renders
+// as one collapsible chip with a category-bucketed summary
+// ("Ran 2 commands, read 4 files, edited 3 files"). Click the
+// header to reveal individual tool cards inline. Single-tool
+// bundles render as just the card itself (no chip wrapper) so
+// the UX stays clean — bundling kicks in when there's actually
+// something to bundle.
+function ToolBundle({
+  tools,
+}: {
+  tools: Array<Extract<RenderBlock, { type: 'tool' }>>;
+}) {
+  const [open, setOpen] = useState(true);
+  // One-tool bundles: skip the wrapper. Same look as before.
+  if (tools.length === 1) {
+    return (
+      <div className="flex pl-10">
+        <div className="flex-1">
+          <ToolCallCard call={tools[0]!.call} />
+        </div>
+      </div>
+    );
+  }
+  const summary = bundleSummary(tools);
+  const anyRunning = tools.some((t) => t.call.status === 'running');
+  const anyError = tools.some((t) => t.call.status === 'error');
+  return (
+    <div className="flex pl-10">
+      <div className="flex-1">
+        <div
+          className={cn(
+            'overflow-hidden rounded-lg border bg-background/70 backdrop-blur-sm transition-colors',
+            anyError ? 'border-primary/30 bg-primary/5' : 'border-border/60',
+          )}
+        >
+          <button
+            onClick={() => setOpen((v) => !v)}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/40"
+          >
+            <ChevronRight
+              className={cn(
+                'h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform',
+                open && 'rotate-90',
+              )}
+            />
+            <span className="min-w-0 flex-1 truncate text-[12px] text-foreground/85">
+              {summary}
+            </span>
+            {anyRunning && (
+              <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+                running
+              </span>
+            )}
+            <span className="shrink-0 text-[10.5px] tabular-nums text-muted-foreground">
+              {tools.length}
+            </span>
+          </button>
+          {open && (
+            <div className="border-t border-border/40 bg-muted/10 p-2">
+              <div className="flex flex-col gap-1">
+                {tools.map((t) => (
+                  <ToolCallCard key={t.call.id} call={t.call} />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Codex-style bucket summary: "Ran 2 commands, read 4 files,
+// edited 3 files". Categories are picked so the user gets a
+// scan-friendly read of what the agent did in this stretch.
+function bundleSummary(
+  tools: Array<Extract<RenderBlock, { type: 'tool' }>>,
+): string {
+  const counts: Record<string, number> = {};
+  const bump = (k: string) => {
+    counts[k] = (counts[k] ?? 0) + 1;
+  };
+  for (const t of tools) {
+    const name = t.call.name;
+    if (name === 'bash' || name === 'bash_status') bump('commands');
+    else if (
+      name === 'read_file' ||
+      name === 'list_files' ||
+      name === 'glob' ||
+      name === 'grep'
+    )
+      bump('reads');
+    else if (name === 'write_file' || name === 'edit_file') bump('edits');
+    else if (name.startsWith('browser_')) bump('browser');
+    else if (name === 'task') bump('subagents');
+    else bump('other');
+  }
+  const parts: string[] = [];
+  if (counts.commands)
+    parts.push(`Ran ${counts.commands} ${counts.commands === 1 ? 'command' : 'commands'}`);
+  if (counts.reads)
+    parts.push(`read ${counts.reads} ${counts.reads === 1 ? 'file' : 'files'}`);
+  if (counts.edits)
+    parts.push(`edited ${counts.edits} ${counts.edits === 1 ? 'file' : 'files'}`);
+  if (counts.browser)
+    parts.push(`${counts.browser} browser ${counts.browser === 1 ? 'action' : 'actions'}`);
+  if (counts.subagents)
+    parts.push(`${counts.subagents} ${counts.subagents === 1 ? 'subagent' : 'subagents'}`);
+  if (counts.other)
+    parts.push(`${counts.other} other ${counts.other === 1 ? 'tool' : 'tools'}`);
+  if (parts.length === 0) return `${tools.length} actions`;
+  // Capitalize first letter; lowercase the rest so it reads as one
+  // sentence: "Ran 2 commands, read 4 files, edited 3 files."
+  const joined = parts.join(', ');
+  return joined.charAt(0).toUpperCase() + joined.slice(1);
+}
 
 function BlockRow({
   block,
