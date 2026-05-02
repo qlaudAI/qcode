@@ -104,25 +104,48 @@ export function useThreadsQuery(opts: {
       // fails, the list still returns; the next reconcile will retry.
       void purgeEmptyRemoteThreads();
       const remote = await listRemoteThreads();
+      // Title resolution order:
+      //   1. Live in-memory Query data — most-recent patches win
+      //      (eliminates the race where a refetch landing between
+      //      patchThread + saveCachedSummaries clobbers the new
+      //      title with the prior cache).
+      //   2. localStorage cache — survives reload, fast cold paint.
+      //   3. Server metadata.title — set via PATCH after title-gen,
+      //      so cross-device + cache-cleared sessions still see
+      //      the right title instead of falling through to
+      //      "New chat".
+      //   4. "New chat" — last-resort default.
+      const live = queryClient.getQueryData<ThreadSummary[]>(qk.threads);
+      const liveById = new Map((live ?? []).map((s) => [s.id, s]));
       const cache = loadCachedSummaries();
       const cacheById = new Map(cache.map((s) => [s.id, s]));
       const merged: ThreadSummary[] = remote.map((r) => {
+        const liveRow = liveById.get(r.id);
         const cached = cacheById.get(r.id);
         const meta = (r.metadata ?? {}) as Record<string, unknown>;
+        const metaTitle =
+          typeof meta.title === 'string' ? meta.title : undefined;
         const wsPath =
           typeof meta.workspace_path === 'string'
             ? meta.workspace_path
-            : cached?.workspacePath;
+            : (liveRow?.workspacePath ?? cached?.workspacePath);
         const wsName =
           typeof meta.workspace_name === 'string'
             ? meta.workspace_name
-            : cached?.workspaceName;
+            : (liveRow?.workspaceName ?? cached?.workspaceName);
+        const title =
+          liveRow?.title ?? cached?.title ?? metaTitle ?? 'New chat';
+        const titleSource =
+          liveRow?.titleSource ??
+          cached?.titleSource ??
+          (metaTitle ? 'auto' : undefined);
         return {
           id: r.id,
-          title: cached?.title ?? 'New chat',
-          model: cached?.model ?? opts.fallbackModel,
+          title,
+          model: liveRow?.model ?? cached?.model ?? opts.fallbackModel,
           createdAt: r.created_at,
           updatedAt: r.last_active_at,
+          ...(titleSource ? { titleSource } : {}),
           ...(wsPath ? { workspacePath: wsPath } : {}),
           ...(wsName ? { workspaceName: wsName } : {}),
         };

@@ -44,6 +44,8 @@ import {
 import {
   getRemoteThreadMessages,
   titleFromPrompt,
+  updateThreadMetadata,
+  type RemoteThreadHistory,
   type ThreadSummary,
 } from './lib/threads';
 import {
@@ -349,58 +351,88 @@ export function App() {
     return result.summary.id;
   }, [currentId, model, workspace, createMutation]);
 
-  // ChatSurface reports back when a turn lands. Two-stage title
-  // update:
-  //   1. Synchronous: drop the "New chat" placeholder by deriving
-  //      a quick title from the user's prompt — better than
-  //      nothing while the LLM call is in flight, lands in <1ms.
-  //   2. Async: kick off generateThreadTitle() which hits qlaud
-  //      with a tiny Haiku call to summarize the conversation
-  //      properly. Rewrites the local cache when it returns.
+  // ChatSurface reports back when a turn lands. Title strategy:
+  //   1. Synchronous: derive a quick title from the user's first
+  //      prompt to drop the "New chat" placeholder instantly.
+  //   2. Async, gated: only call the LLM-summarizer on the FIRST
+  //      turn AND on log-spaced turn counts (3, 7, 15, 30, 60).
+  //      Conversations evolve gradually; refreshing the title on
+  //      every turn was wasteful + caused visible churn.
+  //   3. Persist via PATCH /v1/threads/:id metadata so the title
+  //      survives across devices, cache wipes, and the qcode-web
+  //      tab — without local cache being load-bearing.
   // Skipped when titleSource === 'user' (manual rename in the
-  // future). Per-turn regen because purposes shift mid-thread —
-  // a refactor session may turn into a debug session.
+  // future).
   const onTurnLanded = useCallback(
-    (info: { userText: string | null; threadId: string }) => {
+    (info: {
+      userText: string | null;
+      threadId: string;
+      assistantSeq: number | null;
+    }) => {
       const list =
         queryClient.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
       const existing = list.find((s) => s.id === info.threadId);
       const patch: Partial<ThreadSummary> = { updatedAt: Date.now() };
-      if (existing?.title === 'New chat' && info.userText) {
+      const hadDefaultTitle = existing?.title === 'New chat' || !existing?.title;
+      if (hadDefaultTitle && info.userText) {
         patch.title = titleFromPrompt(info.userText);
         patch.titleSource = 'auto';
       }
       patchThread(info.threadId, patch);
       void invalidateBalance();
 
-      // Async polish — fire and forget. Refetch the canonical
-      // history first (the Query cache might still hold the pre-
-      // send snapshot) so we summarize what just happened, not
-      // what was there before.
-      if (existing?.titleSource !== 'user') {
-        void (async () => {
-          const fresh = await queryClient.fetchQuery({
-            queryKey: qk.threadMessages(info.threadId),
-            queryFn: () => getRemoteThreadMessages(info.threadId),
-            // staleTime:0 forces a network hit; without this the
-            // cached pre-send data short-circuits and we summarize
-            // an empty thread.
-            staleTime: 0,
-          });
-          if (!fresh.messages.length) return;
-          const generated = await generateThreadTitle(fresh.messages);
-          if (!generated) return;
-          // Bail if user manually edited between kickoff and now.
-          const list =
-            queryClient.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
-          const row = list.find((s) => s.id === info.threadId);
-          if (row?.titleSource === 'user') return;
-          patchThread(info.threadId, {
-            title: generated,
-            titleSource: 'auto',
-          });
-        })();
-      }
+      if (existing?.titleSource === 'user') return;
+
+      // Turn-count from the assistant's seq: turn 1 = seq 2, turn
+      // 2 = seq 4, etc. (user prompts are odd, assistant responses
+      // even). Falls back to "treat as first turn" when seq is
+      // null (legacy worker — better to over-regen once than to
+      // never regen).
+      const turnCount = info.assistantSeq
+        ? Math.ceil(info.assistantSeq / 2)
+        : 1;
+      const REGEN_AT = new Set([1, 3, 7, 15, 30, 60, 120]);
+      // Always regen when we still have the placeholder title —
+      // covers the case where an earlier regen failed (network).
+      const shouldRegen = hadDefaultTitle || REGEN_AT.has(turnCount);
+      if (!shouldRegen) return;
+
+      void (async () => {
+        // Cached messages query already holds the latest server
+        // history (we read from it everywhere); no extra fetch
+        // needed in the common case.
+        const cached = queryClient.getQueryData<RemoteThreadHistory>(
+          qk.threadMessages(info.threadId),
+        );
+        const messages = cached?.messages.length
+          ? cached.messages
+          : (await getRemoteThreadMessages(info.threadId)).messages;
+        if (!messages.length) return;
+        const generated = await generateThreadTitle(messages);
+        if (!generated) return;
+        // Bail if user manually edited between kickoff + now.
+        const fresh =
+          queryClient.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
+        const row = fresh.find((s) => s.id === info.threadId);
+        if (row?.titleSource === 'user') return;
+        patchThread(info.threadId, {
+          title: generated,
+          titleSource: 'auto',
+        });
+        // Persist server-side fire-and-forget. Failure is harmless
+        // (local cache still has the new title); next attempt
+        // will retry. The PATCH only updates metadata.title; the
+        // workspace_path/name fields server-side are preserved
+        // by the merge in handlePatchThread.
+        void updateThreadMetadata(info.threadId, { title: generated }).catch(
+          (e) => {
+            console.warn(
+              `[title-gen] PATCH /v1/threads/${info.threadId} failed:`,
+              e,
+            );
+          },
+        );
+      })();
     },
     [],
   );

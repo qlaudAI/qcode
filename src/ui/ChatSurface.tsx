@@ -163,7 +163,16 @@ export function ChatSurface({
   mode?: 'agent' | 'plan';
   threadId: string | null;
   ensureThreadId: () => Promise<string>;
-  onTurnLanded?: (info: { userText: string | null; threadId: string }) => void;
+  onTurnLanded?: (info: {
+    userText: string | null;
+    threadId: string;
+    /** Seq of the assistant turn just persisted by qlaud. App.tsx
+     *  uses this for cheap turn-counting (assistant seqs are even:
+     *  2, 4, 6 → turn 1, 2, 3) without re-fetching the message
+     *  list. Null when the qlaud worker didn't ship cost_micros
+     *  yet (legacy version). */
+    assistantSeq: number | null;
+  }) => void;
   workspaceName?: string;
   workspacePath?: string;
   hasWorkspace: boolean;
@@ -606,7 +615,17 @@ export function ChatSurface({
       // Without this, abandoning a turn mid-stream meant the
       // sidebar row stayed stuck at "New chat" forever even though
       // the canonical assistant turn had landed server-side.
-      onTurnLanded?.({ userText: userMsg || null, threadId: id });
+      // TS's control-flow analysis narrows `finished` to `never`
+      // here because it's only assigned inside the onEvent callback
+      // (which TS treats as opaque from outer-scope POV). Cast
+      // through the explicit type so the type is preserved.
+      const finalSeq =
+        (finished as null | { seq: number | null })?.seq ?? null;
+      onTurnLanded?.({
+        userText: userMsg || null,
+        threadId: id,
+        assistantSeq: finalSeq,
+      });
       setLastMode(id, mode);
 
       // UI updates (the usage pill in the chat surface) — gated on

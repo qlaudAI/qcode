@@ -108,6 +108,23 @@ export async function listRemoteThreads(
   return data.data;
 }
 
+/** Shallow-merge fields into a thread's server-side metadata.
+ *  Used to persist things like the auto-generated title so the
+ *  sidebar shows the same name on a second device, after a cache
+ *  wipe, on the qcode-web tab — without relying on localStorage
+ *  for any of those paths. Fire-and-forget at the callsite: a
+ *  failed PATCH leaves the thread's prior metadata intact + the
+ *  client cache still has the new value, so the UX is unaffected. */
+export async function updateThreadMetadata(
+  id: string,
+  patch: Record<string, unknown>,
+): Promise<RemoteThread> {
+  return api<RemoteThread>(`/v1/threads/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ metadata: patch }),
+  });
+}
+
 /** Soft-delete a thread on qlaud. Idempotent — already-deleted rows
  *  return 404 which we map to a no-throw resolution so the sidebar
  *  can prune optimistically without retry loops. */
