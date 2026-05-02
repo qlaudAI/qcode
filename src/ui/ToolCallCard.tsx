@@ -67,11 +67,27 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   qlaud_manage_connections: Plug,
 };
 
-export function ToolCallCard({ call }: { call: ToolCallView }) {
+export function ToolCallCard({
+  call,
+  workspace,
+  embedded,
+}: {
+  call: ToolCallView;
+  /** Workspace root path. Used to strip the prefix from tool
+   *  inputs that pass absolute paths so the displayed summary
+   *  reads `src/lib/tools.ts` instead of the full
+   *  `/Users/robeltegegne/dev/qcode/src/lib/tools.ts`. Optional
+   *  — falls back to displaying paths verbatim. */
+  workspace?: string | null;
+  /** True when this card renders INSIDE a ToolBundle. Drops the
+   *  outer border + reduces padding so a stretch of bundled
+   *  cards reads as a clean list, not a stack of nested boxes. */
+  embedded?: boolean;
+}) {
   const [userToggled, setUserToggled] = useState(false);
   const [open, setOpenState] = useState(false);
   const Icon = ICONS[call.name] ?? Wrench;
-  const summary = summarize(call);
+  const summary = summarize(call, workspace ?? null);
   const hasOutput = (call.output?.length ?? 0) > 0;
   // Auto-expand DURING streaming so users see bash progress without
   // clicking; auto-collapse once status flips to done/error to stop
@@ -90,17 +106,28 @@ export function ToolCallCard({ call }: { call: ToolCallView }) {
   return (
     <div
       className={cn(
-        'overflow-hidden rounded-lg border bg-background/70 backdrop-blur-sm transition-colors',
-        call.status === 'error'
-          ? 'border-primary/30 bg-primary/5'
-          : 'border-border/60',
+        'overflow-hidden bg-background/70 backdrop-blur-sm transition-colors',
+        // Embedded inside a ToolBundle: drop the outer border so a
+        // stretch of cards reads as a list, not nested boxes. The
+        // bundle wrapper provides the surrounding border. Standalone
+        // cards keep their own rounded border.
+        embedded
+          ? 'rounded-md'
+          : cn(
+              'rounded-lg border',
+              call.status === 'error'
+                ? 'border-primary/30 bg-primary/5'
+                : 'border-border/60',
+            ),
+        call.status === 'error' && embedded && 'bg-primary/5',
       )}
     >
       <button
         onClick={() => hasOutput && setOpen(!effectivelyOpen)}
         disabled={!hasOutput}
         className={cn(
-          'flex w-full items-center gap-2.5 px-3 py-2 text-left',
+          'flex w-full items-center gap-2.5 text-left',
+          embedded ? 'px-2 py-1' : 'px-3 py-2',
           hasOutput && 'cursor-pointer hover:bg-muted/40',
           !hasOutput && 'cursor-default',
         )}
@@ -239,15 +266,18 @@ function StatusIcon({ status }: { status: Status }) {
 
 // ─── Per-tool one-line summary in the header ──────────────────────
 
-function summarize(call: ToolCallView): string {
+function summarize(call: ToolCallView, workspace: string | null): string {
   const input = (call.input ?? {}) as Record<string, unknown>;
   switch (call.name) {
     case 'list_files':
-    case 'read_file':
-      return typeof input.path === 'string' ? input.path : '…';
+    case 'read_file': {
+      const path = typeof input.path === 'string' ? input.path : '…';
+      return relativizeForDisplay(path, workspace);
+    }
     case 'write_file':
     case 'edit_file': {
-      const path = typeof input.path === 'string' ? input.path : '…';
+      const raw = typeof input.path === 'string' ? input.path : '…';
+      const path = relativizeForDisplay(raw, workspace);
       // Surface the +N -M diff stats from the executor's success
       // message right in the header — Codex-style. Saves the user
       // from having to expand the card to see the impact.
@@ -316,4 +346,44 @@ function parseDiffStats(output: string | undefined): string | null {
   const m = /\(\+(\d+) -(\d+)\)/.exec(output);
   if (!m) return null;
   return `+${m[1]} -${m[2]}`;
+}
+
+/** Strip the workspace prefix so `/Users/x/dev/qcode/src/lib/tools.ts`
+ *  displays as `src/lib/tools.ts` — same shape my own session
+ *  output uses. The model is told to use workspace-relative paths,
+ *  but it sometimes echoes absolutes; this normalizes for display
+ *  without touching the actual tool input. */
+export function relativizeForDisplay(
+  path: string,
+  workspace: string | null,
+): string {
+  if (!workspace) return path;
+  // Trim trailing slash on workspace, then strip leading workspace
+  // path + slash from the path. Falls through to the raw path when
+  // there's no overlap (the model passed an out-of-workspace path,
+  // which the executor would reject anyway).
+  const ws = workspace.replace(/\/+$/, '');
+  if (path === ws) return '.';
+  if (path.startsWith(ws + '/')) return path.slice(ws.length + 1);
+  return path;
+}
+
+/** Sum +N -M across a stretch of edits (write_file + edit_file)
+ *  for a bundle's aggregate diff stat. Returns null when no edits
+ *  in the bundle landed stats (browser-mode stub, all errors). */
+export function aggregateDiffStats(
+  outputs: Array<string | undefined>,
+): { added: number; removed: number } | null {
+  let added = 0;
+  let removed = 0;
+  let any = false;
+  for (const out of outputs) {
+    if (!out) continue;
+    const m = /\(\+(\d+) -(\d+)\)/.exec(out);
+    if (!m) continue;
+    added += Number.parseInt(m[1] ?? '0', 10);
+    removed += Number.parseInt(m[2] ?? '0', 10);
+    any = true;
+  }
+  return any ? { added, removed } : null;
 }

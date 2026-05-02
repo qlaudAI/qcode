@@ -54,7 +54,11 @@ import { readGitInfo } from '../lib/git-info';
 import { ApprovalCard } from './ApprovalCard';
 import { Markdown } from './Markdown';
 import { MentionMenu, getMentionResults } from './MentionMenu';
-import { ToolCallCard, type ToolCallView } from './ToolCallCard';
+import {
+  ToolCallCard,
+  aggregateDiffStats,
+  type ToolCallView,
+} from './ToolCallCard';
 import { RightRail, type RightRailView } from './RightRail';
 import { invalidateThreadMessages, loadEarlierMessages } from '../lib/queries';
 import {
@@ -743,6 +747,7 @@ export function ChatSurface({
                     <ToolBundle
                       key={`bundle-${gi}`}
                       tools={group.tools}
+                      workspace={workspacePath ?? null}
                     />
                   );
                 }
@@ -752,6 +757,7 @@ export function ChatSurface({
                   <BlockRow
                     key={i}
                     block={b}
+                    workspace={workspacePath ?? null}
                     busy={busy && i === blocks.length - 1}
                     onAllow={() =>
                       b.type === 'approval' ? decide(b.id, 'allow') : undefined
@@ -1216,8 +1222,10 @@ function groupBlocks(blocks: RenderBlock[]): BlockGroup[] {
 // something to bundle.
 function ToolBundle({
   tools,
+  workspace,
 }: {
   tools: Array<Extract<RenderBlock, { type: 'tool' }>>;
+  workspace: string | null;
 }) {
   const [open, setOpen] = useState(true);
   // One-tool bundles: skip the wrapper. Same look as before.
@@ -1225,7 +1233,7 @@ function ToolBundle({
     return (
       <div className="flex pl-10">
         <div className="flex-1">
-          <ToolCallCard call={tools[0]!.call} />
+          <ToolCallCard call={tools[0]!.call} workspace={workspace} />
         </div>
       </div>
     );
@@ -1268,7 +1276,12 @@ function ToolBundle({
             <div className="border-t border-border/40 bg-muted/10 p-2">
               <div className="flex flex-col gap-1">
                 {tools.map((t) => (
-                  <ToolCallCard key={t.call.id} call={t.call} />
+                  <ToolCallCard
+                    key={t.call.id}
+                    call={t.call}
+                    workspace={workspace}
+                    embedded
+                  />
                 ))}
               </div>
             </div>
@@ -1309,8 +1322,16 @@ function bundleSummary(
     parts.push(`Ran ${counts.commands} ${counts.commands === 1 ? 'command' : 'commands'}`);
   if (counts.reads)
     parts.push(`read ${counts.reads} ${counts.reads === 1 ? 'file' : 'files'}`);
-  if (counts.edits)
-    parts.push(`edited ${counts.edits} ${counts.edits === 1 ? 'file' : 'files'}`);
+  if (counts.edits) {
+    // Total +N −M across all edit/write outputs in this bundle, so
+    // the user sees the full impact at a glance — same surface
+    // area Codex shows on a multi-file edit run.
+    const stats = aggregateDiffStats(tools.map((t) => t.call.output));
+    const tail = stats ? ` +${stats.added} −${stats.removed}` : '';
+    parts.push(
+      `edited ${counts.edits} ${counts.edits === 1 ? 'file' : 'files'}${tail}`,
+    );
+  }
   if (counts.browser)
     parts.push(`${counts.browser} browser ${counts.browser === 1 ? 'action' : 'actions'}`);
   if (counts.subagents)
@@ -1318,8 +1339,6 @@ function bundleSummary(
   if (counts.other)
     parts.push(`${counts.other} other ${counts.other === 1 ? 'tool' : 'tools'}`);
   if (parts.length === 0) return `${tools.length} actions`;
-  // Capitalize first letter; lowercase the rest so it reads as one
-  // sentence: "Ran 2 commands, read 4 files, edited 3 files."
   const joined = parts.join(', ');
   return joined.charAt(0).toUpperCase() + joined.slice(1);
 }
@@ -1327,12 +1346,14 @@ function bundleSummary(
 function BlockRow({
   block,
   busy,
+  workspace,
   onAllow,
   onReject,
   onRetry,
 }: {
   block: RenderBlock;
   busy: boolean;
+  workspace: string | null;
   onAllow?: () => void;
   onReject?: () => void;
   onRetry?: () => void;
@@ -1401,7 +1422,7 @@ function BlockRow({
     return (
       <div id={`tool-${block.call.id}`} className="flex scroll-mt-4 pl-10">
         <div className="flex-1">
-          <ToolCallCard call={block.call} />
+          <ToolCallCard call={block.call} workspace={workspace} />
         </div>
       </div>
     );
