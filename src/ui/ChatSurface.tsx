@@ -122,8 +122,8 @@ type PendingResolver = (decision: ApprovalDecision) => void;
 const SAMPLE_PROMPTS = [
   'Plan a refactor of the auth flow',          // → Staff Engineer
   'Review my recent changes for bugs',         // → Code Reviewer
-  'Audit this for OWASP issues',               // → Security
   'Build a 30-second launch video with Remotion', // → Marketing
+  'Draft cold emails to 20 founders building AI dev tools', // → Sales
 ];
 
 // Web build has no workspace + no tools — the engineers can't
@@ -1465,8 +1465,8 @@ function EmptyState({
       </h2>
       <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
         Just describe it. We&rsquo;ll route to the right specialist —
-        Staff, Reviewer, QA, DevOps, Security, Designer, Frontend,
-        Backend, or Marketing — and tell you who&rsquo;s on it.
+        Staff, Backend, Frontend, Design, Reviewer, QA, DevOps,
+        Security, Marketing, or Sales — and tell you who&rsquo;s on it.
       </p>
       {memory && (
         <div
