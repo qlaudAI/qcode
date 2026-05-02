@@ -10,11 +10,16 @@ export function ThreadList({
   currentId,
   onPick,
   onDelete,
+  snippetByThread,
 }: {
   threads: ThreadSummary[];
   currentId: string | null;
   onPick: (id: string) => void;
   onDelete: (id: string) => void;
+  /** Per-thread excerpt from semantic search, rendered under the
+   *  title so the user gets a content preview without opening the
+   *  thread. Null/undefined entries fall back to title-only. */
+  snippetByThread?: Map<string, string> | null;
 }) {
   if (threads.length === 0) {
     return (
@@ -29,6 +34,7 @@ export function ThreadList({
         <Row
           key={t.id}
           thread={t}
+          snippet={snippetByThread?.get(t.id) ?? null}
           active={t.id === currentId}
           onPick={() => onPick(t.id)}
           onDelete={() => onDelete(t.id)}
@@ -47,12 +53,14 @@ export function ThreadList({
 
 function Row({
   thread,
+  snippet,
   active,
   onPick,
   onDelete,
   onHover,
 }: {
   thread: ThreadSummary;
+  snippet: string | null;
   active: boolean;
   onPick: () => void;
   onDelete: () => void;
@@ -65,28 +73,35 @@ function Row({
       onMouseEnter={onHover}
       onFocus={onHover}
       className={cn(
-        'group relative flex items-center gap-2 rounded px-2 py-1.5 text-left transition-colors',
+        'group relative flex items-start gap-2 rounded px-2 py-1.5 text-left transition-colors',
         active ? 'bg-muted/80' : 'hover:bg-muted/50',
       )}
     >
       <button
         onClick={onPick}
-        className="flex min-w-0 flex-1 items-center gap-2"
+        className="flex min-w-0 flex-1 flex-col gap-0.5"
       >
-        <MessageSquare
-          className={cn(
-            'h-3 w-3 shrink-0',
-            active ? 'text-foreground' : 'text-muted-foreground',
-          )}
-        />
-        <span
-          className={cn(
-            'truncate text-xs',
-            active ? 'font-medium text-foreground' : 'text-foreground/85',
-          )}
-        >
-          {thread.title}
-        </span>
+        <div className="flex min-w-0 items-center gap-2">
+          <MessageSquare
+            className={cn(
+              'h-3 w-3 shrink-0',
+              active ? 'text-foreground' : 'text-muted-foreground',
+            )}
+          />
+          <span
+            className={cn(
+              'truncate text-xs',
+              active ? 'font-medium text-foreground' : 'text-foreground/85',
+            )}
+          >
+            {thread.title}
+          </span>
+        </div>
+        {snippet && (
+          <span className="ml-5 truncate text-[11px] leading-snug text-muted-foreground">
+            {snippet}
+          </span>
+        )}
       </button>
       {/* Right-side rail: timestamp by default, swaps for the trash
        *  affordance on hover. Two micro-states (idle / confirming)

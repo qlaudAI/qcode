@@ -46,6 +46,11 @@ import {
   type ThreadSummary,
 } from './lib/threads';
 import {
+  dedupeByThread,
+  searchThreads,
+  type SearchHit,
+} from './lib/search';
+import {
   getCurrentWorkspace,
   openFolderPicker,
   setCurrentWorkspace,
@@ -697,17 +702,69 @@ function Sidebar({
   onPickThread: (id: string) => void;
   onDeleteThread: (id: string) => void;
 }) {
-  // Local filter — narrows BOTH the projects section and the chats
-  // section as the user types. Empty string = pass-through. Match
-  // is case-insensitive substring on the title for now (cheap, no
-  // index needed since titles are already in memory). Cmd-K still
-  // opens the global palette for actions + files; this is the
-  // sidebar-scoped "find a conversation" affordance.
+  // Two-tier filter:
+  //   1. Instant: title-substring match runs on every keystroke for
+  //      sub-frame feedback. Auto-generated titles often miss what
+  //      the user actually remembers about the thread, but it's
+  //      free and fast.
+  //   2. Semantic: 250ms after the user stops typing, hit qlaud's
+  //      /v1/search endpoint which embeds the query and runs k-NN
+  //      against every indexed turn (user + final-assistant). The
+  //      hits ride alongside title-matches, deduped by thread_id,
+  //      score-sorted. This is what makes "find that conversation
+  //      where we discussed X" actually work.
   const [filter, setFilter] = useState('');
-  const filterLc = filter.trim().toLowerCase();
+  const filterTrimmed = filter.trim();
+  const filterLc = filterTrimmed.toLowerCase();
+  const [semanticHits, setSemanticHits] = useState<SearchHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  useEffect(() => {
+    if (!filterTrimmed) {
+      setSemanticHits([]);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const ac = new AbortController();
+    const timer = setTimeout(() => {
+      void searchThreads(filterTrimmed, { signal: ac.signal, limit: 20 }).then(
+        (hits) => {
+          setSemanticHits(dedupeByThread(hits));
+          setSearching(false);
+        },
+      );
+    }, 250);
+    return () => {
+      clearTimeout(timer);
+      ac.abort();
+      setSearching(false);
+    };
+  }, [filterTrimmed]);
+
+  // Compose visible threads:
+  //  - When no filter: all threads, default order.
+  //  - With filter: union of (title substring matches) ∪ (semantic
+  //    hits resolved to threads), sorted with semantic-hit threads
+  //    first by score, title-matches after by recency. Excerpts
+  //    from semantic hits attach as a per-thread "snippet" so the
+  //    user gets a content preview, not just a row.
   const matches = (t: ThreadSummary) =>
     !filterLc || t.title.toLowerCase().includes(filterLc);
-  const visibleThreads = threads.filter(matches);
+  let visibleThreads: ThreadSummary[];
+  let snippetByThread: Map<string, string> | null = null;
+  if (!filterLc) {
+    visibleThreads = threads;
+  } else {
+    const titleMatches = threads.filter(matches);
+    const titleMatchIds = new Set(titleMatches.map((t) => t.id));
+    const semanticThreads = semanticHits
+      .map((h) => threads.find((t) => t.id === h.thread_id))
+      .filter((t): t is ThreadSummary => !!t && !titleMatchIds.has(t.id));
+    visibleThreads = [...semanticThreads, ...titleMatches];
+    snippetByThread = new Map(
+      semanticHits.map((h) => [h.thread_id, h.snippet]),
+    );
+  }
 
   return (
     <aside className="flex h-full w-full flex-col border-r border-border/40 bg-muted/30 backdrop-blur-sm">
@@ -748,20 +805,28 @@ function Sidebar({
           activeWorkspacePath={workspace?.path ?? null}
           onPick={onPickThread}
           onDelete={onDeleteThread}
+          snippetByThread={snippetByThread}
         />
         <div>
-          <div className="px-2 pb-2 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-            Chats
+          <div className="flex items-baseline justify-between px-2 pb-2 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+            <span>Chats</span>
+            {searching && (
+              <span className="text-[9px] normal-case tracking-normal text-muted-foreground/70">
+                Searching…
+              </span>
+            )}
           </div>
           <ThreadList
             threads={visibleThreads.filter((t) => !t.workspacePath)}
             currentId={currentThreadId}
             onPick={onPickThread}
             onDelete={onDeleteThread}
+            snippetByThread={snippetByThread}
           />
-          {filterLc && visibleThreads.length === 0 && (
+          {filterLc && !searching && visibleThreads.length === 0 && (
             <p className="px-2 py-2 text-[11px] leading-relaxed text-muted-foreground">
-              No matches for &ldquo;{filter}&rdquo;.
+              No matches for &ldquo;{filter}&rdquo;. Tip: try keywords
+              from the conversation, not just the title.
             </p>
           )}
         </div>
@@ -864,12 +929,14 @@ function ProjectsSection({
   activeWorkspacePath,
   onPick,
   onDelete,
+  snippetByThread,
 }: {
   threads: ThreadSummary[];
   currentThreadId: string | null;
   activeWorkspacePath: string | null;
   onPick: (id: string) => void;
   onDelete: (id: string) => void;
+  snippetByThread?: Map<string, string> | null;
 }) {
   // Group by workspacePath. Only threads with a path land here;
   // workspace-less threads are filtered out by the caller.
@@ -913,6 +980,7 @@ function ProjectsSection({
             currentThreadId={currentThreadId}
             onPick={onPick}
             onDelete={onDelete}
+            snippetByThread={snippetByThread}
           />
         ))}
       </ul>
@@ -927,6 +995,7 @@ function ProjectGroup({
   currentThreadId,
   onPick,
   onDelete,
+  snippetByThread,
 }: {
   name: string;
   threads: ThreadSummary[];
@@ -934,6 +1003,7 @@ function ProjectGroup({
   currentThreadId: string | null;
   onPick: (id: string) => void;
   onDelete: (id: string) => void;
+  snippetByThread?: Map<string, string> | null;
 }) {
   // Active project auto-expanded. Other projects collapse — the
   // user clicks the header to expand and pick an old conversation.
@@ -997,6 +1067,7 @@ function ProjectGroup({
             currentId={currentThreadId}
             onPick={onPick}
             onDelete={onDelete}
+            snippetByThread={snippetByThread}
           />
         </div>
       </div>
