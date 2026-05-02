@@ -1,6 +1,6 @@
 {
   "name": "qcode",
-  "version": "0.1.0-alpha.48",
+  "version": "0.1.0-alpha.49",
   "private": true,
   "description": "The multi-model coding agent. Bring any model — Claude, GPT, Llama, DeepSeek — to your codebase. Powered by qlaud.",
   "type": "module",

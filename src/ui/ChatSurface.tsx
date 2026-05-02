@@ -260,30 +260,43 @@ export function ChatSurface({
   // the next thread-switch covers it.
   const messagesQuery = useThreadMessagesQuery(busy ? null : threadId);
   const lastLoadedRef = useRef<string | null>(null);
-  // Thread-switch invalidator. If a thread switch happens WHILE we
-  // were busy streaming, abort the local SSE listener + bump the
-  // run id so any late events become no-ops. The qlaud edge worker
-  // keeps the upstream call alive via waitUntil, so the turn still
-  // finishes + persists server-side — invalidate the abandoned
-  // thread's messages query so a return visit pulls the canonical
-  // history (including the now-finished response). Without this,
-  // staleTime:Infinity on the messages cache means switching back
-  // shows the pre-send empty state forever.
+  // Thread-switch invalidator. CRITICAL: we do NOT abort the
+  // network here. For text-only turns, qlaud's tee+waitUntil
+  // finishes server-side regardless. For tool-using turns (read_
+  // file, bash, etc.), qlaud is parked waiting for the client to
+  // POST tool results — aborting the SSE connection means the
+  // client never sees the qlaud.tool_dispatch_start event,
+  // never dispatches the tool, never POSTs the result, and the
+  // qlaud-side loop dies at the 60s tool-result timeout. By
+  // letting the network stay alive, the agent.ts onToolDispatch
+  // handlers keep firing even though the user is on a different
+  // thread — file reads / writes / bash all continue, results
+  // post back, model loop completes, qlaud persists the final
+  // assistant turn.
+  //
+  // What we DO on switch:
+  //  - Bump activeRunIdRef → ChatSurface's onEvent guard filters
+  //    out UI updates from the abandoned run (so its blocks state
+  //    doesn't bleed into the now-active thread).
+  //  - rejectAllApprovals → write_file/edit_file/bash that were
+  //    waiting on user click cleanly fail (treated as rejected).
+  //    Read-only tools (no approval) keep running.
+  //  - setBusy(false) → the user can send on the new thread.
+  //  - invalidateThreadMessages(prev) → so a return visit pulls
+  //    fresh canonical history (with whatever the still-running
+  //    or just-completed loop persisted).
+  //
+  // Explicit Stop (the stop button) DOES abort — that's the only
+  // path that kills the in-flight loop. See stop() below.
   const lastThreadIdRef = useRef(threadId);
   useEffect(() => {
     const prev = lastThreadIdRef.current;
     lastThreadIdRef.current = threadId;
     if (prev !== threadId && busy) {
       activeRunIdRef.current += 1;
-      abortRef.current?.abort();
       rejectAllApprovals();
       setBusy(false);
       if (prev) {
-        // Mark the abandoned thread's history as stale. Also reset
-        // lastLoadedRef for that thread so the message-load effect
-        // re-runs when the user comes back. Without resetting it
-        // would still match (we set it = id during send) and the
-        // load would silently bail.
         void invalidateThreadMessages(prev);
         if (lastLoadedRef.current === prev) lastLoadedRef.current = null;
       }
