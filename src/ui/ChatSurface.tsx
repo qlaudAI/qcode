@@ -81,8 +81,11 @@ type RenderBlock =
     }
   | {
       type: 'error';
-      /** Mapped, user-facing message. */
-      message: string;
+      /** Structured presentation — title + body + optional action.
+       *  See mapError() for the catalog of mapped codes; unmapped
+       *  errors fall through to a generic "something went wrong"
+       *  with the raw code so support can decode it. */
+      presentation: ErrorPresentation;
       /** Original send arguments so the retry button can re-invoke
        *  send() with the exact same input + attachments. Set null
        *  once the user has retried (or sent a new turn) so we don't
@@ -526,7 +529,7 @@ export function ChatSurface({
         ...b,
         {
           type: 'error',
-          message: mapError(code),
+          presentation: mapError(code),
           retry: retryInputs,
         },
       ]);
@@ -825,19 +828,112 @@ function historyToBlocks(history: Message[]): RenderBlock[] {
   return blocks;
 }
 
-function mapError(code: string): string {
-  switch (code) {
-    case 'cap_hit':
-      return "You've hit your spend cap. Top up at qlaud.ai/dashboard.";
-    case 'unauthorized':
-      return 'Authentication failed. Sign out and back in.';
-    case 'not_authed':
-      return 'Not signed in.';
-    default:
-      return code.startsWith('upstream_')
-        ? `Upstream error: ${code.replace('upstream_', '')}`
-        : `Error: ${code}`;
+// Friendly, actionable error presentation. Beats "Upstream 503"
+// every time — the goal is the user knows WHY it failed and WHAT
+// to do next, not just that something broke. Ordered roughly by
+// frequency in the wild.
+type ErrorPresentation = {
+  title: string;
+  body?: string;
+  /** Optional secondary action when a retry button isn't the right
+   *  fix (e.g. "Top up your wallet" for cap_hit). Rendered next to
+   *  the retry button. */
+  action?: { label: string; href: string };
+  severity: 'warning' | 'error';
+};
+
+function mapError(code: string): ErrorPresentation {
+  // Cap reached — wallet top-up is the right action, not retry.
+  if (code === 'cap_hit') {
+    return {
+      severity: 'warning',
+      title: 'You hit your spend cap',
+      body: 'qlaud stopped this turn before going over your set limit. Top up your wallet or raise the cap to keep going.',
+      action: { label: 'Top up wallet', href: 'https://qlaud.ai/dashboard' },
+    };
   }
+  // Auth expired / revoked.
+  if (code === 'unauthorized') {
+    return {
+      severity: 'error',
+      title: 'Sign-in expired',
+      body: 'Your qlaud session lost track of you. Sign out and back in — your conversations stay where they are.',
+    };
+  }
+  if (code === 'not_authed') {
+    return {
+      severity: 'error',
+      title: 'Not signed in',
+      body: 'Sign in with qlaud to keep going.',
+    };
+  }
+  // Thread vanished (deleted on another device, retention policy).
+  if (code === 'thread_not_found') {
+    return {
+      severity: 'warning',
+      title: 'This conversation is gone',
+      body: 'Looks like it was deleted from another device. Hit ⌘N to start a fresh one — your other chats are still here.',
+    };
+  }
+  // Upstream model errors — be specific about which model + what code.
+  // Format: upstream_<status>:<truncated body>
+  if (code.startsWith('upstream_')) {
+    const rest = code.slice('upstream_'.length);
+    const status = parseInt(rest.split(':')[0] ?? '', 10);
+    if (status === 429) {
+      return {
+        severity: 'warning',
+        title: 'The model is rate-limited',
+        body: 'Too many requests in a short window. Wait a few seconds and try again, or switch model from the title bar.',
+      };
+    }
+    if (status === 503 || status === 502) {
+      return {
+        severity: 'warning',
+        title: 'The model is taking a breather',
+        body: 'Upstream is unavailable right now. Try again, or pick a different model from the title bar — qlaud routes to whichever provider you choose.',
+      };
+    }
+    if (status === 400) {
+      return {
+        severity: 'error',
+        title: 'Model rejected the request',
+        body: 'Sometimes a turn ends up too long for the model\u2019s context window, or the attachment isn\u2019t supported. Try sending less, or switch to a model with a larger context.',
+      };
+    }
+    return {
+      severity: 'error',
+      title: `Upstream error · ${status || 'unknown'}`,
+      body: 'qlaud forwarded the request but the model\u2019s host returned an error. Retry or switch model.',
+    };
+  }
+  // Aborts (user cancelled).
+  if (code.toLowerCase().includes('abort')) {
+    return {
+      severity: 'warning',
+      title: 'Cancelled',
+      body: 'You stopped the turn. Send again to continue.',
+    };
+  }
+  // Network / DNS / offline.
+  if (
+    code.toLowerCase().includes('fetch') ||
+    code.toLowerCase().includes('network') ||
+    code.toLowerCase().includes('failed to fetch')
+  ) {
+    return {
+      severity: 'warning',
+      title: 'Looks like you\u2019re offline',
+      body: 'Couldn\u2019t reach qlaud. Check your connection and try again.',
+    };
+  }
+  // Default — surface the raw code so the user can paste it to support
+  // without us needing to add a case for every esoteric failure.
+  return {
+    severity: 'error',
+    title: 'Something went wrong',
+    body: `Error code: ${code}. Try again, or copy this and ping support if it keeps happening.`,
+  };
 }
 
 // ─── Render rows ───────────────────────────────────────────────────
@@ -948,21 +1044,54 @@ function BlockRow({
     );
   }
   if (block.type === 'error') {
+    const p = block.presentation;
+    // Warning-level errors (cap, rate limit, network) get a softer
+    // amber palette; hard errors (auth, 4xx) keep the destructive red.
+    const isWarning = p.severity === 'warning';
+    const ringClass = isWarning
+      ? 'border-amber-500/30 bg-amber-500/5'
+      : 'border-destructive/30 bg-destructive/5';
+    const iconClass = isWarning ? 'text-amber-600' : 'text-destructive';
     return (
       <div className="flex pl-10">
-        <div className="flex flex-1 items-start gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-3.5 py-2.5">
-          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-          <div className="flex-1 text-sm text-foreground/85">
-            {block.message}
+        <div
+          className={`flex flex-1 flex-col gap-2 rounded-xl border px-3.5 py-2.5 ${ringClass}`}
+        >
+          <div className="flex items-start gap-3">
+            <AlertCircle className={`mt-0.5 h-4 w-4 shrink-0 ${iconClass}`} />
+            <div className="flex-1">
+              <div className="text-sm font-medium text-foreground">
+                {p.title}
+              </div>
+              {p.body && (
+                <div className="mt-1 text-[13px] leading-relaxed text-foreground/75">
+                  {p.body}
+                </div>
+              )}
+            </div>
           </div>
-          {block.retry && (
-            <button
-              onClick={() => onRetry?.()}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground/80 transition-colors hover:border-foreground/30 hover:text-foreground"
-            >
-              <RotateCcw className="h-3 w-3" />
-              Retry
-            </button>
+          {(block.retry || p.action) && (
+            <div className="flex items-center justify-end gap-2 pt-1">
+              {p.action && (
+                <a
+                  href={p.action.href}
+                  target="_blank"
+                  rel="noopener"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                >
+                  {p.action.label} →
+                </a>
+              )}
+              {block.retry && (
+                <button
+                  onClick={() => onRetry?.()}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground/80 transition-colors hover:border-foreground/30 hover:text-foreground"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  Retry
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>
