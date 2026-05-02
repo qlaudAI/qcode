@@ -10,16 +10,18 @@
 import {
   CheckCircle2,
   ChevronRight,
+  ExternalLink,
   GitCompare,
   ListTodo,
   Loader2,
   Play,
   RefreshCw,
+  RotateCw,
   Terminal as TerminalIcon,
   X,
   XCircle,
 } from 'lucide-react';
-import { useEffect, useState, type ComponentType } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { cn } from '../lib/cn';
 import { readWorkspaceDiff, type FileDiff } from '../lib/git-info';
@@ -103,7 +105,7 @@ export function RightRail({
         {view === 'files' && <FilesView workspacePath={workspacePath} />}
         {view === 'diff' && <DiffView workspacePath={workspacePath} />}
           {view === 'terminal' && <TerminalView tools={tools} />}
-          {view === 'preview' && <ComingSoon icon={Play} label="Preview" hint="Browser preview powered by Playwright MCP — coming next." />}
+          {view === 'preview' && <PreviewView blocks={blocks} />}
         </div>
       </aside>
     </>
@@ -358,6 +360,142 @@ function FilesView({ workspacePath }: { workspacePath?: string | null }) {
 // out of the chat blocks and into a persistent reading lens —
 // useful when the agent runs ten commands and you want to scan
 // them as a build log instead of scrolling through prose.
+
+// ─── Preview ──────────────────────────────────────────────────────
+//
+// Live iframe of the URL the agent is currently working with. Auto-
+// fills from the most recent browser_navigate tool call so a typical
+// flow (agent boots dev server → browser_navigate localhost:3001 →
+// user pops the Preview tab) shows the page without typing anything.
+// Manual URL bar lets the user point at any local server qcode hasn't
+// touched yet (e.g. they ran `pnpm dev` themselves on a custom port).
+//
+// Why iframe: zero new permissions, works for any localhost URL the
+// dev server allows in CSP. Limitations are honest — sites that send
+// X-Frame-Options: DENY won't load (most prod sites). For local dev
+// the dev server typically allows iframing same-origin, so this just
+// works for what it's actually for.
+
+function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
+  // Pull the most recent URL from any browser_navigate tool call.
+  // Re-derives on every render — cheap, blocks list rarely changes
+  // mid-render and the lookup is at most 100s of items.
+  const lastNavigatedUrl = useMemo(() => {
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i];
+      if (
+        b &&
+        b.type === 'tool' &&
+        (b as ToolBlock).call.name === 'browser_navigate'
+      ) {
+        const input = (b as ToolBlock).call.input as { url?: unknown };
+        if (typeof input.url === 'string') return input.url;
+      }
+    }
+    return '';
+  }, [blocks]);
+
+  const [url, setUrl] = useState(lastNavigatedUrl || 'http://localhost:3000');
+  const [loadedUrl, setLoadedUrl] = useState(lastNavigatedUrl);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  // Auto-load when the agent navigates to a new URL (and the user
+  // hasn't typed something different). Keeps the panel in sync with
+  // what the model is doing without forcing the user to refresh.
+  useEffect(() => {
+    if (lastNavigatedUrl && lastNavigatedUrl !== loadedUrl) {
+      setUrl(lastNavigatedUrl);
+      setLoadedUrl(lastNavigatedUrl);
+    }
+  }, [lastNavigatedUrl, loadedUrl]);
+
+  function load() {
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    setLoadedUrl(trimmed);
+  }
+
+  function reload() {
+    if (!iframeRef.current) return;
+    // Re-set src to force a reload; .reload() on contentWindow can
+    // throw on cross-origin even for localhost in some cases.
+    const current = loadedUrl;
+    setLoadedUrl('');
+    setTimeout(() => setLoadedUrl(current), 0);
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              load();
+            }
+          }}
+          placeholder="http://localhost:3000"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          className="min-w-0 flex-1 rounded border border-border/60 bg-background px-2 py-1 font-mono text-[11px] outline-none focus:ring-2 focus:ring-primary/30"
+        />
+        <button
+          onClick={load}
+          aria-label="Load URL"
+          className="grid h-7 w-7 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          title="Load"
+        >
+          <Play className="h-3.5 w-3.5" />
+        </button>
+        <button
+          onClick={reload}
+          aria-label="Reload preview"
+          disabled={!loadedUrl}
+          className="grid h-7 w-7 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          title="Reload"
+        >
+          <RotateCw className="h-3.5 w-3.5" />
+        </button>
+        {loadedUrl && (
+          <a
+            href={loadedUrl}
+            target="_blank"
+            rel="noreferrer"
+            aria-label="Open in browser"
+            className="grid h-7 w-7 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title="Open in default browser"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        )}
+      </div>
+      {loadedUrl ? (
+        <iframe
+          ref={iframeRef}
+          src={loadedUrl}
+          className="min-h-0 w-full flex-1 border-0 bg-white"
+          // Allow same-origin so cookies/storage work for localhost
+          // dev. Don't allow scripts to escape the frame (default
+          // sandbox). For dev servers this covers the typical case.
+          sandbox="allow-same-origin allow-scripts allow-forms"
+          referrerPolicy="no-referrer"
+        />
+      ) : (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
+          <Play className="h-5 w-5 text-muted-foreground/60" />
+          <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+            Type a URL above and press Enter, or ask the agent to{' '}
+            <span className="font-mono">browser_navigate</span> to a
+            URL — the preview will sync automatically.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function TerminalView({ tools }: { tools: ToolBlock[] }) {
   const bash = tools.filter((t) => t.call.name === 'bash');
@@ -665,28 +803,3 @@ function DiffPatch({ patch }: { patch: string }) {
   );
 }
 
-// ─── Coming-soon placeholder ──────────────────────────────────────
-
-function ComingSoon({
-  icon: Icon,
-  label,
-  hint,
-}: {
-  icon: ComponentType<{ className?: string }>;
-  label: string;
-  hint: string;
-}) {
-  return (
-    <div className="flex flex-col items-center gap-3 px-6 py-12 text-center">
-      <span className="grid h-9 w-9 place-items-center rounded-xl bg-muted/60 text-foreground/70">
-        <Icon className="h-4 w-4" />
-      </span>
-      <div className="space-y-1">
-        <p className="text-[12.5px] font-semibold text-foreground">{label}</p>
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {hint}
-        </p>
-      </div>
-    </div>
-  );
-}

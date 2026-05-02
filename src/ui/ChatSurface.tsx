@@ -125,6 +125,11 @@ type RenderBlock =
       status: 'running' | 'done' | 'error';
       /** Final text the subagent returned. Populated on subagent_done. */
       summary: string | null;
+      /** Child agent's events rendered nested under this card —
+       *  tool calls, text deltas, approvals, etc. produced by the
+       *  subagent's runThreadAgent flow into this list so the user
+       *  sees progress live instead of an opaque "running" pill. */
+      innerBlocks: RenderBlock[];
     }
   | {
       type: 'checkpoint';
@@ -842,13 +847,15 @@ export function ChatSurface({
 }
 
 // ─── Event router (mutates render blocks as the agent loop runs) ───
+//
+// reduceBlocks is the pure transform — given current blocks + an
+// event, it returns the next blocks. Extracted from handleEvent so
+// the subagent_event case can recurse on its own innerBlocks list
+// without firing a second setBlocks (which would race against the
+// parent's call). One pure function, two callers.
 
-function handleEvent(
-  e: AgentEvent,
-  setBlocks: React.Dispatch<React.SetStateAction<RenderBlock[]>>,
-): void {
-  setBlocks((blocks) => {
-    switch (e.type) {
+function reduceBlocks(blocks: RenderBlock[], e: AgentEvent): RenderBlock[] {
+  switch (e.type) {
       case 'turn_start':
         // Each new model turn opens with an empty assistant_text
         // block. The first text delta fills it; if the model goes
@@ -953,8 +960,24 @@ function handleEvent(
             description: e.description,
             status: 'running',
             summary: null,
+            innerBlocks: [],
           },
         ];
+
+      case 'subagent_event':
+        // Route the child's event into the matching subagent block's
+        // innerBlocks instead of mixing into the parent's blocks.
+        // Without this, the subagent's tool calls render at the top
+        // level, indistinguishable from the parent's — the user sees
+        // tools firing but can't tell which run owns them, and the
+        // Subagent header just shows "running" with no visible work.
+        return blocks.map((b) => {
+          if (b.type !== 'subagent' || b.parentToolUseId !== e.parentToolUseId) {
+            return b;
+          }
+          const nextInner = reduceBlocks(b.innerBlocks, e.inner);
+          return { ...b, innerBlocks: nextInner };
+        });
 
       case 'subagent_done':
         return blocks.map((b) =>
@@ -974,17 +997,14 @@ function handleEvent(
       case 'error':
       default:
         return blocks;
-    }
-  });
-
-  // subagent_event lives outside the setBlocks closure: it recurses
-  // by calling handleEvent again on the inner event, which fires its
-  // own setBlocks. Done this way (rather than inside the switch) so
-  // each inner event is its own state transition — feels exactly like
-  // the parent's event handling, just with a Subagent header above.
-  if (e.type === 'subagent_event') {
-    handleEvent(e.inner, setBlocks);
   }
+}
+
+function handleEvent(
+  e: AgentEvent,
+  setBlocks: React.Dispatch<React.SetStateAction<RenderBlock[]>>,
+): void {
+  setBlocks((blocks) => reduceBlocks(blocks, e));
 }
 
 // Convert a persisted Anthropic-shape conversation back into the
@@ -1531,7 +1551,7 @@ function BlockRow({
     );
   }
   if (block.type === 'subagent') {
-    return <SubagentBlock block={block} />;
+    return <SubagentBlock block={block} workspace={workspace} />;
   }
   // assistant_text
   if (!block.text && busy) {
@@ -1767,24 +1787,35 @@ function UsagePill({
 // sees as its tool_result).
 function SubagentBlock({
   block,
+  workspace,
 }: {
   block: Extract<RenderBlock, { type: 'subagent' }>;
+  workspace: string | null;
 }) {
-  const [open, setOpen] = useState(false);
+  // Default open while running so the user sees progress unfold; flip
+  // to summary-only after the subagent completes (the inner trace is
+  // still revealable via the toggle).
   const isRunning = block.status === 'running';
   const isError = block.status === 'error';
+  const [open, setOpen] = useState(true);
   const summaryText = block.summary ?? '';
+  const hasInner = block.innerBlocks.length > 0;
+  // Auto-collapse the inner trace once the subagent finishes — the
+  // summary is the answer, the trace is the receipts. User can reopen.
+  useEffect(() => {
+    if (!isRunning) setOpen(false);
+  }, [isRunning]);
   return (
     <div className="flex pl-10">
       <div
         className={cn(
-          'flex-1 rounded-lg border px-3 py-2',
+          'min-w-0 flex-1 rounded-lg border',
           isError
             ? 'border-primary/30 bg-primary/5'
             : 'border-border/60 bg-muted/30',
         )}
       >
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 px-3 py-2">
           <span
             className={cn(
               'inline-block h-1.5 w-1.5 shrink-0 rounded-full',
@@ -1798,31 +1829,73 @@ function SubagentBlock({
           <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
             Subagent
           </span>
-          <span className="text-[12px] font-medium text-foreground">
+          <span className="min-w-0 truncate text-[12px] font-medium text-foreground">
             {block.description || '(no description)'}
           </span>
-          {isRunning && (
+          {isRunning && hasInner && (
             <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
-              running
+              {block.innerBlocks.length} step
+              {block.innerBlocks.length === 1 ? '' : 's'}
             </span>
           )}
-          {!isRunning && summaryText && (
+          {(hasInner || summaryText) && (
             <button
               onClick={() => setOpen((o) => !o)}
-              className="ml-auto text-[10.5px] text-muted-foreground hover:text-foreground"
+              className="ml-auto shrink-0 text-[10.5px] text-muted-foreground hover:text-foreground"
             >
-              {open ? 'hide summary' : 'view summary'}
+              {open ? 'hide' : isRunning ? 'show progress' : 'show trace'}
             </button>
           )}
         </div>
-        {open && summaryText && (
-          <div className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border/40 bg-background/60 p-2 text-[11px] leading-relaxed text-foreground/85">
-            {summaryText}
+        {open && hasInner && (
+          <div className="border-t border-border/40 bg-background/40 p-2">
+            <div className="flex flex-col gap-1.5">
+              {block.innerBlocks.map((b, i) => (
+                <SubagentInner key={i} block={b} workspace={workspace} />
+              ))}
+            </div>
+          </div>
+        )}
+        {!isRunning && summaryText && (
+          <div className="border-t border-border/40 px-3 py-2">
+            <div className="max-h-72 overflow-auto whitespace-pre-wrap text-[11.5px] leading-relaxed text-foreground/90">
+              {summaryText}
+            </div>
           </div>
         )}
       </div>
     </div>
   );
+}
+
+// Render a single inner block from a subagent's runThreadAgent stream.
+// Smaller, denser variant of the parent's BlockRow — no avatar gutter,
+// no approval cards (subagent approvals bubble up to the parent UI).
+function SubagentInner({
+  block,
+  workspace,
+}: {
+  block: RenderBlock;
+  workspace: string | null;
+}) {
+  if (block.type === 'tool') {
+    if (block.call.name === 'todo_write') return null;
+    return <ToolCallCard call={block.call} workspace={workspace} embedded />;
+  }
+  if (block.type === 'assistant_text') {
+    if (!block.text) return null;
+    return (
+      <div className="px-2 py-1 text-[12px] leading-relaxed text-foreground/85">
+        <Markdown source={block.text} />
+      </div>
+    );
+  }
+  if (block.type === 'subagent') {
+    // Nested subagents are blocked at depth-1 by the agent layer, but
+    // render defensively just in case.
+    return <SubagentBlock block={block} workspace={workspace} />;
+  }
+  return null;
 }
 
 // Indicator shown when the user lands on a thread that has an
