@@ -65,6 +65,27 @@ import { SettingsDrawer } from './ui/SettingsDrawer';
 import { SignInGate } from './ui/SignInGate';
 import { ThreadList } from './ui/ThreadList';
 
+// Extract a thread id from the URL path. qlaud thread ids are
+// UUIDs (8-4-4-4-12 hex), so we accept either a bare segment that
+// matches that shape or any non-empty path segment when running
+// on Tauri (where the URL is app-internal and we control the
+// shape). Returns null on the root path or anything malformed.
+function parseThreadIdFromPath(): string | null {
+  if (typeof window === 'undefined') return null;
+  const segment = window.location.pathname.replace(/^\/+/, '').split('/')[0];
+  if (!segment) return null;
+  // Accept the qlaud UUID shape strictly so we don't try to
+  // interpret /auth or /sign-in or other future routes as threads.
+  if (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      segment,
+    )
+  ) {
+    return segment;
+  }
+  return null;
+}
+
 export function App() {
   const [authed, setAuthed] = useState<boolean>(() => Boolean(getKey()));
   const [model, setModel] = useState<string>(() => getSettings().defaultModel);
@@ -168,12 +189,35 @@ export function App() {
     : null;
 
   const [currentId, setCurrentId] = useState<string | null>(() => {
-    // Seed from the cached threads list so refreshing the app lands
-    // on the same conversation. Falls through to null when the cache
-    // is empty (first run or post sign-out).
-    const cachedFirst = threadsQuery.data?.[0]?.id;
-    return cachedFirst ?? null;
+    // Boot priority: URL path > cached-first-thread > null.
+    // On web, /{threadId} survives refresh + back/forward + shared
+    // links. On Tauri the URL is internal but the same parsing is
+    // safe (no path = falls through to cache).
+    const fromUrl = parseThreadIdFromPath();
+    if (fromUrl) return fromUrl;
+    return threadsQuery.data?.[0]?.id ?? null;
   });
+
+  // Two-way URL sync. When currentId changes (user clicks a thread,
+  // newThread fires, switchThread, or the deleted-thread fallback
+  // runs), reflect it in the address bar — refresh stays put,
+  // shared links open the same conversation. Browser back/forward
+  // (popstate) feeds the URL value back into currentId so history
+  // navigation works as a thread-switcher on the web.
+  useEffect(() => {
+    const desired = currentId ? `/${currentId}` : '/';
+    if (window.location.pathname !== desired) {
+      window.history.replaceState(null, '', desired);
+    }
+  }, [currentId]);
+  useEffect(() => {
+    function onPop() {
+      const id = parseThreadIdFromPath();
+      setCurrentId(id);
+    }
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
 
   // If the active thread vanished from the remote (deleted on another
   // device), fall back to whatever the list says is most recent.

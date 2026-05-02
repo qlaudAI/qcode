@@ -1,0 +1,7 @@
+# SPA fallback for Cloudflare Pages. Any path that doesn't match a
+# real asset (assets/*, _redirects, the root index.html) falls
+# through to index.html so the React router can read the URL and
+# render the right thread. Without this, refreshing on
+# qcode.qlaud.ai/<threadId> returns the Pages 404 page instead of
+# the chat surface.
+/*  /index.html  200

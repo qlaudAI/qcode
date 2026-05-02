@@ -594,16 +594,21 @@ export function ChatSurface({
           }),
       });
 
-      if (runId !== activeRunIdRef.current) return;
+      // Per-thread state updates fire regardless of which thread
+      // the UI is currently showing — the title/mode/balance belong
+      // to the thread that finished, not to the active one.
+      // Without this, abandoning a turn mid-stream meant the
+      // sidebar row stayed stuck at "New chat" forever even though
+      // the canonical assistant turn had landed server-side.
       onTurnLanded?.({ userText: userMsg || null, threadId: id });
-      // Remember which mode this turn ran in so the next send can
-      // detect a plan → agent transition.
       setLastMode(id, mode);
 
-      // qlaud's qlaud.done event already ships cost_micros — append
-      // the usage pill directly from that without round-tripping
-      // /v1/billing/balance again. invalidateBalance() in
-      // onTurnLanded keeps the title-bar spend bar in sync.
+      // UI updates (the usage pill in the chat surface) — gated on
+      // the runId because the pill belongs to the chat the user is
+      // looking at; rendering it into the wrong thread would be
+      // worse than dropping it.
+      if (runId !== activeRunIdRef.current) return;
+
       if (finished) {
         const f: {
           usage: { inputTokens: number; outputTokens: number };
