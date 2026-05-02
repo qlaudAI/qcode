@@ -42,6 +42,7 @@ import {
   useThreadsQuery,
 } from './lib/queries';
 import {
+  getRemoteThreadMessages,
   titleFromPrompt,
   type ThreadSummary,
 } from './lib/threads';
@@ -50,6 +51,7 @@ import {
   searchThreads,
   type SearchHit,
 } from './lib/search';
+import { generateThreadTitle } from './lib/title-gen';
 import {
   getCurrentWorkspace,
   openFolderPicker,
@@ -347,9 +349,17 @@ export function App() {
     return result.summary.id;
   }, [currentId, model, workspace, createMutation]);
 
-  // ChatSurface reports back when a turn lands. Patch the title (if
-  // still the "New chat" placeholder), bump updatedAt, and invalidate
-  // balance so the spend bar reflects this turn's spend.
+  // ChatSurface reports back when a turn lands. Two-stage title
+  // update:
+  //   1. Synchronous: drop the "New chat" placeholder by deriving
+  //      a quick title from the user's prompt — better than
+  //      nothing while the LLM call is in flight, lands in <1ms.
+  //   2. Async: kick off generateThreadTitle() which hits qlaud
+  //      with a tiny Haiku call to summarize the conversation
+  //      properly. Rewrites the local cache when it returns.
+  // Skipped when titleSource === 'user' (manual rename in the
+  // future). Per-turn regen because purposes shift mid-thread —
+  // a refactor session may turn into a debug session.
   const onTurnLanded = useCallback(
     (info: { userText: string | null; threadId: string }) => {
       const list =
@@ -358,9 +368,39 @@ export function App() {
       const patch: Partial<ThreadSummary> = { updatedAt: Date.now() };
       if (existing?.title === 'New chat' && info.userText) {
         patch.title = titleFromPrompt(info.userText);
+        patch.titleSource = 'auto';
       }
       patchThread(info.threadId, patch);
       void invalidateBalance();
+
+      // Async polish — fire and forget. Refetch the canonical
+      // history first (the Query cache might still hold the pre-
+      // send snapshot) so we summarize what just happened, not
+      // what was there before.
+      if (existing?.titleSource !== 'user') {
+        void (async () => {
+          const fresh = await queryClient.fetchQuery({
+            queryKey: qk.threadMessages(info.threadId),
+            queryFn: () => getRemoteThreadMessages(info.threadId),
+            // staleTime:0 forces a network hit; without this the
+            // cached pre-send data short-circuits and we summarize
+            // an empty thread.
+            staleTime: 0,
+          });
+          if (!fresh.messages.length) return;
+          const generated = await generateThreadTitle(fresh.messages);
+          if (!generated) return;
+          // Bail if user manually edited between kickoff and now.
+          const list =
+            queryClient.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
+          const row = list.find((s) => s.id === info.threadId);
+          if (row?.titleSource === 'user') return;
+          patchThread(info.threadId, {
+            title: generated,
+            titleSource: 'auto',
+          });
+        })();
+      }
     },
     [],
   );

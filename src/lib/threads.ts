@@ -34,6 +34,13 @@ export type ThreadSummary = {
   /** Last segment of the workspace path, cached for sidebar display
    *  so we don't re-derive it on every render. */
   workspaceName?: string;
+  /** Where the title came from. 'auto' = first-prompt or LLM-
+   *  generated; safe to overwrite on every turn. 'user' = the
+   *  user manually renamed it; auto-regen leaves it alone. We
+   *  default to 'auto' on every code path — the user-edit UI
+   *  hasn't shipped yet but the field is here so the contract
+   *  is correct from day one. */
+  titleSource?: 'auto' | 'user';
 };
 
 // ─── Remote API ────────────────────────────────────────────────────
