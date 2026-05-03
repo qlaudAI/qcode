@@ -709,6 +709,19 @@ async function runReadFile(
       `File too large (${info.size} bytes; limit is ${MAX_FILE_BYTES}). Use grep to narrow.`,
     );
   }
+  // Pre-read hook (alpha.77). Lets users gate what the agent can
+  // read — most common ask: "don't let the agent see secrets.env."
+  // The hook receives {path, requested} and exits non-zero to deny
+  // with an explanatory message the model sees as a tool error.
+  const preRead = await runHook({
+    workspace: opts.workspace,
+    event: 'pre_read_file',
+    input: { path: relativizePath(abs, opts.workspace), requested },
+  });
+  if (!preRead.proceed) {
+    return err(call.id, preRead.message);
+  }
+
   const text = await readTextFile(abs);
   // Record the read so subsequent write_file/edit_file can confirm
   // the agent has seen the file recently. recordRead() is module-
@@ -1400,9 +1413,28 @@ async function runVerify(
   const body =
     (result.stdout ? `--- stdout ---\n${result.stdout}` : '') +
     (result.stderr ? `${result.stdout ? '\n' : ''}--- stderr ---\n${result.stderr}` : '');
+
+  // Post-verify hook (alpha.77). Branches on PASS/FAIL — common use:
+  // notify a Slack channel on FAIL, or run an extra step (e.g. lint
+  // fix) automatically. Hook receives the structured result; if it
+  // returns a message, that's appended to what the model sees so
+  // the user's automation surfaces in the agent's reasoning loop.
+  const postVerify = await runHook({
+    workspace: opts.workspace,
+    event: 'post_verify',
+    input: {
+      command: resolved.command,
+      source: resolved.source,
+      exit_code: result.exitCode,
+      passed,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    },
+  });
+  const finalBody = postVerify.message ? `${head}${body}\n[post_verify hook]\n${postVerify.message}` : head + body;
   return passed
-    ? ok(call.id, head + body)
-    : err(call.id, head + body);
+    ? ok(call.id, finalBody)
+    : err(call.id, finalBody);
 }
 
 // ─── Skill ────────────────────────────────────────────────────────

@@ -37,12 +37,53 @@ import { CONFIG_DIR_ALIASES } from './qcode-paths';
 import { isTauri } from './tauri';
 
 export type HookEvent =
+  // Tool-level hooks (existing).
   | 'pre_bash'
   | 'post_bash'
   | 'pre_write_file'
   | 'post_write_file'
   | 'pre_edit_file'
-  | 'post_edit_file';
+  | 'post_edit_file'
+  // Read-side hooks (alpha.77). Lets users log / audit / restrict
+  // what files the agent reads (e.g. "block read of secrets.env").
+  | 'pre_read_file'
+  | 'post_read_file'
+  | 'pre_grep'
+  | 'pre_glob'
+  // Session lifecycle hooks (alpha.77). Pattern from Claude Code's
+  // SessionStart / SessionEnd. Fires once per qcode session — useful
+  // for "warm the dev server", "tail logs", "snapshot git state".
+  | 'session_start'
+  | 'session_end'
+  // Per-turn hooks (alpha.77). Fires before/after every assistant
+  // turn. Common use: dump the user's prompt to a log; on stop,
+  // notify a Slack channel that the agent finished.
+  | 'user_prompt_submit'
+  | 'turn_start'
+  | 'turn_end'
+  // Subagent lifecycle (alpha.77). Pattern from Claude Code's
+  // SubagentStart / SubagentStop. Lets users observe / log /
+  // intervene around dispatch boundaries.
+  | 'subagent_start'
+  | 'subagent_end'
+  // Compaction lifecycle (alpha.77). Pattern from Claude Code's
+  // PreCompact / PostCompact. Lets users back up the pre-compact
+  // history (e.g. write to a transcript file) before it shrinks.
+  | 'pre_compact'
+  | 'post_compact'
+  // Permission lifecycle (alpha.77). Lets users observe what was
+  // asked, what was approved, what was denied — useful for org
+  // policy auditing.
+  | 'permission_asked'
+  | 'permission_resolved'
+  // Workspace lifecycle (alpha.77).
+  | 'workspace_open'
+  | 'workspace_close'
+  // Verify lifecycle (alpha.77). Distinct from post_bash because
+  // verify has a known PASS/FAIL contract a hook can branch on
+  // (e.g. "on FAIL, post to a Slack channel; on PASS, do nothing").
+  | 'pre_verify'
+  | 'post_verify';
 
 export type HookResult = {
   /** Whether the tool should proceed. Pre-hooks set this to false
