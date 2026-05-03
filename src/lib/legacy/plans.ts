@@ -15,7 +15,7 @@
 // thread/session) so the user has history.
 
 import { pickWriteAlias } from './qcode-paths';
-import { isTauri } from './tauri';
+import { isTauri } from '../tauri';
 
 const PLAN_NOUNS = [
   'aurora', 'borealis', 'cascade', 'delta', 'eclipse', 'foundry',

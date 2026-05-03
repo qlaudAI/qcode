@@ -14,7 +14,7 @@
 
 import { ExternalLink, Plug, Search, Wrench } from 'lucide-react';
 
-import { openExternal } from '../../lib/tauri';
+import { openExternal } from '../../../lib/tauri';
 
 export function MetaToolView({
   name,

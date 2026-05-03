@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Check, Copy, FileText } from 'lucide-react';
 
-import { cn } from '../../lib/cn';
+import { cn } from '../../../lib/cn';
 
 // read_file output is the full file body. We render it with line
 // numbers + a copy button + a soft cap so a 200KB file doesn't lock

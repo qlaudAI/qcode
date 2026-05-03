@@ -3,12 +3,12 @@
 // sensitive: just paths). The actual file contents come from
 // Tauri's fs plugin on demand; we don't cache them here.
 
-import { killBashSession } from './bash-session';
-import { probeEnv } from './env-probe';
+import { killBashSession } from './legacy/bash-session';
+import { probeEnv } from './legacy/env-probe';
 import { buildMatcher, type IgnoreMatcher } from './gitignore';
-import { getProjectMemory } from './memory';
-import { clearPermissionRulesCache } from './permission-rules';
-import { clearAllReads } from './read-cache';
+import { getProjectMemory } from './legacy/memory';
+import { clearPermissionRulesCache } from './legacy/permission-rules';
+import { clearAllReads } from './legacy/read-cache';
 import { isTauri, pickFolder } from './tauri';
 
 const CURRENT_KEY = 'qcode.workspace.current';

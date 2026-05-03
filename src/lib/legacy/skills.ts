@@ -27,7 +27,7 @@
 
 import { asString, asStringArray, parseDocument } from './frontmatter';
 import { listConfigDir } from './qcode-paths';
-import { isTauri } from './tauri';
+import { isTauri } from '../tauri';
 
 export type Skill = {
   /** Stable identifier the model invokes via `skill(name)`. */

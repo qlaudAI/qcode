@@ -20,7 +20,7 @@ import {
 import { isTauri } from '../lib/tauri';
 import { posthog } from '../lib/analytics';
 
-import { runThreadAgent, type AgentEvent } from '../lib/agent';
+import { runThreadAgent, type AgentEvent } from '../lib/legacy/agent';
 import { buildAttachmentContext } from '../lib/attachments';
 import { cn } from '../lib/cn';
 import { type AttachedImage } from '../lib/images';
@@ -32,7 +32,7 @@ import {
   type AttachedFile,
   type AttachedText,
 } from '../lib/uploads';
-import { getProjectMemory, type ProjectMemory } from '../lib/memory';
+import { getProjectMemory, type ProjectMemory } from '../lib/legacy/memory';
 import { MODELS, contextWindowFor } from '../lib/models';
 import { planToAgentHandoff, setLastMode } from '../lib/mode-tracking';
 import { getSettings } from '../lib/settings';
@@ -40,7 +40,7 @@ import type { ContentBlock, Message } from '../lib/qlaud-client';
 import { type CompactionInfo } from '../lib/threads';
 import { useThreadMessagesQuery } from '../lib/queries';
 import { QlaudMark } from './QlaudMark';
-import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
+import type { ApprovalDecision, ApprovalRequest } from '../lib/legacy/tools';
 import {
   registerApproval,
   rejectAllApprovals,
@@ -51,14 +51,14 @@ import {
   listAllFiles,
 } from '../lib/workspace';
 import { readGitInfo } from '../lib/git-info';
-import { ApprovalCard } from './ApprovalCard';
+import { ApprovalCard } from './legacy/ApprovalCard';
 import { Markdown } from './Markdown';
 import { MentionMenu, getMentionResults } from './MentionMenu';
 import {
   ToolCallCard,
   aggregateDiffStats,
   type ToolCallView,
-} from './ToolCallCard';
+} from './legacy/ToolCallCard';
 import { RightRail, type RightRailView } from './RightRail';
 import { invalidateThreadMessages, loadEarlierMessages } from '../lib/queries';
 import {

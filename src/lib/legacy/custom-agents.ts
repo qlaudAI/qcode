@@ -27,7 +27,7 @@
 
 import { asString, asStringArray, parseDocument } from './frontmatter';
 import { listConfigDir } from './qcode-paths';
-import { isTauri } from './tauri';
+import { isTauri } from '../tauri';
 
 /** Tools a custom agent gets when frontmatter doesn't list any —
  *  read-only investigation set. Mirrors the Explorer agent's posture:

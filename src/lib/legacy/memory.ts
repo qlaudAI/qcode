@@ -28,7 +28,7 @@ import {
   listConfigDir,
   type DiscoveredFile,
 } from './qcode-paths';
-import { isTauri } from './tauri';
+import { isTauri } from '../tauri';
 
 /** Hard cap on total concatenated memory. Most projects run well
  *  under 5KB; anything larger usually means a runaway README got

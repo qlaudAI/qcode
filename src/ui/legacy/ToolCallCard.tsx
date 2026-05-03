@@ -23,7 +23,7 @@ import {
   Wrench,
 } from 'lucide-react';
 
-import { cn } from '../lib/cn';
+import { cn } from '../../lib/cn';
 import { BashView } from './tool-output/BashView';
 import { BrowserView } from './tool-output/BrowserView';
 import { GlobView } from './tool-output/GlobView';

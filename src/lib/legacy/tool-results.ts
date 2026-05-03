@@ -8,7 +8,7 @@
 // apps/edge/src/routes/threads.ts handleSubmitToolResult for the
 // receiving side.
 
-import { getKey } from './auth';
+import { getKey } from '../auth';
 
 const BASE =
   (import.meta.env.VITE_QLAUD_BASE as string | undefined) ??

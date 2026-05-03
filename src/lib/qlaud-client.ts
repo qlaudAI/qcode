@@ -12,7 +12,7 @@
 // narrow: stream parsing + a strict subset of the message shape.
 
 import { getKey } from './auth';
-import type { ToolDef } from './tools';
+import type { ToolDef } from './legacy/tools';
 
 const BASE = (import.meta.env.VITE_QLAUD_BASE as string | undefined) ?? 'https://api.qlaud.ai';
 

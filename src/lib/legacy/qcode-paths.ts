@@ -20,7 +20,7 @@
 // walk. Centralizing here means one cache, one place to fix path bugs,
 // one place to add a new alias if the brand evolves.
 
-import { isTauri } from './tauri';
+import { isTauri } from '../tauri';
 
 export const CONFIG_DIR_ALIASES = ['.qcode', '.qlaud', '.claude'] as const;
 const USER_TIER_ALIASES = ['.qlaud', '.claude'] as const;

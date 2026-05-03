@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight, FileText } from 'lucide-react';
 
-import { cn } from '../../lib/cn';
+import { cn } from '../../../lib/cn';
 
 // grep emits one match per line: `path:line_no:content`. We parse,
 // group by file, and let the user expand/collapse per-file. Default

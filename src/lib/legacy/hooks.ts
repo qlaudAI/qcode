@@ -34,7 +34,7 @@
 // your call. Missing hook directory = no hooks fire = old behavior.
 
 import { CONFIG_DIR_ALIASES } from './qcode-paths';
-import { isTauri } from './tauri';
+import { isTauri } from '../tauri';
 
 export type HookEvent =
   // Tool-level hooks (existing).
@@ -133,7 +133,7 @@ export async function runHook(opts: {
   if (!path) return PASSTHROUGH;
 
   const { Command } = await import('@tauri-apps/plugin-shell');
-  const { detectShell } = await import('./shell-launcher');
+  const { detectShell } = await import('../shell-launcher');
   const launcher = await detectShell();
   if (!launcher) {
     // No bash on Windows without Git Bash or WSL — skip the hook

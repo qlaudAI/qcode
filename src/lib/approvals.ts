@@ -19,7 +19,7 @@
 // must always be resolved (allow/reject) so the executor unwinds
 // instead of leaking.
 
-import type { ApprovalDecision } from './tools';
+import type { ApprovalDecision } from './legacy/tools';
 
 type Resolver = (d: ApprovalDecision) => void;
 

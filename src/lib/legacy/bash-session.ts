@@ -23,7 +23,7 @@
 //     start a fresh one. State from the dead one is gone, but
 //     the agent loop continues without erroring out.
 
-import { isTauri } from './tauri';
+import { isTauri } from '../tauri';
 
 const DONE_SENTINEL_PREFIX = '__QCODE_BASH_DONE_';
 
@@ -177,7 +177,7 @@ async function ensureSession(workspace: string): Promise<SessionState> {
   if (existing && existing.status !== 'dead') return existing;
 
   const { Command } = await import('@tauri-apps/plugin-shell');
-  const { detectShell, getShellDetectionError } = await import('./shell-launcher');
+  const { detectShell, getShellDetectionError } = await import('../shell-launcher');
   const launcher = await detectShell();
   if (!launcher) {
     throw new Error(getShellDetectionError() ?? 'No bash shell available.');
