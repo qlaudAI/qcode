@@ -1352,13 +1352,24 @@ async function resolveVerifyCommand(
 }
 
 async function readQcodeMdVerify(workspace: string): Promise<string | null> {
-  const { exists, readTextFile } = await import('@tauri-apps/plugin-fs');
+  const { readTextFile } = await import('@tauri-apps/plugin-fs');
+  const { findConfigFiles } = await import('./qcode-paths');
+  // Look across the same tiered surfaces as the main memory loader:
+  // root-level qcode.md/CLAUDE.md/QCODE.md AND inside .qcode/.qlaud/
+  // .claude/. First file with a `verify:` line wins.
+  const candidates: Array<{ path: string }> = [];
   for (const name of ['qcode.md', 'QCODE.md', 'CLAUDE.md']) {
-    const path = `${workspace}/${name}`;
-    if (!(await exists(path))) continue;
+    const found = await findConfigFiles({
+      workspace,
+      relativeName: name,
+      alsoAtRoot: true,
+    });
+    candidates.push(...found);
+  }
+  for (const c of candidates) {
     let raw: string;
     try {
-      raw = await readTextFile(path);
+      raw = await readTextFile(c.path);
     } catch {
       continue;
     }
@@ -1366,7 +1377,6 @@ async function readQcodeMdVerify(workspace: string): Promise<string | null> {
     // so a markdown sentence "to verify: run pnpm test" doesn't match.
     const m = /^[ \t]*verify:[ \t]*(.+?)[ \t]*$/m.exec(raw);
     if (m && m[1]) return m[1];
-    return null; // first existing memory file wins; don't fall through
   }
   return null;
 }

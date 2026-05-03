@@ -33,6 +33,7 @@
 // We don't ship any default hooks — your repo, your scripts,
 // your call. Missing hook directory = no hooks fire = old behavior.
 
+import { CONFIG_DIR_ALIASES } from './qcode-paths';
 import { isTauri } from './tauri';
 
 export type HookEvent =
@@ -73,14 +74,22 @@ export async function runHook(opts: {
   if (!isTauri()) return PASSTHROUGH;
 
   const { exists } = await import('@tauri-apps/plugin-fs');
-  const path = `${opts.workspace}/.qcode/hooks/${opts.event}`;
-  // Hot path: most users won't have a hook for this event. Quick
-  // exists check before spawning anything.
+  // Hot path: check each alias dir until we find the hook script.
+  // Most users won't have a hook for this event so we want this fast.
+  // First match wins; we don't merge / chain hooks across aliases.
+  let path: string | null = null;
   try {
-    if (!(await exists(path))) return PASSTHROUGH;
+    for (const alias of CONFIG_DIR_ALIASES) {
+      const candidate = `${opts.workspace}/${alias}/hooks/${opts.event}`;
+      if (await exists(candidate)) {
+        path = candidate;
+        break;
+      }
+    }
   } catch {
     return PASSTHROUGH;
   }
+  if (!path) return PASSTHROUGH;
 
   const { Command } = await import('@tauri-apps/plugin-shell');
   const { detectShell } = await import('./shell-launcher');
