@@ -595,6 +595,13 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
           opts.onDone?.({
             iterations: ev.iterations ?? 0,
             hitMaxIterations: !!ev.hit_max_iterations,
+            // Server emits incomplete:true when its finally block
+            // had to synthesize the qlaud.done because the try
+            // block crashed before reaching the normal terminator.
+            // Pass it through verbatim so the UI maps to a distinct
+            // stopReason without us having to reconstruct the
+            // signal client-side.
+            incomplete: !!ev.incomplete,
             costUsd:
               typeof ev.cost_micros === 'number'
                 ? ev.cost_micros / 1_000_000
@@ -690,6 +697,12 @@ type ThreadStreamEvent =
       type: 'qlaud.done';
       iterations?: number;
       hit_max_iterations?: boolean;
+      /** Server set this when its finally block had to synthesize
+       *  qlaud.done because the loop crashed before reaching the
+       *  normal terminator. Lets the client distinguish "stream ended
+       *  cleanly" from "stream was salvaged" without inventing its
+       *  own heuristic. */
+      incomplete?: boolean;
       /** USD cost expressed in micro-dollars (1 USD = 1_000_000).
        *  Authoritative — includes qlaud's markup. Use this instead
        *  of computing from balance deltas. */
