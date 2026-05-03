@@ -117,4 +117,81 @@
       background-color: hsl(var(--primary) / 0);
     }
   }
+
+  /* Markdown prose container — outermost styling for the agent's
+     rendered messages. Components.tsx supplies per-element classes;
+     this layer covers the gestalt: container width, anchor offset,
+     selection color, dark-mode contrast tweaks. */
+  .qcode-prose {
+    /* Limits unbounded line-length on wide windows — same readability
+       cap Claude.ai uses (~70-75ch). */
+    max-width: 72ch;
+    /* Crisper text rendering on macOS, no FOUT on first paint. */
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .qcode-prose ::selection {
+    background-color: hsl(var(--primary) / 0.18);
+  }
+
+  /* Tighten Shiki's internal pre/code rendering. Shiki ships with
+     its own background + padding; we override to match our card
+     chrome (header bar above, our own padding here). */
+  .qcode-shiki pre {
+    background: transparent !important;
+    margin: 0 !important;
+    padding: 12px 16px !important;
+    line-height: 1.55;
+  }
+  .qcode-shiki code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+      'Liberation Mono', 'Courier New', monospace;
+  }
+
+  /* Scrollbar polish — only inside code blocks + scrollable views.
+     Default browser scrollbars on macOS are fine when active but
+     ugly at idle (gutter hover); this subtle fade keeps the chrome
+     out of the way. */
+  .qcode-shiki::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+  }
+  .qcode-shiki::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .qcode-shiki::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+  }
+  .qcode-shiki::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.16);
+  }
+
+  /* Task-list checkbox styling (GFM `- [x]`). Native input is
+     tiny + unstyled; this matches the chip aesthetic. */
+  .qcode-prose input[type='checkbox'] {
+    appearance: none;
+    height: 14px;
+    width: 14px;
+    border-radius: 3px;
+    border: 1.5px solid hsl(var(--border));
+    background-color: hsl(var(--background));
+    cursor: default;
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease;
+  }
+  .qcode-prose input[type='checkbox']:checked {
+    background-color: hsl(var(--primary));
+    border-color: hsl(var(--primary));
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14' fill='none'><path d='M3 7.5l3 3 5-6' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    background-size: 14px 14px;
+  }
+
+  /* Smooth out the GFM strikethrough decoration on dark mode where
+     the thin line gets eaten by anti-aliasing. */
+  .qcode-prose del {
+    text-decoration-thickness: from-font;
+    text-decoration-skip-ink: none;
+  }
 }
