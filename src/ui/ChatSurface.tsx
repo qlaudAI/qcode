@@ -554,6 +554,12 @@ export function ChatSurface({
       costUsd: number | null;
       seq: number | null;
     } | null = null;
+    // Tracks whether ANY event arrived during the run. Detects the
+    // silent-failure mode where the SSE stream returns 200 + closes
+    // immediately with no body (server crash, thread in bad state).
+    // Without this, the user sees nothing happen on send and has no
+    // signal that anything went wrong.
+    let eventsSeen = 0;
 
     try {
       // Lazily provision the thread on first send. App.tsx returns
@@ -610,6 +616,10 @@ export function ChatSurface({
           // Without this, a late tool_done from an aborted thread
           // mutates the active thread's blocks.
           if (runId !== activeRunIdRef.current) return;
+          // Track that *something* arrived so we can detect "stream
+          // returned 200 but produced zero events" — a silent failure
+          // mode where the user sees nothing happen on send.
+          eventsSeen += 1;
           if (e.type === 'finished') {
             finished = {
               usage: e.usage,
@@ -657,6 +667,24 @@ export function ChatSurface({
       // looking at; rendering it into the wrong thread would be
       // worse than dropping it.
       if (runId !== activeRunIdRef.current) return;
+
+      // Silent-failure detection: stream completed (no throw) but no
+      // events arrived AND no `finished` event landed. Most common
+      // cause is the edge worker crashing mid-stream after returning
+      // headers. Without this surface, the user sees their message
+      // bubble + nothing else and has no idea why. Show an explicit
+      // error block so they can retry or report.
+      if (eventsSeen === 0 && !finished) {
+        setBlocks((b) => [
+          ...b,
+          {
+            type: 'error',
+            presentation: mapError('empty_stream'),
+            retry: retryInputs,
+          },
+        ]);
+        posthog.capture('turn_failed', { model, mode, code: 'empty_stream' });
+      }
 
       if (finished) {
         const f: {
@@ -1139,6 +1167,16 @@ function mapError(code: string): ErrorPresentation {
       severity: 'warning',
       title: 'This conversation is gone',
       body: 'Looks like it was deleted from another device. Hit ⌘N to start a fresh one — your other chats are still here.',
+    };
+  }
+  // Stream returned 200 but produced no events — server crashed
+  // mid-stream or the thread is in a bad state. Without this branch
+  // the user sees their message bubble + nothing else, no signal.
+  if (code === 'empty_stream') {
+    return {
+      severity: 'warning',
+      title: 'No response from the server',
+      body: 'The stream connected but closed without any content. Usually a transient hiccup — hit Retry. If it keeps happening on this thread, ⌘N for a fresh chat (the long history may be bumping a context limit).',
     };
   }
   // Upstream model errors — be specific about which model + what code.
