@@ -7,6 +7,7 @@ import { killBashSession } from './bash-session';
 import { probeEnv } from './env-probe';
 import { buildMatcher, type IgnoreMatcher } from './gitignore';
 import { getProjectMemory } from './memory';
+import { clearAllReads } from './read-cache';
 import { isTauri, pickFolder } from './tauri';
 
 const CURRENT_KEY = 'qcode.workspace.current';
@@ -46,6 +47,11 @@ export function setCurrentWorkspace(w: Workspace | null): void {
   const prev = getCurrentWorkspace();
   if (prev && (!w || prev.path !== w.path)) {
     void killBashSession(prev.path);
+    // Drop the read-cache when the workspace changes — entries are
+    // keyed by absolute path so collisions can't happen, but stale
+    // entries from a prior workspace would just sit in memory and
+    // potentially block edits the user actually wants in the new one.
+    clearAllReads();
   }
   if (w) {
     localStorage.setItem(CURRENT_KEY, JSON.stringify(w));

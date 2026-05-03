@@ -680,6 +680,13 @@ async function runReadFile(
     );
   }
   const text = await readTextFile(abs);
+  // Record the read so subsequent write_file/edit_file can confirm
+  // the agent has seen the file recently. recordRead() is module-
+  // scoped LRU; safe to call without a workspace param. read_file
+  // is a full read (no offset/limit support yet) so isPartialView
+  // defaults to false.
+  const { recordRead } = await import('./read-cache');
+  recordRead({ path: abs, content: text });
   return ok(call.id, text);
 }
 
@@ -845,15 +852,40 @@ async function runWriteFile(
 
   let before = '';
   let isNew = false;
+  let mtimeMs = 0;
   if (isTauri()) {
-    const { exists, readTextFile } = await import('@tauri-apps/plugin-fs');
+    const { exists, readTextFile, stat } = await import('@tauri-apps/plugin-fs');
     const present = await exists(abs);
-    if (!present) isNew = true;
-    else before = await readTextFile(abs);
+    if (!present) {
+      isNew = true;
+    } else {
+      before = await readTextFile(abs);
+      const info = await stat(abs).catch(() => null);
+      // Tauri fs returns mtime as a Date | null. Handle both shapes
+      // defensively — null mtime falls through to "treat as fresh."
+      const m = info?.mtime;
+      if (m instanceof Date) mtimeMs = m.getTime();
+      else if (typeof m === 'number') mtimeMs = m;
+    }
   }
   const diff = computeDiff(before, content);
   const added = diff.filter((d) => d.kind === 'add').length;
   const removed = diff.filter((d) => d.kind === 'remove').length;
+
+  // Read-before-Edit gate. New files are exempt (creation can't be
+  // stale by definition). Existing files MUST have a recent
+  // recordRead() entry whose timestamp covers the disk's current
+  // mtime — otherwise we refuse the write so the agent doesn't edit
+  // based on stale knowledge of the file.
+  const { checkReadBeforeWrite } = await import('./read-cache');
+  const gateError = checkReadBeforeWrite({
+    path: abs,
+    currentContent: isNew ? null : before,
+    currentMtimeMs: mtimeMs,
+  });
+  if (gateError) {
+    return err(call.id, gateError.message);
+  }
 
   // Pre-write hook — gate by path/content. Common use: enforce
   // license headers, block edits to vendored files, require
@@ -898,6 +930,11 @@ async function runWriteFile(
     }
   }
   await writeTextFile(abs, content);
+  // Refresh the read-cache so chained edits of the same file don't
+  // need an explicit re-read between them. The cache now reflects
+  // exactly what's on disk because we just wrote it.
+  const { recordWrite } = await import('./read-cache');
+  recordWrite({ path: abs, content });
 
   // Post-write hook — auto-format, lint, etc. Output (if any) is
   // appended so the model sees what the formatter said.
@@ -944,13 +981,32 @@ async function runEditFile(
     return ok(call.id, `[browser-mode stub: would edit ${abs}]`);
   }
 
-  const { exists, readTextFile, writeTextFile } = await import(
+  const { exists, readTextFile, stat, writeTextFile } = await import(
     '@tauri-apps/plugin-fs'
   );
   if (!(await exists(abs))) {
     return err(call.id, 'File does not exist; use write_file to create it.');
   }
   const before = await readTextFile(abs);
+  // Read-before-Edit gate — same posture as runWriteFile. edit_file
+  // is even more sensitive to staleness because old_string matching
+  // assumes the agent's mental model of the file matches disk.
+  const editStatInfo = await stat(abs).catch(() => null);
+  const editMtimeMs =
+    editStatInfo?.mtime instanceof Date
+      ? editStatInfo.mtime.getTime()
+      : typeof editStatInfo?.mtime === 'number'
+        ? editStatInfo.mtime
+        : 0;
+  const { checkReadBeforeWrite: editGate } = await import('./read-cache');
+  const editGateError = editGate({
+    path: abs,
+    currentContent: before,
+    currentMtimeMs: editMtimeMs,
+  });
+  if (editGateError) {
+    return err(call.id, editGateError.message);
+  }
   const occurrences = countOccurrences(before, oldString);
   if (occurrences === 0) {
     return err(
@@ -1006,6 +1062,10 @@ async function runEditFile(
     }
   }
   await writeTextFile(abs, after);
+  // Refresh the read-cache with the post-edit content so chained
+  // edits don't need a re-read.
+  const { recordWrite: recordEdit } = await import('./read-cache');
+  recordEdit({ path: abs, content: after });
 
   // Post-edit hook — most useful for auto-formatting after a
   // surgical edit. e.g. ${file}.ts edits → run prettier on it.
