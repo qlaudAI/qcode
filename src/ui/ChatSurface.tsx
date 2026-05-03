@@ -347,45 +347,48 @@ export function ChatSurface({
       return;
     }
 
-    // Engine Mode rehydrate: when engine === 'claude-code' the legacy
-    // path's messagesQuery returns nothing because the conversation
-    // never wrote to qlaud's threads table. Pull from the AI Gateway
-    // logs Cloudflare stores instead — every claude /v1/messages call
-    // landed there, and the LATEST log's request_body has the full
-    // conversation history (Anthropic API is stateless, prior
-    // assistant + user turns are inlined in messages[] of every new
-    // request). Filtered server-side by client_session_id (Claude
-    // Code's session id, populated via Anthropic's standard
-    // body.metadata.user_id field) so multi-thread / multi-device
-    // users don't see each other's logs. /v1/messages stays a clean
-    // drop-in replacement for the Anthropic API — no URL prefix or
-    // custom headers anywhere.
+    // Engine Mode rehydrate. When engine === 'claude-code' the
+    // qcode-legacy path's messagesQuery returns nothing because the
+    // conversation never went through `/v1/threads/:id/messages`.
+    // But qlaud edge mirrors Engine Mode requests into the SAME
+    // `thread_messages` table (keyed by Claude's session id), so we
+    // can read the conversation back via the standard
+    // `GET /v1/threads/:sid/messages` endpoint with full seq pagination
+    // and ownership checks. Same data shape ChatSurface already
+    // renders for the legacy path → historyToBlocks works unchanged.
     const engine = getSettings().engine;
     if (engine === 'claude-code') {
       if (lastLoadedRef.current === threadId) return;
       lastLoadedRef.current = threadId;
       let cancelled = false;
       void (async () => {
-        const [{ getClaudeSessionId }, { reconstructEngineHistory }] =
+        const [{ getClaudeSessionId }, { getRemoteThreadMessages }] =
           await Promise.all([
             import('../lib/engines/claude-code'),
-            import('../lib/engines/aig-history'),
+            import('../lib/threads'),
           ]);
         const sessionId = getClaudeSessionId(threadId);
         if (!sessionId) {
           // Fresh thread, claude hasn't written any session yet —
-          // nothing to rehydrate. First send populates the session.
+          // first send populates the session and the next reload
+          // restores from D1.
           setBlocks([]);
           return;
         }
-        const history = await reconstructEngineHistory({ sessionId });
-        if (cancelled) return;
-        if (history && history.length > 0) {
-          setBlocks(historyToBlocks(history as unknown as Message[]));
-        } else {
-          // No logs (fresh session, or CF_API_TOKEN not set on edge
-          // — /v1/aig/recent returns 503 → null history). Leave
-          // blocks empty rather than blanking what's on screen.
+        try {
+          const result = await getRemoteThreadMessages(sessionId, {
+            limit: 200,
+          });
+          if (cancelled) return;
+          if (result.messages.length > 0) {
+            setBlocks(historyToBlocks(result.messages));
+          } else {
+            setBlocks([]);
+          }
+        } catch {
+          // 404 = session never had a write yet (first turn in flight),
+          // network errors = transient. Either way leave blocks empty
+          // rather than blanking what's on screen.
         }
       })();
       return () => {
