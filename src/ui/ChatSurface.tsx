@@ -346,6 +346,54 @@ export function ChatSurface({
       lastLoadedRef.current = null;
       return;
     }
+
+    // Engine Mode rehydrate: when engine === 'claude-code' the legacy
+    // path's messagesQuery returns nothing because the conversation
+    // never wrote to qlaud's threads table. Pull from the AI Gateway
+    // logs Cloudflare stores instead — every claude /v1/messages call
+    // landed there, and the LATEST log's request_body has the full
+    // conversation history (Anthropic API is stateless, prior
+    // assistant + user turns are inlined in messages[] of every new
+    // request). Filtered server-side by client_session_id (Claude
+    // Code's session id, populated via Anthropic's standard
+    // body.metadata.user_id field) so multi-thread / multi-device
+    // users don't see each other's logs. /v1/messages stays a clean
+    // drop-in replacement for the Anthropic API — no URL prefix or
+    // custom headers anywhere.
+    const engine = getSettings().engine;
+    if (engine === 'claude-code') {
+      if (lastLoadedRef.current === threadId) return;
+      lastLoadedRef.current = threadId;
+      let cancelled = false;
+      void (async () => {
+        const [{ getClaudeSessionId }, { reconstructEngineHistory }] =
+          await Promise.all([
+            import('../lib/engines/claude-code'),
+            import('../lib/engines/aig-history'),
+          ]);
+        const sessionId = getClaudeSessionId(threadId);
+        if (!sessionId) {
+          // Fresh thread, claude hasn't written any session yet —
+          // nothing to rehydrate. First send populates the session.
+          setBlocks([]);
+          return;
+        }
+        const history = await reconstructEngineHistory({ sessionId });
+        if (cancelled) return;
+        if (history && history.length > 0) {
+          setBlocks(historyToBlocks(history as unknown as Message[]));
+        } else {
+          // No logs (fresh session, or CF_API_TOKEN not set on edge
+          // — /v1/aig/recent returns 503 → null history). Leave
+          // blocks empty rather than blanking what's on screen.
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    // Legacy path — qlaud-thread fetch.
     if (!messagesQuery.data) return;
     // Normal navigation: skip if we've already rendered this thread
     // once (avoids the post-send overwrite that strips usage pills).
@@ -598,50 +646,87 @@ export function ChatSurface({
       if (runId !== activeRunIdRef.current) return;
 
       const settingsAtSend = getSettings();
-      await runThreadAgent({
-        threadId: id,
-        model,
-        mode,
-        workspace: workspace?.path ?? null,
-        content: userContent,
-        // Read at send time so toggling the setting takes effect on
-        // the very next turn without a remount.
-        enableConnectors: settingsAtSend.enableConnectors,
-        autoApprove: settingsAtSend.autoApprove,
-        autoCommit: settingsAtSend.autoCommit,
-        signal: abortRef.current.signal,
-        onEvent: (e) => {
-          // Stale-run guard: drop events from any run that's been
-          // superseded (user switched threads, aborted, re-sent).
-          // Without this, a late tool_done from an aborted thread
-          // mutates the active thread's blocks.
-          if (runId !== activeRunIdRef.current) return;
-          // Track that *something* arrived so we can detect "stream
-          // returned 200 but produced zero events" — a silent failure
-          // mode where the user sees nothing happen on send.
-          eventsSeen += 1;
-          if (e.type === 'finished') {
-            finished = {
-              usage: e.usage,
-              costUsd: e.costUsd,
-              seq: e.seq,
-            };
-          }
-          handleEvent(e, setBlocks);
-        },
-        onApproval: (toolUseId, _request) =>
-          new Promise<ApprovalDecision>((resolve) => {
-            // If this run is no longer active by the time the model
-            // asks for approval, auto-reject so the executor can
-            // unwind. Otherwise the user would see an approval card
-            // for a turn they already abandoned.
-            if (runId !== activeRunIdRef.current) {
-              resolve('reject');
-              return;
-            }
-            registerApproval(toolUseId, resolve);
-          }),
-      });
+
+      // Engine Mode branch. With settings.engine === 'claude-code'
+      // we spawn the official Claude Code CLI inside the user's
+      // workspace, with ANTHROPIC_BASE_URL pointing at qlaud, and
+      // surface its stream-json output via the same AgentEvent
+      // pipeline. Anthropic owns the agent loop; qlaud is the
+      // transport. See src/lib/engines/claude-code.ts.
+      //
+      // Critical: the legacy path requires a thread persisted on the
+      // qlaud edge. The Claude Code path persists nothing server-side
+      // for the conversation state — claude stores it on disk via
+      // its session_id. Both still need a workspace open (claude
+      // can't usefully run without one).
+      const sharedOnEvent = (e: AgentEvent) => {
+        // Stale-run guard: drop events from any run that's been
+        // superseded (user switched threads, aborted, re-sent).
+        // Without this, a late tool_done from an aborted thread
+        // mutates the active thread's blocks.
+        if (runId !== activeRunIdRef.current) return;
+        // Track that *something* arrived so we can detect "stream
+        // returned 200 but produced zero events" — a silent failure
+        // mode where the user sees nothing happen on send.
+        eventsSeen += 1;
+        if (e.type === 'finished') {
+          finished = {
+            usage: e.usage,
+            costUsd: e.costUsd,
+            seq: e.seq,
+          };
+        }
+        handleEvent(e, setBlocks);
+      };
+
+      if (settingsAtSend.engine === 'claude-code') {
+        if (!workspace?.path) {
+          sharedOnEvent({
+            type: 'error',
+            message:
+              'Claude Code engine needs an open workspace folder. Open one (⌘O) and resend.',
+          });
+        } else {
+          const { runEngineClaudeCode, getClaudeSessionId, setClaudeSessionId } =
+            await import('../lib/engines/claude-code');
+          await runEngineClaudeCode({
+            sessionId: getClaudeSessionId(id),
+            onSessionId: (sid) => setClaudeSessionId(id, sid),
+            model,
+            workspace: workspace.path,
+            content: userContent,
+            signal: abortRef.current.signal,
+            onEvent: sharedOnEvent,
+          });
+        }
+      } else {
+        await runThreadAgent({
+          threadId: id,
+          model,
+          mode,
+          workspace: workspace?.path ?? null,
+          content: userContent,
+          // Read at send time so toggling the setting takes effect on
+          // the very next turn without a remount.
+          enableConnectors: settingsAtSend.enableConnectors,
+          autoApprove: settingsAtSend.autoApprove,
+          autoCommit: settingsAtSend.autoCommit,
+          signal: abortRef.current.signal,
+          onEvent: sharedOnEvent,
+          onApproval: (toolUseId, _request) =>
+            new Promise<ApprovalDecision>((resolve) => {
+              // If this run is no longer active by the time the model
+              // asks for approval, auto-reject so the executor can
+              // unwind. Otherwise the user would see an approval card
+              // for a turn they already abandoned.
+              if (runId !== activeRunIdRef.current) {
+                resolve('reject');
+                return;
+              }
+              registerApproval(toolUseId, resolve);
+            }),
+        });
+      }
 
       // Per-thread state updates fire regardless of which thread
       // the UI is currently showing — the title/mode/balance belong
