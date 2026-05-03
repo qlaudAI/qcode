@@ -26,6 +26,10 @@ export function ApprovalCard(props: ApprovalCardProps) {
   if (request.kind === 'bash') return <BashCard {...props} request={request} />;
   if (request.kind === 'doom_loop')
     return <DoomLoopCard {...props} request={request} />;
+  if (request.kind === 'enter_plan_mode')
+    return <EnterPlanModeCard {...props} request={request} />;
+  if (request.kind === 'exit_plan_mode')
+    return <ExitPlanModeCard {...props} request={request} />;
   return <FileChangeCard {...props} request={request} />;
 }
 
@@ -143,6 +147,74 @@ function DoomLoopCard(
         onReject={onReject}
         allowLabel="Continue anyway"
         rejectLabel="Stop"
+      />
+    </div>
+  );
+}
+
+// ─── Plan mode cards ──────────────────────────────────────────────
+
+function EnterPlanModeCard(
+  props: ApprovalCardProps & {
+    request: Extract<ApprovalRequest, { kind: 'enter_plan_mode' }>;
+  },
+) {
+  const { request, onAllow, onReject, resolved } = props;
+  return (
+    <div className="overflow-hidden rounded-lg border border-blue-500/40 bg-blue-50/60 shadow-[0_2px_8px_rgba(0,0,0,0.04),0_12px_28px_rgba(0,0,0,0.06)] dark:bg-blue-950/30">
+      <header className="flex items-center gap-2 border-b border-blue-500/30 bg-blue-100/50 px-3 py-2 dark:bg-blue-900/30">
+        <FileText className="h-3.5 w-3.5 shrink-0 text-blue-700 dark:text-blue-400" />
+        <span className="text-[12px] font-medium tracking-tight text-blue-900 dark:text-blue-200">
+          Enter plan mode?
+        </span>
+      </header>
+      <div className="space-y-2 px-3 py-2.5 text-[12px] leading-relaxed text-foreground/90">
+        <p>
+          The agent wants to investigate before making changes. In plan
+          mode, write_file / edit_file / bash are unavailable; only
+          read tools work. After investigation, the agent will submit
+          a plan for your review.
+        </p>
+        <p className="rounded border border-border/40 bg-background/60 px-2 py-1.5 italic text-foreground/80">
+          {request.reason}
+        </p>
+      </div>
+      <Footer
+        resolved={resolved}
+        onAllow={onAllow}
+        onReject={onReject}
+        allowLabel="Enter plan mode"
+        rejectLabel="Stay in agent mode"
+      />
+    </div>
+  );
+}
+
+function ExitPlanModeCard(
+  props: ApprovalCardProps & {
+    request: Extract<ApprovalRequest, { kind: 'exit_plan_mode' }>;
+  },
+) {
+  const { request, onAllow, onReject, resolved } = props;
+  return (
+    <div className="overflow-hidden rounded-lg border border-emerald-500/40 bg-emerald-50/60 shadow-[0_2px_8px_rgba(0,0,0,0.04),0_12px_28px_rgba(0,0,0,0.06)] dark:bg-emerald-950/30">
+      <header className="flex items-center gap-2 border-b border-emerald-500/30 bg-emerald-100/50 px-3 py-2 dark:bg-emerald-900/30">
+        <Check className="h-3.5 w-3.5 shrink-0 text-emerald-700 dark:text-emerald-400" />
+        <span className="text-[12px] font-medium tracking-tight text-emerald-900 dark:text-emerald-200">
+          Approve the plan?
+        </span>
+      </header>
+      <div className="max-h-[420px] overflow-auto px-3 py-2.5 text-[12px] leading-relaxed text-foreground/90">
+        <pre className="m-0 whitespace-pre-wrap break-words font-sans">
+          {request.plan}
+        </pre>
+      </div>
+      <Footer
+        resolved={resolved}
+        onAllow={onAllow}
+        onReject={onReject}
+        allowLabel="Approve & execute"
+        rejectLabel="Refine plan"
       />
     </div>
   );

@@ -85,6 +85,23 @@ export type ApprovalRequest =
       inputPreview: string;
       /** How many identical consecutive dispatches we've seen. */
       repeats: number;
+    }
+  | {
+      // Plan-mode entry request — model is asking the user to flip
+      // into the read-only planning phase. UI renders a distinct
+      // approval card; on Allow, settings.mode flips to 'plan' for
+      // subsequent turns. Pattern from Claude Code's EnterPlanModeTool.
+      kind: 'enter_plan_mode';
+      reason: string;
+    }
+  | {
+      // Plan-mode exit request — model is submitting the plan and
+      // asking the user to authorize execution. The plan body is
+      // shown verbatim in the approval card so the user reviews
+      // before allowing. On Allow, settings.mode flips back to
+      // 'agent' and the plan is persisted to .qcode/plans/.
+      kind: 'exit_plan_mode';
+      plan: string;
     };
 
 export type ApprovalDecision = 'allow' | 'reject';
@@ -435,6 +452,56 @@ export const VERIFY_TOOL: ToolDef = {
   input_schema: { type: 'object', properties: {} },
 };
 
+// Plan-mode entry. The model calls this when the user's request
+// warrants planning before action — ambiguous architectural changes,
+// multi-file refactors, anything where a Builder-first approach
+// would commit too early. Approval-gated by the user; on approval,
+// the workspace flips to plan mode (read-only tools, planning system
+// prompt) for subsequent turns.
+//
+// Pattern from Claude Code's EnterPlanModeTool. Dual enforcement:
+// (1) the tool is approval-gated (user explicitly opts into the
+// mode flip, no silent transition), and (2) the actual write-tool
+// blocking is handled by the existing plan-mode tool filter at
+// runThreadAgent.
+export const ENTER_PLAN_MODE_TOOL: ToolDef = {
+  name: 'enter_plan_mode',
+  description:
+    "Request to enter PLAN MODE. Plan mode is the read-only investigation phase — write_file, edit_file, and bash are unavailable; you investigate the codebase and produce a concrete plan before the user authorizes execution. Use when:\n- The user's request is ambiguous (\"refactor the auth flow\") and a Builder-first attempt would commit before understanding the system.\n- Multi-file changes that touch interlocking logic (\"migrate from X to Y\") where ordering matters.\n- High-stakes changes (production code, schemas, public APIs) where the user wants to review the plan before any edit lands.\n\nDO NOT use for trivial requests where the path is obvious from one read. Be honest with the user about why a plan helps; don't enter plan mode just to delay.\n\nThe user must approve the transition. After they approve, your next turn runs in plan mode with read-only tools. Once you've produced the plan, call exit_plan_mode to hand it off for execution.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      reason: {
+        type: 'string',
+        description:
+          'Why a plan helps for this specific request — one or two sentences shown to the user in the approval card so they understand the value of the mode flip.',
+      },
+    },
+    required: ['reason'],
+  },
+};
+
+// Plan-mode exit. The model calls this with the produced plan; on
+// user approval, the workspace flips back to agent mode and the
+// plan is persisted to .qcode/plans/<slug>.md so a subsequent
+// Builder dispatch (or just the next turn) can reference it by path.
+export const EXIT_PLAN_MODE_TOOL: ToolDef = {
+  name: 'exit_plan_mode',
+  description:
+    "Submit your plan and request approval to exit PLAN MODE. The user reviews the plan and either:\n- Approves → mode flips back to agent, plan is saved to .qcode/plans/, you can edit/run with the full toolkit on the next turn.\n- Rejects → you stay in plan mode and refine the plan based on their feedback.\n\nThe plan parameter is the COMPLETE plan body the user will read. Structure it clearly (markdown, file-by-file sections, exact paths, ordering, verification step). Don't summarize away the specifics — the user is reading this to decide whether to authorize execution; vague plans get rejected.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      plan: {
+        type: 'string',
+        description:
+          'The full plan body. Markdown formatting recommended. Should include: goal restatement, files to change with paths + intent, order of operations, verification step at the end. Quote existing code where it helps the user evaluate.',
+      },
+    },
+    required: ['plan'],
+  },
+};
+
 // On-demand skill loader. The system prompt lists every available
 // skill (name + description); this tool returns the full markdown
 // body for the model to follow. Lifted from Claude Code's pattern —
@@ -465,6 +532,8 @@ export const ALL_TOOLS = [
   TODO_TOOL,
   VERIFY_TOOL,
   SKILL_TOOL,
+  ENTER_PLAN_MODE_TOOL,
+  EXIT_PLAN_MODE_TOOL,
 ];
 
 /** Subagent-mode tool list. The child agent gets every tool the
@@ -655,6 +724,10 @@ export async function executeTool(
         return await runVerify(call, opts);
       case 'skill':
         return await runSkill(call, opts);
+      case 'enter_plan_mode':
+        return await runEnterPlanMode(call, opts);
+      case 'exit_plan_mode':
+        return await runExitPlanMode(call, opts);
       default:
         return err(call.id, `Unknown tool: ${call.name}`);
     }
@@ -1521,6 +1594,100 @@ async function runSkill(
   const header = `# Skill: ${skill.name}\nSource: ${skill.source}\n\n${skill.description}\n`;
   const when = skill.whenToUse ? `\n**When to use:** ${skill.whenToUse}\n` : '';
   return ok(call.id, `${header}${when}\n---\n\n${skill.body}`);
+}
+
+// ─── Plan mode tools ─────────────────────────────────────────────
+//
+// EnterPlanMode + ExitPlanMode flip the agent's mode via approval-
+// gated tool calls. Pattern from Claude Code's EnterPlanModeTool +
+// ExitPlanModeV2Tool. Both write to settings.mode on user approval;
+// the next turn reads the new mode at send time. The READ_TOOLS
+// filter at runThreadAgent enforces the actual tool restriction
+// when mode === 'plan' (see agent.ts:tool selection logic), so this
+// is the visible-UX half of the dual enforcement.
+
+async function runEnterPlanMode(
+  call: ToolCall,
+  opts: ExecuteOpts,
+): Promise<ToolResult> {
+  const input = call.input as { reason?: unknown };
+  const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
+  if (!reason) {
+    return err(
+      call.id,
+      'reason required — explain why a plan helps for this specific request, in one or two sentences.',
+    );
+  }
+  if (!opts.requestApproval) {
+    return err(
+      call.id,
+      'enter_plan_mode requires the approval gate, but it is not enabled in this session.',
+    );
+  }
+  const decision = await opts.requestApproval({
+    kind: 'enter_plan_mode',
+    reason,
+  });
+  if (decision !== 'allow') {
+    return ok(
+      call.id,
+      'User declined to enter plan mode. Continue with the agent toolkit and check in if you need to pivot.',
+    );
+  }
+  // Flip the mode. Settings persist to localStorage; ChatSurface
+  // reads at send time so the next turn picks it up. Cleared via the
+  // existing title-bar Plan/Agent toggle if the user wants to bail
+  // out of plan mode without going through ExitPlanMode.
+  const { patchSettings } = await import('./settings');
+  patchSettings({ mode: 'plan' });
+  return ok(
+    call.id,
+    'Plan mode active. Read tools (list_files / read_file / glob / grep) work normally; write_file / edit_file / bash are blocked. Investigate, then call exit_plan_mode with the plan when ready.',
+  );
+}
+
+async function runExitPlanMode(
+  call: ToolCall,
+  opts: ExecuteOpts,
+): Promise<ToolResult> {
+  const input = call.input as { plan?: unknown };
+  const plan = typeof input.plan === 'string' ? input.plan.trim() : '';
+  if (!plan) {
+    return err(
+      call.id,
+      'plan required — submit the full plan body as markdown. The user reads this verbatim to decide whether to authorize execution.',
+    );
+  }
+  if (!opts.requestApproval) {
+    return err(call.id, 'exit_plan_mode requires the approval gate.');
+  }
+  const decision = await opts.requestApproval({
+    kind: 'exit_plan_mode',
+    plan,
+  });
+  if (decision !== 'allow') {
+    return ok(
+      call.id,
+      'User wants to refine the plan. Stay in plan mode; address their feedback and submit a revised plan.',
+    );
+  }
+  // Flip back to agent mode + persist the plan.
+  const { patchSettings } = await import('./settings');
+  patchSettings({ mode: 'agent' });
+  let persistedPath = '';
+  if (opts.workspace) {
+    const { persistPlan } = await import('./plans');
+    const persisted = await persistPlan({
+      workspace: opts.workspace,
+      body: plan,
+      subSlug: 'plan-mode',
+    });
+    if (persisted) persistedPath = persisted.displayPath;
+  }
+  return ok(
+    call.id,
+    `Plan approved. Mode flipped to agent — full toolkit available next turn.${persistedPath ? `\nPlan saved to ${persistedPath} for reference.` : ''}\nExecute the plan; verify after.`,
+  );
 }
 
 type VerifyResolved = {
