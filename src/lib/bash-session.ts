@@ -27,6 +27,62 @@ import { isTauri } from './tauri';
 
 const DONE_SENTINEL_PREFIX = '__QCODE_BASH_DONE_';
 
+// Per-stream output cap. Outputs larger than this get head+tail
+// truncated with a marker — the model never benefits from a 10MB
+// pnpm-install dump (most of it is package-resolution noise) and the
+// inline buffer cost grows linearly with output size.
+//
+// Pattern from Claude Code's EndTruncatingAccumulator (~128KB head+
+// tail). We split 60K + 40K so the head (where errors usually appear
+// at the start) is preserved more aggressively than the tail.
+const OUTPUT_HEAD_BYTES = 60_000;
+const OUTPUT_TAIL_BYTES = 40_000;
+const OUTPUT_MAX_BYTES = OUTPUT_HEAD_BYTES + OUTPUT_TAIL_BYTES;
+
+// Hard memory ceiling on the in-flight stream buffer. Above this we
+// stop appending and start dropping middle chunks so a runaway
+// command can't OOM the WebView. The user / model still get the
+// truncated output via the head+tail formatter below.
+const OUTPUT_HARD_CEILING_BYTES = 5_000_000; // 5 MB
+
+/** Head+tail truncate a single output stream. Returns the original
+ *  string if under the cap, or `<head>\n[…N bytes truncated…]\n<tail>`
+ *  otherwise. The byte count in the marker is exact so the model can
+ *  reason about how much it didn't see. */
+function truncateStream(s: string): string {
+  if (s.length <= OUTPUT_MAX_BYTES) return s;
+  const dropped = s.length - OUTPUT_MAX_BYTES;
+  // Snap to newline boundaries so we don't slice in the middle of a
+  // log line. Falls back to byte-exact when no newline is nearby
+  // (binary-ish output, single huge line).
+  const headEnd = nearestNewlineBefore(s, OUTPUT_HEAD_BYTES);
+  const tailStart = nearestNewlineAfter(s, s.length - OUTPUT_TAIL_BYTES);
+  const head = s.slice(0, headEnd);
+  const tail = s.slice(tailStart);
+  return `${head}\n[…${formatBytes(dropped)} truncated; ${formatBytes(s.length)} total. Run a tighter command (head/tail/grep) if you need the missing slice.…]\n${tail}`;
+}
+
+function nearestNewlineBefore(s: string, idx: number): number {
+  // Look back up to 200 chars for a clean line boundary.
+  const lookback = Math.max(0, idx - 200);
+  const slice = s.slice(lookback, idx);
+  const nl = slice.lastIndexOf('\n');
+  return nl === -1 ? idx : lookback + nl + 1;
+}
+
+function nearestNewlineAfter(s: string, idx: number): number {
+  const lookahead = Math.min(s.length, idx + 200);
+  const slice = s.slice(idx, lookahead);
+  const nl = slice.indexOf('\n');
+  return nl === -1 ? idx : idx + nl + 1;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** When stdin is dead the shell is gone; treat as terminated. */
 type SessionState =
   | { status: 'idle'; childRef: ChildHandle }
@@ -146,11 +202,22 @@ async function ensureSession(workspace: string): Promise<SessionState> {
   };
 
   cmd.stdout.on('data', (line: string) => {
-    handle.stdout += line.endsWith('\n') ? line : line + '\n';
+    // Hard memory ceiling. Above 5 MB per stream we stop appending —
+    // the buffer's already past anything useful + we don't want to
+    // OOM the webview. The truncateStream() pass at result-return
+    // collapses what we kept into head+tail with a clear marker.
+    // Note: this CAN drop content the user might have wanted to see
+    // raw — but the alternative is an unbounded buffer that crashes
+    // qcode on a runaway command. Choose the lesser evil.
+    if (handle.stdout.length < OUTPUT_HARD_CEILING_BYTES) {
+      handle.stdout += line.endsWith('\n') ? line : line + '\n';
+    }
     checkSentinel(workspace, handle);
   });
   cmd.stderr.on('data', (line: string) => {
-    handle.stderr += line.endsWith('\n') ? line : line + '\n';
+    if (handle.stderr.length < OUTPUT_HARD_CEILING_BYTES) {
+      handle.stderr += line.endsWith('\n') ? line : line + '\n';
+    }
   });
   cmd.on('close', () => {
     sessions.set(workspace, { status: 'dead' });
@@ -270,16 +337,16 @@ async function runSerialized(opts: BashRunOptions): Promise<BashRunResult> {
     sessions.set(opts.workspace, { status: 'idle', childRef: handle });
     return {
       exitCode: -1,
-      stdout: handle.stdout,
-      stderr: handle.stderr,
+      stdout: truncateStream(handle.stdout),
+      stderr: truncateStream(handle.stderr),
       timedOut: true,
     };
   }
 
   return {
     exitCode: winner,
-    stdout: handle.stdout,
-    stderr: handle.stderr,
+    stdout: truncateStream(handle.stdout),
+    stderr: truncateStream(handle.stderr),
     timedOut: false,
   };
 }
