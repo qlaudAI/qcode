@@ -73,65 +73,32 @@ export function clearPermissionRulesCache(workspace?: string): void {
 
 async function loadFromDisk(workspace: string): Promise<ResolvedRuleset> {
   if (!isTauri()) return EMPTY;
-  const { exists, readTextFile } = await import('@tauri-apps/plugin-fs');
-  const sources: ResolvedRuleset['sources'] = [];
-  const allow: PermissionRule[] = [];
-  const deny: PermissionRule[] = [];
-  const seenAllow = new Set<string>();
-  const seenDeny = new Set<string>();
-
-  // Layer 1: project rules. First alias hit wins (we don't merge
-  // permissions.json across aliases — that'd be confusing for users
-  // who happen to have both .qcode/ and .claude/ dirs).
-  for (const alias of CONFIG_DIR_ALIASES) {
-    const path = `${workspace}/${alias}/permissions.json`;
-    if (!(await exists(path))) continue;
-    const ruleset = await loadJson(readTextFile, path);
-    if (ruleset) {
-      sources.push({
-        source: 'project',
-        path: `${alias}/permissions.json`,
-        allow: ruleset.allow.length,
-        deny: ruleset.deny.length,
-      });
-      mergeRules(ruleset, allow, deny, seenAllow, seenDeny);
-      break;
-    }
-  }
-
-  // Layer 2: local rules (gitignored). Same alias-priority order;
-  // local file is .permissions.local.json so users keep machine-
-  // specific overrides separate from team-shared rules.
-  for (const alias of CONFIG_DIR_ALIASES) {
-    const path = `${workspace}/${alias}/permissions.local.json`;
-    if (!(await exists(path))) continue;
-    const ruleset = await loadJson(readTextFile, path);
-    if (ruleset) {
-      sources.push({
-        source: 'local',
-        path: `${alias}/permissions.local.json`,
-        allow: ruleset.allow.length,
-        deny: ruleset.deny.length,
-      });
-      mergeRules(ruleset, allow, deny, seenAllow, seenDeny);
-      break;
-    }
-  }
-
-  // Layer 3: user-tier rules (~/.qlaud/permissions.json,
-  // ~/.claude/permissions.json). Users edit by hand for now; UI to
-  // come in a follow-up alpha.
+  // GLOBAL try/catch around the whole loader: Tauri's fs scope can
+  // reject paths the dialog hasn't explicitly granted (after a
+  // session restart, before the user re-picks the folder, etc.).
+  // The plugin-fs `exists()` call THROWS on scope rejection rather
+  // than returning false. Without this guard, the throw escapes
+  // every call site (runBash, runWriteFile, runEditFile) and lands
+  // as the tool's error result — which broke alpha.79 in the wild.
+  // Treat any I/O failure as "no rules defined": permissive default
+  // matches the pre-alpha.79 behavior and keeps the agent functional.
   try {
-    const { homeDir } = await import('@tauri-apps/api/path');
-    const home = (await homeDir()).replace(/\/+$/, '');
-    for (const alias of ['.qlaud', '.claude'] as const) {
-      const path = `${home}/${alias}/permissions.json`;
-      if (!(await exists(path))) continue;
-      const ruleset = await loadJson(readTextFile, path);
+    const fs = await import('@tauri-apps/plugin-fs');
+    const sources: ResolvedRuleset['sources'] = [];
+    const allow: PermissionRule[] = [];
+    const deny: PermissionRule[] = [];
+    const seenAllow = new Set<string>();
+    const seenDeny = new Set<string>();
+
+    // Layer 1: project rules.
+    for (const alias of CONFIG_DIR_ALIASES) {
+      const path = `${workspace}/${alias}/permissions.json`;
+      if (!(await safeExists(fs.exists, path))) continue;
+      const ruleset = await loadJson(fs.readTextFile, path);
       if (ruleset) {
         sources.push({
-          source: 'user',
-          path: `~/${alias}/permissions.json`,
+          source: 'project',
+          path: `${alias}/permissions.json`,
           allow: ruleset.allow.length,
           deny: ruleset.deny.length,
         });
@@ -139,11 +106,71 @@ async function loadFromDisk(workspace: string): Promise<ResolvedRuleset> {
         break;
       }
     }
-  } catch {
-    // Home dir lookup failed (sandboxed?). Skip user-tier.
-  }
 
-  return { allow, deny, sources };
+    // Layer 2: local rules (gitignored).
+    for (const alias of CONFIG_DIR_ALIASES) {
+      const path = `${workspace}/${alias}/permissions.local.json`;
+      if (!(await safeExists(fs.exists, path))) continue;
+      const ruleset = await loadJson(fs.readTextFile, path);
+      if (ruleset) {
+        sources.push({
+          source: 'local',
+          path: `${alias}/permissions.local.json`,
+          allow: ruleset.allow.length,
+          deny: ruleset.deny.length,
+        });
+        mergeRules(ruleset, allow, deny, seenAllow, seenDeny);
+        break;
+      }
+    }
+
+    // Layer 3: user-tier rules.
+    try {
+      const { homeDir } = await import('@tauri-apps/api/path');
+      const home = (await homeDir()).replace(/\/+$/, '');
+      for (const alias of ['.qlaud', '.claude'] as const) {
+        const path = `${home}/${alias}/permissions.json`;
+        if (!(await safeExists(fs.exists, path))) continue;
+        const ruleset = await loadJson(fs.readTextFile, path);
+        if (ruleset) {
+          sources.push({
+            source: 'user',
+            path: `~/${alias}/permissions.json`,
+            allow: ruleset.allow.length,
+            deny: ruleset.deny.length,
+          });
+          mergeRules(ruleset, allow, deny, seenAllow, seenDeny);
+          break;
+        }
+      }
+    } catch {
+      // Home dir lookup or fs scope failed; skip user-tier.
+    }
+
+    return { allow, deny, sources };
+  } catch {
+    // ANY uncaught fs error → behave as if no rules are configured.
+    // Permissive default (mode-based auto-approve still applies) is
+    // the right fallback when we can't read the workspace's config —
+    // breaking the agent because we can't read an OPTIONAL config
+    // file is the worst possible UX.
+    return EMPTY;
+  }
+}
+
+/** Tauri's plugin-fs exists() throws on scope rejection (e.g. paths
+ *  the dialog hasn't granted) instead of returning false. Wrap every
+ *  call so a rejection looks identical to "file doesn't exist" — both
+ *  outcomes mean "no rules at this path; move on." */
+async function safeExists(
+  exists: (p: string) => Promise<boolean>,
+  path: string,
+): Promise<boolean> {
+  try {
+    return await exists(path);
+  } catch {
+    return false;
+  }
 }
 
 async function loadJson(
