@@ -16,9 +16,9 @@ import {
   Square,
   X,
 } from 'lucide-react';
-import { motion } from 'motion/react';
+import { AnimatePresence, motion } from 'motion/react';
 
-import { isTauri } from '../lib/tauri';
+import { isTauri, openExternal } from '../lib/tauri';
 import { posthog } from '../lib/analytics';
 
 import { runThreadAgent, type AgentEvent } from '../lib/legacy/agent';
@@ -845,10 +845,23 @@ export function ChatSurface({
 
   const empty = blocks.length === 0;
 
+  // Top-of-chat activity pill: when the agent is mid-turn and a
+  // tool is running, show a sticky pill at the top of the scroll
+  // viewport so the user knows what's happening even after they
+  // scroll up to read earlier turns. Mirrors the inline TypingDots
+  // activity but with always-visible affordance.
+  const stickyActivity = busy ? deriveCurrentActivity(blocks) : null;
+  // Derive the latest detected dev-server URL from bash outputs in
+  // this thread. When set, surface a "Browse →" chip near the
+  // activity pill so the user can click straight to the running
+  // server (Vite/Next/Astro/etc. — port-agnostic).
+  const detectedDevUrl = useMemo(() => deriveDevServerUrl(blocks), [blocks]);
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div ref={scrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto">
+        <StickyActivityBar activity={stickyActivity} devUrl={detectedDevUrl} />
         <div className="mx-auto w-full max-w-3xl px-3 py-6 sm:px-4 sm:py-8">
           {empty ? (
             <EmptyState
@@ -861,13 +874,13 @@ export function ChatSurface({
               onPick={(s) => setInput(s)}
             />
           ) : (
-            // Vertical rhythm: gap-6 (24px) between top-level rows
-            // matches Claude.ai's cadence — distinct turns feel
-            // distinct, but consecutive assistant blocks (text →
-            // tool → text) within a turn don't feel sparse because
-            // tool cards are dense. Inside an assistant_text the
-            // Markdown component handles its own paragraph rhythm.
-            <div className="flex flex-col gap-6">
+            // Vertical rhythm: each row owns its top margin (no
+            // parent gap-) so we can give DIFFERENT spacing within
+            // a turn (text → tool → text, tight) vs across turns
+            // (user_text → assistant, breathe). The turn-boundary
+            // class is set per row below based on its relationship
+            // to the predecessor.
+            <div className="flex flex-col">
               {messagesQuery.data?.hasMore && threadId && (
                 <LoadEarlierButton threadId={threadId} />
               )}
@@ -881,66 +894,92 @@ export function ChatSurface({
                 />
               )}
               <TodoListPanel blocks={blocks} />
-              {groupBlocks(blocks).map((group, gi) => {
-                if (group.type === 'tool-bundle') {
+              {(() => {
+                const groups = groupBlocks(blocks);
+                // Track the prior group's "side" — 'user' or
+                // 'assistant'. Anything that isn't user_text reads
+                // as the assistant's response stream (tool dispatch,
+                // tool bundle, assistant text, subagent, finished
+                // marker, error, etc. — all part of the response).
+                let prevSide: 'user' | 'assistant' | null = null;
+                return groups.map((group, gi) => {
+                  const groupSide: 'user' | 'assistant' =
+                    group.type === 'single' && group.block.type === 'user_text'
+                      ? 'user'
+                      : 'assistant';
+                  // Turn boundaries: user_text appears, OR an
+                  // assistant block follows a user_text. Between
+                  // turns we breathe (mt-10 = 40px); within a turn
+                  // (assistant→assistant) we keep tight (mt-3 = 12px).
+                  // First row has no top margin.
+                  const isTurnBoundary =
+                    gi !== 0 &&
+                    (groupSide !== prevSide || groupSide === 'user');
+                  const marginClass =
+                    gi === 0 ? '' : isTurnBoundary ? 'mt-10' : 'mt-3';
+                  prevSide = groupSide;
+
+                  if (group.type === 'tool-bundle') {
+                    return (
+                      <div key={`bundle-${gi}`} className={marginClass}>
+                        <ToolBundle
+                          tools={group.tools}
+                          workspace={workspacePath ?? null}
+                        />
+                      </div>
+                    );
+                  }
+                  const b = group.block;
+                  const i = group.index;
+                  // Subtle entry per row: user messages slide in from
+                  // the right (matching the bubble's alignment),
+                  // everything else fades up. motion's `initial` only
+                  // runs on first mount so existing rows don't
+                  // re-animate on each text-delta.
+                  const isUser = b.type === 'user_text';
+                  // Contextual typing indicator. When the agent is
+                  // mid-turn AND a tool is currently running, surface
+                  // "Reading src/foo.ts..." instead of generic dots —
+                  // the same lived-in feel Codex/Claude.ai have. Only
+                  // computed for the LAST block (where TypingDots
+                  // would render) to avoid useless work elsewhere.
+                  const isLast = i === blocks.length - 1;
+                  const activity =
+                    isLast && busy ? deriveCurrentActivity(blocks) : null;
                   return (
-                    <ToolBundle
-                      key={`bundle-${gi}`}
-                      tools={group.tools}
-                      workspace={workspacePath ?? null}
-                    />
-                  );
-                }
-                const b = group.block;
-                const i = group.index;
-                // Subtle entry per row: user messages slide in from
-                // the right (matching the bubble's alignment),
-                // everything else fades up. motion's `initial` only
-                // runs on first mount so existing rows don't
-                // re-animate on each text-delta. Existing rows DON'T
-                // shift on new sibling insertions (no layout="position").
-                const isUser = b.type === 'user_text';
-                // Contextual typing indicator. When the agent is
-                // mid-turn AND a tool is currently running, surface
-                // "Reading src/foo.ts..." instead of generic dots —
-                // the same lived-in feel Codex/Claude.ai have. Only
-                // computed for the LAST block (where TypingDots
-                // would render) to avoid useless work elsewhere.
-                const isLast = i === blocks.length - 1;
-                const activity =
-                  isLast && busy ? deriveCurrentActivity(blocks) : null;
-                return (
-                  <motion.div
-                    key={i}
-                    initial={{
-                      opacity: 0,
-                      x: isUser ? 8 : 0,
-                      y: isUser ? 0 : 4,
-                    }}
-                    animate={{ opacity: 1, x: 0, y: 0 }}
-                    transition={{
-                      duration: 0.22,
-                      ease: [0.32, 0.72, 0, 1],
-                    }}
-                  >
-                    <BlockRow
-                      block={b}
-                      workspace={workspacePath ?? null}
-                      busy={busy && isLast}
-                      activity={activity}
-                      onAllow={() =>
-                        b.type === 'approval' ? decide(b.id, 'allow') : undefined
-                      }
-                      onReject={() =>
-                        b.type === 'approval' ? decide(b.id, 'reject') : undefined
-                      }
-                      onRetry={() => {
-                        if (b.type === 'error' && b.retry) retry(b.retry);
+                    <motion.div
+                      key={i}
+                      className={marginClass}
+                      initial={{
+                        opacity: 0,
+                        x: isUser ? 8 : 0,
+                        y: isUser ? 0 : 4,
                       }}
-                    />
-                  </motion.div>
-                );
-              })}
+                      animate={{ opacity: 1, x: 0, y: 0 }}
+                      transition={{
+                        duration: 0.22,
+                        ease: [0.32, 0.72, 0, 1],
+                      }}
+                    >
+                      <BlockRow
+                        block={b}
+                        workspace={workspacePath ?? null}
+                        busy={busy && isLast}
+                        activity={activity}
+                        onAllow={() =>
+                          b.type === 'approval' ? decide(b.id, 'allow') : undefined
+                        }
+                        onReject={() =>
+                          b.type === 'approval' ? decide(b.id, 'reject') : undefined
+                        }
+                        onRetry={() => {
+                          if (b.type === 'error' && b.retry) retry(b.retry);
+                        }}
+                      />
+                    </motion.div>
+                  );
+                });
+              })()}
             </div>
           )}
         </div>
@@ -1930,6 +1969,89 @@ function shuffled<T>(arr: readonly T[]): T[] {
     [a[i], a[j]] = [a[j]!, a[i]!];
   }
   return a;
+}
+
+// ─── Dev-server URL detection ─────────────────────────────────────
+//
+// Watches bash tool outputs in the current conversation for the
+// "Local: http://localhost:5173" / "ready on http://localhost:3000"
+// startup banners every dev server prints. Returns the most recent
+// match — port-agnostic, framework-agnostic. Vite, Next, Astro,
+// Storybook, Remix, Nuxt, SvelteKit, Tauri's vite, all match the
+// same regex. Refs the last match so the chip surfaces immediately
+// after `pnpm dev` lands and stays available across follow-up turns.
+const DEV_URL_RE =
+  /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d{2,5})?(?:\/[^\s'"<>)]*)?/g;
+function deriveDevServerUrl(blocks: RenderBlock[]): string | null {
+  // Walk newest-first so a fresh dev-server output overrides an
+  // older one (npm scripts that restart on changes).
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    if (!b || b.type !== 'tool') continue;
+    if (b.call.name !== 'bash' && b.call.name !== 'verify') continue;
+    const out = b.call.output ?? '';
+    if (!out) continue;
+    const matches = Array.from(out.matchAll(DEV_URL_RE));
+    if (matches.length === 0) continue;
+    // Prefer the LAST match in the output (dev servers print
+    // status lines repeatedly; the latest "ready" line wins).
+    const last = matches[matches.length - 1]?.[0];
+    if (last) return last.replace(/[.,;)]+$/, '');
+  }
+  return null;
+}
+
+// ─── Sticky activity bar ─────────────────────────────────────────
+//
+// Always-visible status surface at the top of the chat viewport.
+// Shows the current tool activity (if any) AND the detected dev
+// server URL (if any). Both fade in/out so the bar stays out of
+// the way when nothing is happening — same posture Codex's
+// "what's running now" pill takes.
+
+function StickyActivityBar({
+  activity,
+  devUrl,
+}: {
+  activity: string | null;
+  devUrl: string | null;
+}) {
+  const visible = !!activity || !!devUrl;
+  return (
+    <AnimatePresence initial={false}>
+      {visible && (
+        <motion.div
+          key="sticky-activity"
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={{ duration: 0.18, ease: [0.32, 0.72, 0, 1] }}
+          className="sticky top-2 z-20 mx-auto flex w-full max-w-3xl flex-wrap items-center justify-end gap-2 px-3 sm:px-4"
+        >
+          {activity && (
+            <div className="flex items-center gap-2 rounded-full border border-border/60 bg-background/85 px-3 py-1 text-[11.5px] text-foreground/80 shadow-sm backdrop-blur-sm">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/60" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-primary" />
+              </span>
+              <span className="max-w-[280px] truncate">{activity}</span>
+            </div>
+          )}
+          {devUrl && (
+            <button
+              type="button"
+              onClick={() => void openExternal(devUrl)}
+              className="group inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-background/85 px-3 py-1 font-mono text-[11px] text-foreground/85 shadow-sm backdrop-blur-sm transition-all hover:border-primary/60 hover:bg-primary/5 hover:text-foreground"
+              title={`Open ${devUrl} in your browser`}
+            >
+              <span className="text-muted-foreground">↗</span>
+              <span className="max-w-[200px] truncate">{devUrl.replace(/^https?:\/\//, '')}</span>
+            </button>
+          )}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
 }
 
 // Animated typing-dots that ALSO surface what the agent is actually
