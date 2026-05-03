@@ -323,10 +323,23 @@ export type ThreadStreamHandlers = {
     output: unknown;
   }) => void;
   /** Fired once when the entire tool-loop finishes (or hits the cap).
-   *  Means: no further events will arrive on this stream. */
+   *  Means: no further events will arrive on this stream. ALWAYS
+   *  fired exactly once per call to streamThreadMessage — even when
+   *  the upstream stream ends without a `qlaud.done` event (idle
+   *  timeout, mid-stream worker crash, network blip after the SSE
+   *  200 was already written). The `incomplete` flag distinguishes
+   *  the synthesized terminal from a real qlaud.done so consumers
+   *  can surface "stream cut off" to the user instead of silently
+   *  marking the turn finished. */
   onDone?: (info: {
     iterations: number;
     hitMaxIterations: boolean;
+    /** True when the stream ended without a qlaud.done event. The
+     *  customer should treat the turn as failed-open: prior tool
+     *  results may or may not have been persisted server-side, the
+     *  next user message should still be sendable, but the model
+     *  may have been mid-thought when the connection dropped. */
+    incomplete?: boolean;
     /** USD cost — qlaud's authoritative number, markup included.
      *  Skip the balance-delta math; use this. */
     costUsd: number | null;
@@ -454,6 +467,18 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
   // onMessageStop gets the right values.
   let stopReason: StopReason | undefined;
   let outputTokens: number | undefined;
+  // Did we see a terminal `qlaud.done` event? When the upstream
+  // server-side loop completes cleanly it always emits one. If the
+  // stream closes without it (idle timeout in readWithIdleTimeout,
+  // worker crash before the final write, mid-stream socket reset),
+  // we need to synthesize a terminal `onDone` so the consumer can
+  // transition out of the "streaming" state. Without this, the UI
+  // can sit in a half-streaming-half-idle limbo where the busy flag
+  // got cleared by ChatSurface's finally block but the run was
+  // never properly closed — subsequent sends look fine to the user
+  // but the underlying state machine is wedged.
+  let doneEmitted = false;
+  let lastIteration = 0;
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -531,6 +556,7 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
           opts.onMessageStop?.({ stopReason, outputTokens });
           break;
         case 'qlaud.iteration_start':
+          lastIteration = ev.iteration ?? lastIteration;
           opts.onIterationStart?.({ iteration: ev.iteration ?? 0 });
           break;
         case 'qlaud.tool_dispatch_start':
@@ -565,6 +591,7 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
           });
           break;
         case 'qlaud.done':
+          doneEmitted = true;
           opts.onDone?.({
             iterations: ev.iterations ?? 0,
             hitMaxIterations: !!ev.hit_max_iterations,
@@ -579,6 +606,29 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
           break;
       }
     }
+  }
+
+  // Fallthrough: stream closed without `qlaud.done`. Surface a
+  // qlaud.error so the UI shows "stream interrupted" rather than
+  // silently going idle, AND synthesize the terminal onDone so the
+  // run-state machine transitions cleanly. Order matters: error
+  // first (so it renders before the "finished" event clears the
+  // streaming indicator), then done (so the consumer can dispose
+  // of streaming-only resources). incomplete=true lets agent.ts
+  // map to a distinct stopReason so analytics + future retry logic
+  // can spot these.
+  if (!doneEmitted) {
+    opts.onQlaudError?.({
+      message:
+        'qlaud stream ended before the upstream loop finished — likely an idle timeout or upstream interruption. The next message will start a fresh turn.',
+    });
+    opts.onDone?.({
+      iterations: lastIteration,
+      hitMaxIterations: false,
+      incomplete: true,
+      costUsd: null,
+      seq: null,
+    });
   }
 }
 

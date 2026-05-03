@@ -664,9 +664,23 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
         opts.onEvent({ type: 'error', message: info.message });
       },
       onDone: (info) => {
+        // Three terminal classes:
+        //   • end_turn — model finished cleanly
+        //   • max_loops — server-side iteration cap tripped
+        //   • incomplete — stream closed without qlaud.done. The
+        //     run-state must still resolve so the UI exits its
+        //     "streaming" state and the next user message dispatches
+        //     a fresh turn instead of silently no-op'ing. The error
+        //     event qlaud-client synthesizes alongside this surfaces
+        //     the explanation in the chat.
+        const stopReason = info.incomplete
+          ? 'incomplete'
+          : info.hitMaxIterations
+            ? 'max_loops'
+            : 'end_turn';
         opts.onEvent({
           type: 'finished',
-          stopReason: info.hitMaxIterations ? 'max_loops' : 'end_turn',
+          stopReason,
           turns: info.iterations,
           usage: { inputTokens: totalInput, outputTokens: totalOutput },
           costUsd: info.costUsd,
