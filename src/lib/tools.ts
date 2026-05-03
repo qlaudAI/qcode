@@ -885,7 +885,28 @@ async function runWriteFile(
   if (!abs) return badPath(call.id, requested);
   // requestApproval is only required when we're NOT auto-approving;
   // checked inside the conditional below.
-  const skipWriteApproval = autoApproveWrite(opts.autoApprove);
+  // Rule evaluation runs BEFORE the mode-based auto-approve check.
+  // Deny rules block before we even prompt; allow rules grant
+  // silent passage that overrides Strict mode. No-match falls
+  // through to YOLO/Smart/Strict semantics. Pattern from Claude
+  // Code's three-tier permission storage.
+  const { getPermissionRules, evaluateRule, contentForTool } = await import(
+    './permission-rules'
+  );
+  const ruleset = await getPermissionRules(opts.workspace);
+  const ruleDecision = evaluateRule(
+    ruleset,
+    'write_file',
+    contentForTool('write_file', call.input),
+  );
+  if (ruleDecision.kind === 'deny') {
+    return err(
+      call.id,
+      `Blocked by permission rule "${ruleDecision.matchedRule}". Edit ${ruleset.sources.find((s) => s.deny > 0)?.path ?? '.qcode/permissions.json'} to unblock.`,
+    );
+  }
+  const ruleAllowsWrite = ruleDecision.kind === 'allow';
+  const skipWriteApproval = ruleAllowsWrite || autoApproveWrite(opts.autoApprove);
   if (!skipWriteApproval && !opts.requestApproval) {
     return err(
       call.id,
@@ -1016,7 +1037,23 @@ async function runEditFile(
 
   const abs = resolveInWorkspace(requested, opts.workspace);
   if (!abs) return badPath(call.id, requested);
-  const skipEditApproval = autoApproveWrite(opts.autoApprove);
+  const { getPermissionRules: getEditRules, evaluateRule: evalEdit, contentForTool: contentForEdit } = await import(
+    './permission-rules'
+  );
+  const editRuleset = await getEditRules(opts.workspace);
+  const editRuleDecision = evalEdit(
+    editRuleset,
+    'edit_file',
+    contentForEdit('edit_file', call.input),
+  );
+  if (editRuleDecision.kind === 'deny') {
+    return err(
+      call.id,
+      `Blocked by permission rule "${editRuleDecision.matchedRule}". Edit your permissions.json to unblock.`,
+    );
+  }
+  const editRuleAllow = editRuleDecision.kind === 'allow';
+  const skipEditApproval = editRuleAllow || autoApproveWrite(opts.autoApprove);
   if (!skipEditApproval && !opts.requestApproval) {
     return err(call.id, 'Edit tools are not enabled in this session.');
   }
@@ -1145,12 +1182,25 @@ async function runBash(
     );
   }
   const runInBackground = input.run_in_background === true;
-  // Tri-state gate: yolo bypasses approval entirely (deny-list above
-  // already filtered the truly nasty stuff); smart bypasses only the
-  // safe-bash whitelist for foreground commands (background jobs
-  // always prompt in smart so dev servers don't spawn behind your
-  // back); strict prompts for everything.
-  const autoApproved = autoApproveBash(opts.autoApprove, command, runInBackground);
+  // Permission rules first (deny wins, allow grants silent passage),
+  // then fall through to tri-state mode behavior. The ordering means:
+  // a deny rule blocks even on YOLO, an allow rule lets through even
+  // on Strict — exactly the layered semantics the rule storage is
+  // for.
+  const { getPermissionRules: getBashRules, evaluateRule: evalBash } = await import(
+    './permission-rules'
+  );
+  const bashRuleset = await getBashRules(opts.workspace);
+  const bashRuleDecision = evalBash(bashRuleset, 'bash', command);
+  if (bashRuleDecision.kind === 'deny') {
+    return err(
+      call.id,
+      `Blocked by permission rule "${bashRuleDecision.matchedRule}". Edit your permissions.json to unblock.`,
+    );
+  }
+  const bashRuleAllow = bashRuleDecision.kind === 'allow';
+  const autoApproved =
+    bashRuleAllow || autoApproveBash(opts.autoApprove, command, runInBackground);
 
   if (!autoApproved && !opts.requestApproval) {
     return err(call.id, 'Bash is not enabled in this session.');

@@ -7,6 +7,7 @@ import { killBashSession } from './bash-session';
 import { probeEnv } from './env-probe';
 import { buildMatcher, type IgnoreMatcher } from './gitignore';
 import { getProjectMemory } from './memory';
+import { clearPermissionRulesCache } from './permission-rules';
 import { clearAllReads } from './read-cache';
 import { isTauri, pickFolder } from './tauri';
 
@@ -52,6 +53,10 @@ export function setCurrentWorkspace(w: Workspace | null): void {
     // entries from a prior workspace would just sit in memory and
     // potentially block edits the user actually wants in the new one.
     clearAllReads();
+    // Drop permission rules cache too so the next workspace's rules
+    // load fresh from disk; no risk of stale allow/deny carrying
+    // across folders.
+    clearPermissionRulesCache(prev.path);
   }
   if (w) {
     localStorage.setItem(CURRENT_KEY, JSON.stringify(w));
