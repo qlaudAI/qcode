@@ -430,6 +430,28 @@ export const VERIFY_TOOL: ToolDef = {
   input_schema: { type: 'object', properties: {} },
 };
 
+// On-demand skill loader. The system prompt lists every available
+// skill (name + description); this tool returns the full markdown
+// body for the model to follow. Lifted from Claude Code's pattern —
+// keeps the system prompt small while letting the user define rich
+// per-task playbooks at .qcode/skills/<name>.md (or .qlaud/, .claude/).
+export const SKILL_TOOL: ToolDef = {
+  name: 'skill',
+  description:
+    "Load the body of a user-defined skill by name. Available skills are listed in your system prompt under 'Available skills'. Use this tool when the user's request matches a skill's description — the body returned is project-specific guidance that overrides default behavior. Skills are markdown files in .qcode/skills/, .qlaud/skills/, or .claude/skills/ (also user-tier in ~/.qlaud/ and ~/.claude/). If the skill body references files or commands, follow them; the user wrote the skill specifically for this kind of task.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      name: {
+        type: 'string',
+        description:
+          "The skill's name as it appears in the catalog. Case-sensitive. If you're unsure, just call this with the closest match — qcode looks up by exact name and returns an error if missing.",
+      },
+    },
+    required: ['name'],
+  },
+};
+
 export const ALL_TOOLS = [
   ...READ_TOOLS,
   ...BROWSER_TOOLS,
@@ -437,6 +459,7 @@ export const ALL_TOOLS = [
   TASK_TOOL,
   TODO_TOOL,
   VERIFY_TOOL,
+  SKILL_TOOL,
 ];
 
 /** Subagent-mode tool list. The child agent gets every tool the
@@ -625,6 +648,8 @@ export async function executeTool(
         return ok(call.id, 'Todo list updated.');
       case 'verify':
         return await runVerify(call, opts);
+      case 'skill':
+        return await runSkill(call, opts);
       default:
         return err(call.id, `Unknown tool: ${call.name}`);
     }
@@ -1373,6 +1398,42 @@ async function runVerify(
   return passed
     ? ok(call.id, head + body)
     : err(call.id, head + body);
+}
+
+// ─── Skill ────────────────────────────────────────────────────────
+//
+// On-demand skill loader. The system prompt lists name + description
+// for every skill in the workspace; this tool returns the markdown
+// body when the model invokes it. Pattern from Claude Code: skills
+// are project-defined playbooks, lazy-loaded so they don't bloat
+// every system prompt.
+
+async function runSkill(
+  call: ToolCall,
+  opts: ExecuteOpts,
+): Promise<ToolResult> {
+  const input = call.input as { name?: unknown };
+  const name = typeof input.name === 'string' ? input.name.trim() : '';
+  if (!name) return err(call.id, 'name required');
+  const { getSkills, findSkill } = await import('./skills');
+  const skills = await getSkills(opts.workspace);
+  const skill = findSkill(skills, name);
+  if (!skill) {
+    if (skills.length === 0) {
+      return err(
+        call.id,
+        `No skills are defined in this workspace. Drop a markdown file at .qcode/skills/<name>.md (or .qlaud/skills/, .claude/skills/, ~/.qlaud/skills/, ~/.claude/skills/) with a YAML frontmatter \`name\` + \`description\` to register one.`,
+      );
+    }
+    const available = skills.map((s) => s.name).join(', ');
+    return err(
+      call.id,
+      `Skill "${name}" not found. Available: ${available}.`,
+    );
+  }
+  const header = `# Skill: ${skill.name}\nSource: ${skill.source}\n\n${skill.description}\n`;
+  const when = skill.whenToUse ? `\n**When to use:** ${skill.whenToUse}\n` : '';
+  return ok(call.id, `${header}${when}\n---\n\n${skill.body}`);
 }
 
 type VerifyResolved = {

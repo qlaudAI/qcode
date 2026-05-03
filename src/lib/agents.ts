@@ -45,7 +45,12 @@ export type AgentDef = {
 // dispatcher both see the same source of truth. read-only set
 // excludes write_file / edit_file / bash so the agent literally
 // can't mutate the workspace.
-const READ_ONLY = ['list_files', 'read_file', 'glob', 'grep'];
+//
+// `skill` is included in every agent's toolset because skills are
+// project-defined playbooks that may be relevant regardless of role
+// (an Explorer benefits from a "how-this-codebase-is-organized"
+// skill just as much as a Builder does).
+const READ_ONLY = ['list_files', 'read_file', 'glob', 'grep', 'skill'];
 const READ_AND_BROWSE = [
   ...READ_ONLY,
   'browser_navigate',

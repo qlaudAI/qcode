@@ -14,8 +14,15 @@
 //   4. Executor runs (or skips) based on the decision
 
 import { AGENTS, resolveAgentType, type AgentType } from './agents';
+import {
+  customAgentsRoster,
+  findCustomAgent,
+  getCustomAgents,
+  type CustomAgent,
+} from './custom-agents';
 import { envSystemSection, probeEnv } from './env-probe';
 import { getProjectMemory, memorySystemSection } from './memory';
+import { getSkills, skillsSystemSection } from './skills';
 import {
   streamThreadMessage,
   type ClientToolDef,
@@ -133,10 +140,11 @@ export type AgentEvent =
       type: 'subagent_start';
       parentToolUseId: string;
       description: string;
-      /** Which named agent the orchestrator dispatched. Lets the UI
-       *  show the role label ("Verifier", "Explorer", ...) instead
-       *  of the generic "Subagent". */
-      agentType: AgentType;
+      /** Which named agent the orchestrator dispatched. AgentType
+       *  for built-ins, free string for custom agents from
+       *  .qcode/agents/<name>.md. The UI uses agentLabel for display
+       *  and agentType only for icon mapping. */
+      agentType: AgentType | string;
       agentLabel: string;
     }
   | {
@@ -200,9 +208,20 @@ export type RunThreadAgentOpts = {
   isSubagent?: boolean;
   /** Named-agent type for subagent runs. Selects the tool subset
    *  (per AGENTS[type].toolNames) and is forwarded to the server so
-   *  the focused persona prompt applies. Ignored when isSubagent is
-   *  false. */
-  subagentType?: AgentType;
+   *  the focused persona prompt applies. Null when this is a custom
+   *  agent dispatch (subagentPersona carries the prompt instead).
+   *  Ignored when isSubagent is false. */
+  subagentType?: AgentType | null;
+  /** Custom agent persona body. When set, overrides the server's
+   *  built-in registry lookup — the server uses this verbatim as the
+   *  subagent's system prompt. Ignored when isSubagent is false. */
+  subagentPersona?: string;
+  /** Custom agent tool allowlist. Overrides the AGENTS[type].toolNames
+   *  filter. Ignored when isSubagent is false. */
+  subagentTools?: string[];
+  /** Display label for the subagent — used by the server prompt
+   *  formatter and logging. Defaults to the built-in agent's label. */
+  subagentLabel?: string;
   signal?: AbortSignal;
   onEvent: (e: AgentEvent) => void;
   onApproval: (
@@ -236,22 +255,35 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
   // Memory + env probe pulled in parallel — they're both cached so
   // hot turns pay nothing here, and on a cold workspace the two
   // round-trips happen at the same time instead of sequentially.
-  const [memory, env] = opts.workspace
+  const [memory, env, skills, customAgents] = opts.workspace
     ? await Promise.all([
         getProjectMemory(opts.workspace),
         probeEnv(opts.workspace),
+        getSkills(opts.workspace),
+        getCustomAgents(opts.workspace),
       ])
-    : [null, null];
+    : [null, null, [], []];
   const systemPrompt =
-    basePrompt + memorySystemSection(memory) + envSystemSection(env);
+    basePrompt +
+    memorySystemSection(memory) +
+    envSystemSection(env) +
+    skillsSystemSection(skills) +
+    customAgentsRoster(customAgents);
   // Tool selection:
   // - Orchestrator (parent): plan mode → READ_TOOLS, otherwise ALL_TOOLS.
-  // - Subagent: filter ALL_TOOLS to the named agent's toolNames so a
-  //   Verifier can't write_file, an Explorer can't bash, etc. Stripping
-  //   `task` is implicit — no agent's toolNames list includes it
-  //   (depth-1 cap).
+  // - Subagent (built-in): filter to AGENTS[type].toolNames.
+  // - Subagent (custom): filter to subagentTools allowlist (from the
+  //   .qcode/agents/<name>.md frontmatter, or default read-only set
+  //   when frontmatter omits it — see custom-agents.ts).
+  // Stripping `task` is implicit — no agent's toolNames list includes
+  // it (depth-1 cap).
   let baseTools;
-  if (opts.isSubagent && opts.subagentType) {
+  if (opts.isSubagent && opts.subagentTools) {
+    // Custom agent: explicit allowlist from frontmatter.
+    const allowed = new Set(opts.subagentTools);
+    baseTools = ALL_TOOLS.filter((t) => allowed.has(t.name));
+  } else if (opts.isSubagent && opts.subagentType) {
+    // Built-in: registry lookup.
     const allowed = new Set(AGENTS[opts.subagentType].toolNames);
     baseTools = ALL_TOOLS.filter((t) => allowed.has(t.name));
   } else if (planMode) {
@@ -324,7 +356,21 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
     // Forward the named-agent type so the server swaps in the
     // focused persona (Explorer / Verifier / Builder / Planner /
     // Reviewer) instead of the orchestrator's full SYSTEM_PROMPT_AGENT.
-    agent_type: opts.isSubagent ? opts.subagentType : undefined,
+    agent_type:
+      opts.isSubagent && opts.subagentType ? opts.subagentType : undefined,
+    // Custom agent persona: when set, the server uses this verbatim
+    // instead of looking up a built-in by agent_type. Lets the user
+    // define their own agents in .qcode/agents/<name>.md without any
+    // server-side registration.
+    agent_persona:
+      opts.isSubagent && opts.subagentPersona ? opts.subagentPersona : undefined,
+    // Custom agents the orchestrator can dispatch this turn. Server
+    // appends them to the task-tool description so the model knows
+    // which custom agents the workspace has defined.
+    custom_agents:
+      !opts.isSubagent && customAgents.length > 0
+        ? customAgents.map((a) => ({ name: a.name, description: a.description }))
+        : undefined,
     memory: memory ? { source: memory.source, text: memory.text } : undefined,
     env: env
       ? {
@@ -402,20 +448,33 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
               prompt?: string;
               agent_type?: unknown;
             }) ?? {};
-          const agentType = resolveAgentType(inputObj.agent_type);
-          const agentDef = AGENTS[agentType];
-          // Read-only / cheap agents (Explorer, Verifier, Reviewer)
-          // route to the user's configured subagentModel; flagship
-          // agents (Builder, Planner) inherit the parent's model so
-          // their judgment doesn't degrade. useCheapModel:false +
-          // subagentModel:null both result in inheriting the parent.
-          const subagentModel = agentDef.useCheapModel
+          const rawType =
+            typeof inputObj.agent_type === 'string'
+              ? inputObj.agent_type.trim().toLowerCase()
+              : '';
+
+          // Custom agent? Look up before falling back to built-in
+          // resolution so a custom 'reviewer' can't be hijacked by a
+          // typo'd built-in name (built-ins win on collision via
+          // findCustomAgent skipping built-in names at load time).
+          const customAgent = opts.workspace
+            ? findCustomAgent(await getCustomAgents(opts.workspace), rawType)
+            : null;
+
+          const agentType = customAgent ? null : resolveAgentType(rawType);
+          const agentDef = agentType ? AGENTS[agentType] : null;
+          const useCheap = customAgent ? true : agentDef!.useCheapModel;
+          // Read-only / cheap agents route to subagentModel; flagship
+          // agents inherit the parent's model. Custom agents default
+          // to cheap (they're typically focused/scoped — same posture
+          // as Explorer/Verifier/Reviewer).
+          const subagentModel = useCheap
             ? (getSettings().subagentModel ?? opts.model)
             : opts.model;
           posthog.capture('subagent_spawned', {
             parent_model: opts.model,
             subagent_model: subagentModel,
-            agent_type: agentType,
+            agent_type: customAgent ? `custom:${customAgent.name}` : agentType,
             description_chars: (inputObj.description ?? '').length,
             prompt_chars: (inputObj.prompt ?? '').length,
           });
@@ -423,6 +482,7 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
             parentThreadId: opts.threadId,
             parentToolUseId: info.toolUseId,
             agentType,
+            customAgent,
             description: inputObj.description ?? '',
             prompt: inputObj.prompt ?? '',
             model: subagentModel,
@@ -722,9 +782,11 @@ async function safeSubmit(
 async function runSubagentForTask(args: {
   parentThreadId: string;
   parentToolUseId: string;
-  /** Which named agent to dispatch. Selects the tool subset client-
-   *  side and the persona prompt server-side. */
-  agentType: AgentType;
+  /** Built-in agent type, OR null when dispatching a custom agent
+   *  (custom field below carries the persona). Exactly one of
+   *  agentType / customAgent is non-null. */
+  agentType: AgentType | null;
+  customAgent: CustomAgent | null;
   description: string;
   prompt: string;
   model: string;
@@ -739,7 +801,15 @@ async function runSubagentForTask(args: {
   ) => Promise<ApprovalDecision>;
   autoApprove?: import('./settings').AutoApproveMode;
 }): Promise<void> {
-  const agentDef = AGENTS[args.agentType];
+  // Resolve agent identity for UI + dispatch: prefer custom over
+  // built-in (the resolver already routes to custom when it exists).
+  const isCustom = !!args.customAgent;
+  const agentLabel = isCustom
+    ? args.customAgent!.name
+    : AGENTS[args.agentType!].label;
+  const agentTypeForEvent = isCustom
+    ? args.customAgent!.name
+    : (args.agentType as string);
   // Tell the parent UI an agent is starting so it can render the
   // labeled card ("Verifier: confirm scaffold landed"). agent_type
   // rides along so the UI can show the role + pick the right icon.
@@ -747,8 +817,8 @@ async function runSubagentForTask(args: {
     type: 'subagent_start',
     parentToolUseId: args.parentToolUseId,
     description: args.description,
-    agentType: args.agentType,
-    agentLabel: agentDef.label,
+    agentType: agentTypeForEvent,
+    agentLabel,
   });
 
   let childThreadId: string;
@@ -758,7 +828,7 @@ async function runSubagentForTask(args: {
         parent_thread_id: args.parentThreadId,
         parent_tool_use_id: args.parentToolUseId,
         kind: 'subagent',
-        agent_type: args.agentType,
+        agent_type: agentTypeForEvent,
         description: args.description,
       },
     });
@@ -773,7 +843,7 @@ async function runSubagentForTask(args: {
       summary: msg,
     });
     await safeSubmit(args.parentThreadId, args.parentToolUseId, {
-      output: `${agentDef.label} failed to start: ${msg}`,
+      output: `${agentLabel} failed to start: ${msg}`,
       isError: true,
     });
     return;
@@ -792,9 +862,13 @@ async function runSubagentForTask(args: {
       enableConnectors: args.enableConnectors,
       isSubagent: true,
       // Agent type flows into qlaud_runtime so the server swaps in
-      // the focused persona prompt for this run. Client also reads
-      // it to filter the tool list (see runThreadAgent).
+      // the focused persona prompt for this run (built-ins) OR uses
+      // subagentPersona verbatim (custom agents). Client also reads
+      // these to filter the tool list (see runThreadAgent).
       subagentType: args.agentType,
+      subagentPersona: args.customAgent?.body,
+      subagentTools: args.customAgent?.tools,
+      subagentLabel: agentLabel,
       signal: args.signal,
       autoApprove: args.autoApprove,
       onApproval: args.onApproval,
