@@ -451,11 +451,16 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
               description?: string;
               prompt?: string;
               agent_type?: unknown;
+              task_id?: unknown;
             }) ?? {};
           const rawType =
             typeof inputObj.agent_type === 'string'
               ? inputObj.agent_type.trim().toLowerCase()
               : '';
+          const resumeId =
+            typeof inputObj.task_id === 'string' && inputObj.task_id.trim()
+              ? inputObj.task_id.trim()
+              : null;
 
           // Custom agent? Look up before falling back to built-in
           // resolution so a custom 'reviewer' can't be hijacked by a
@@ -497,6 +502,7 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
             onEvent: opts.onEvent,
             onApproval: opts.onApproval,
             autoApprove: opts.autoApprove,
+            resumeThreadId: resumeId,
           });
           return;
         }
@@ -804,6 +810,16 @@ async function runSubagentForTask(args: {
     request: ApprovalRequest,
   ) => Promise<ApprovalDecision>;
   autoApprove?: import('./settings').AutoApproveMode;
+  /** When set, dispatch into THIS existing subagent thread instead of
+   *  spawning a new one. The prompt is appended as a follow-up turn
+   *  with the agent's full prior context (files it read, decisions
+   *  it made) preserved. Pattern lifted from Claude Code's task_id
+   *  resume — lets the orchestrator do "one more probe" follow-ups
+   *  without paying for context re-onboarding. Validated lightly:
+   *  if the thread doesn't exist or the user doesn't own it, the
+   *  subsequent streamThreadMessage call surfaces the error and the
+   *  parent sees a failed task-notification. */
+  resumeThreadId?: string | null;
 }): Promise<void> {
   // Resolve agent identity for UI + dispatch: prefer custom over
   // built-in (the resolver already routes to custom when it exists).
@@ -826,31 +842,43 @@ async function runSubagentForTask(args: {
   });
 
   let childThreadId: string;
-  try {
-    const child = await createRemoteThread({
-      metadata: {
-        parent_thread_id: args.parentThreadId,
-        parent_tool_use_id: args.parentToolUseId,
-        kind: 'subagent',
-        agent_type: agentTypeForEvent,
-        description: args.description,
-      },
-    });
-    childThreadId = child.id;
-  } catch (e) {
-    const msg =
-      e instanceof Error ? e.message : 'failed to create subagent thread';
-    args.onEvent({
-      type: 'subagent_done',
-      parentToolUseId: args.parentToolUseId,
-      isError: true,
-      summary: msg,
-    });
-    await safeSubmit(args.parentThreadId, args.parentToolUseId, {
-      output: `${agentLabel} failed to start: ${msg}`,
-      isError: true,
-    });
-    return;
+  if (args.resumeThreadId) {
+    // Resume path: skip createRemoteThread, dispatch into the
+    // existing subagent thread. Server-side validation happens
+    // inside streamThreadMessage — if the thread is missing or the
+    // tenant doesn't own it, that surfaces as a 404 / 403 which the
+    // catch below maps into a failed task-notification. We don't
+    // pre-validate here because (a) the tenancy check is cheap
+    // server-side and (b) racing the validate→dispatch window would
+    // double the latency on every resume.
+    childThreadId = args.resumeThreadId;
+  } else {
+    try {
+      const child = await createRemoteThread({
+        metadata: {
+          parent_thread_id: args.parentThreadId,
+          parent_tool_use_id: args.parentToolUseId,
+          kind: 'subagent',
+          agent_type: agentTypeForEvent,
+          description: args.description,
+        },
+      });
+      childThreadId = child.id;
+    } catch (e) {
+      const msg =
+        e instanceof Error ? e.message : 'failed to create subagent thread';
+      args.onEvent({
+        type: 'subagent_done',
+        parentToolUseId: args.parentToolUseId,
+        isError: true,
+        summary: msg,
+      });
+      await safeSubmit(args.parentThreadId, args.parentToolUseId, {
+        output: `${agentLabel} failed to start: ${msg}`,
+        isError: true,
+      });
+      return;
+    }
   }
 
   let buffer = '';

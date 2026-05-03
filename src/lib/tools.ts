@@ -212,7 +212,7 @@ export const TODO_TOOL: ToolDef = {
 export const TASK_TOOL: ToolDef = {
   name: 'task',
   description:
-    "Dispatch a named agent to a focused subtask. Pick the right one for the job:\n\n• explorer — read-only investigation (find references, map architecture). Returns markdown summary with file:line citations. Use when answering would balloon your context (\"find every caller of X\", \"map the auth layer\").\n• verifier — confirm a code change actually landed and the project's check command passes. Run AFTER write_file/edit_file or after a foreground bash that timed out — don't trust 'I think it worked'. Returns PASS/FAIL with specifics.\n• builder — self-contained execution with full toolkit (write/edit/bash/browser/verify). Use for \"scaffold X\", \"add feature Y\", \"refactor Z\" — the Builder owns the whole edit→verify loop.\n• planner — read-only proposal-style plan. Use before a Builder when the change is ambiguous; Planner returns a file-by-file plan you pass into Builder.\n• reviewer — read-only audit for bugs / security / perf. Returns ranked findings with file:line and severity.\n\nMultiple task calls in one assistant message run IN PARALLEL — fan out independent work rather than serializing. The agent doesn't see this conversation; the prompt must stand alone (file paths, what to look for, success criteria). Don't use task for one-shot operations (one read_file, one grep) — call those directly.",
+    "Dispatch a named agent to a focused subtask. Pick the right one for the job:\n\n• explorer — read-only investigation (find references, map architecture). Returns markdown summary with file:line citations. Use when answering would balloon your context (\"find every caller of X\", \"map the auth layer\").\n• verifier — confirm a code change actually landed and the project's check command passes. Run AFTER write_file/edit_file or after a foreground bash that timed out — don't trust 'I think it worked'. Returns PASS/FAIL with specifics.\n• builder — self-contained execution with full toolkit (write/edit/bash/browser/verify). Use for \"scaffold X\", \"add feature Y\", \"refactor Z\" — the Builder owns the whole edit→verify loop.\n• planner — read-only proposal-style plan. Use before a Builder when the change is ambiguous; Planner returns a file-by-file plan you pass into Builder.\n• reviewer — read-only audit for bugs / security / perf. Returns ranked findings with file:line and severity.\n\nMultiple task calls in one assistant message run IN PARALLEL — fan out independent work rather than serializing. The agent doesn't see this conversation; the prompt must stand alone (file paths, what to look for, success criteria). Don't use task for one-shot operations (one read_file, one grep) — call those directly.\n\nFOLLOW-UP / RESUME: every dispatch returns a <task-id> in its result envelope. To send a follow-up message to the SAME running agent (preserving its full prior context — files it read, decisions it made, tools it used), pass that task-id in the optional `task_id` field. The follow-up `prompt` is appended to the existing thread; agent_type is locked to whatever the original dispatch chose. Use this when an agent's first answer needs clarification or one more probe; skip it (omit task_id) when starting fresh work that doesn't depend on the prior context.",
   input_schema: {
     type: 'object',
     properties: {
@@ -220,7 +220,7 @@ export const TASK_TOOL: ToolDef = {
         type: 'string',
         enum: ['explorer', 'verifier', 'builder', 'planner', 'reviewer'],
         description:
-          'Which agent to dispatch. See the tool description for when to pick each.',
+          'Which agent to dispatch. See the tool description for when to pick each. When `task_id` is set, this field is informational only — the agent type was locked at the original dispatch.',
       },
       description: {
         type: 'string',
@@ -230,7 +230,12 @@ export const TASK_TOOL: ToolDef = {
       prompt: {
         type: 'string',
         description:
-          "Self-contained prompt for the agent. The agent doesn't see this conversation; everything it needs has to be here.",
+          "Self-contained prompt for the agent. The agent doesn't see this conversation; everything it needs has to be here. When resuming via task_id, this is treated as a follow-up message in the existing agent's thread (so it CAN reference prior context — the agent remembers).",
+      },
+      task_id: {
+        type: 'string',
+        description:
+          "Optional. The <task-id> returned by a prior task() call. When set, the prompt is appended as a follow-up turn to the SAME subagent thread (full prior context preserved). When omitted, a fresh subagent is spawned with empty context. Use for clarifications / one-more-probe; omit for new work.",
       },
     },
     required: ['agent_type', 'description', 'prompt'],
