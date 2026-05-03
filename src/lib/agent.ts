@@ -371,6 +371,10 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
       !opts.isSubagent && customAgents.length > 0
         ? customAgents.map((a) => ({ name: a.name, description: a.description }))
         : undefined,
+    // Output style — shapes the prose-format directive in the system
+    // prompt. Subagents inherit the orchestrator's style so a
+    // Verifier output's compactness matches the parent's preference.
+    output_style: getSettings().outputStyle,
     memory: memory ? { source: memory.source, text: memory.text } : undefined,
     env: env
       ? {
@@ -898,16 +902,76 @@ async function runSubagentForTask(args: {
       ']';
   }
 
-  const summary = buffer.trim() || '(subagent produced no text)';
+  const rawSummary = buffer.trim() || '(subagent produced no text)';
+
+  // Plan persistence: when the Planner agent finishes successfully,
+  // write the plan body to .qcode/plans/<slug>.md (or .qlaud/, .claude/
+  // — whichever alias the workspace uses). Lets the user open the
+  // plan in their editor before kicking off a Builder dispatch, and
+  // lets the orchestrator on subsequent turns reference the file by
+  // path. Pattern from Claude Code's plan-mode flow.
+  let planPath: string | null = null;
+  if (
+    !childIsError &&
+    args.agentType === 'planner' &&
+    args.workspace
+  ) {
+    const { persistPlan } = await import('./plans');
+    const persisted = await persistPlan({
+      workspace: args.workspace,
+      body: rawSummary,
+      subSlug: args.description
+        ? args.description
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .slice(0, 32)
+        : undefined,
+    });
+    if (persisted) planPath = persisted.displayPath;
+  }
+
+  // Wrap the result in a <task-notification> XML envelope so the
+  // orchestrator parses subagent output with the same regex pattern
+  // regardless of which agent dispatched it. Pattern from Claude
+  // Code's coordinator mode (src/coordinator/coordinatorMode.ts):
+  // structured envelope > free-form text when the parent wants to
+  // chain decisions on subagent results.
+  const status: 'completed' | 'failed' = childIsError ? 'failed' : 'completed';
+  const planLine = planPath
+    ? `<plan-saved-to>${escapeXml(planPath)}</plan-saved-to>\n`
+    : '';
+  const xmlSummary =
+    `<task-notification>\n` +
+    `<task-id>${escapeXml(childThreadId)}</task-id>\n` +
+    `<agent>${escapeXml(agentLabel)}</agent>\n` +
+    `<description>${escapeXml(args.description)}</description>\n` +
+    `<status>${status}</status>\n` +
+    planLine +
+    `<result>\n${rawSummary}\n</result>\n` +
+    `</task-notification>`;
+
+  // UI gets the raw summary (XML wrapper would be ugly in the chat
+  // card); the parent model gets the XML envelope (uniform parsing).
   args.onEvent({
     type: 'subagent_done',
     parentToolUseId: args.parentToolUseId,
     isError: childIsError,
-    summary,
+    summary: rawSummary,
   });
-
   await safeSubmit(args.parentThreadId, args.parentToolUseId, {
-    output: summary,
+    output: xmlSummary,
     isError: childIsError,
   });
+}
+
+/** XML escape for attribute / text content. We don't take untrusted
+ *  HTML here — just user-typed descriptions and model-generated
+ *  text — but `&`, `<`, `>` are still required to avoid breaking the
+ *  envelope's parseability when the result body contains them. */
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }

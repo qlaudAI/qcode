@@ -40,6 +40,20 @@ export type Theme = 'system' | 'light' | 'dark';
  *            unfamiliar codebases or live demos. */
 export type AutoApproveMode = 'yolo' | 'smart' | 'strict';
 
+/** Output style controls how the agent formats its prose responses.
+ *  Doesn't change tool behavior — only the style of explanatory text
+ *  between tool calls + the final response.
+ *
+ *  - default:  full prose, code-fenced snippets, headings as needed.
+ *              Best for learning + complex tasks where you want the
+ *              full reasoning visible.
+ *  - compact:  tight summaries, no preamble, results-first. Best for
+ *              power users who want fewer tokens spent on prose and
+ *              more on tool execution.
+ *  - explain:  expand reasoning, narrate decisions, include "why"
+ *              for choices. Best for unfamiliar codebases or learning. */
+export type OutputStyle = 'default' | 'compact' | 'explain';
+
 export type Settings = {
   /** Model picked when a new chat is created. The title-bar dropdown
    *  still lets the user override per-thread. */
@@ -87,6 +101,10 @@ export type Settings = {
    *  default; pushing it on by default risks surprising people who
    *  weren't watching. */
   autoCommit: boolean;
+  /** Style for the agent's prose responses. See OutputStyle docs.
+   *  Forwarded to the server in qlaud_runtime so the system prompt
+   *  reflects the choice. */
+  outputStyle: OutputStyle;
 };
 
 const DEFAULT_SUBAGENT_MODEL = 'claude-haiku-4-5';
@@ -100,6 +118,7 @@ const DEFAULTS: Settings = {
   theme: 'system',
   autoApprove: 'smart',
   autoCommit: false,
+  outputStyle: 'default',
 };
 
 /** Coerce the stored autoApprove value to a tri-state mode. Handles

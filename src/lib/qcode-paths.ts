@@ -276,6 +276,77 @@ export async function pickWriteAlias(
   return '.qcode';
 }
 
+/** Stable slug for a workspace path, used to namespace per-project
+ *  user-tier auto-memory at `~/.qlaud/projects/<slug>/memory/`. We
+ *  use the workspace's git-root if present (so different checkouts
+ *  of the same repo share memory across machines once synced); fall
+ *  back to a path-derived slug otherwise. Pure — no I/O needed in
+ *  the hot path; a short hash distinguishes paths that share the
+ *  same basename ("qcode" in dev/ vs in projects/). */
+export function workspaceSlug(workspacePath: string): string {
+  const norm = workspacePath.replace(/\/+$/, '');
+  const basename = norm.split('/').pop() ?? 'workspace';
+  // Cheap stable hash of the absolute path so /a/qcode and /b/qcode
+  // get distinct memory dirs even though basenames collide.
+  let h = 0;
+  for (let i = 0; i < norm.length; i++) {
+    h = (h * 31 + norm.charCodeAt(i)) | 0;
+  }
+  const hex = (h >>> 0).toString(16).padStart(8, '0').slice(0, 8);
+  // Sanitize basename: lowercase, alnum + hyphen, max 32 chars.
+  const safe = basename
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  return safe ? `${safe}-${hex}` : hex;
+}
+
+/** Discover auto-memory entries at `~/.qlaud/projects/<slug>/memory/`
+ *  and `~/.claude/projects/<slug>/memory/`. These are user-tier per-
+ *  project notes — distinct from global `~/.qlaud/CLAUDE.md` because
+ *  they're scoped to ONE workspace identified by slug. Used for the
+ *  pattern Claude Code calls "auto-memory": notes the agent or user
+ *  jots about a specific project that don't belong in source control
+ *  but should follow the user across machines (via dotfile sync).
+ *
+ *  Returns the same DiscoveredFile shape as findConfigFiles so the
+ *  memory loader can fold these into the same merge pipeline with
+ *  source: 'user'. */
+export async function listAutoMemory(
+  workspace: string,
+): Promise<DiscoveredFile[]> {
+  if (!isTauri()) return [];
+  const home = await homeDir();
+  if (!home) return [];
+  const slug = workspaceSlug(workspace);
+  const aliases: Array<(typeof CONFIG_DIR_ALIASES)[number]> = ['.qlaud', '.claude'];
+  const out: DiscoveredFile[] = [];
+  const { readDir } = await import('@tauri-apps/plugin-fs');
+  for (const alias of aliases) {
+    const dir = `${home}/${alias}/projects/${slug}/memory`;
+    if (!(await exists(dir))) continue;
+    let entries: Awaited<ReturnType<typeof readDir>>;
+    try {
+      entries = await readDir(dir);
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (e.isDirectory) continue;
+      if (!e.name.endsWith('.md')) continue;
+      out.push({
+        path: `${dir}/${e.name}`,
+        displayPath: `~/${alias}/projects/${slug}/memory/${e.name}`,
+        alias,
+        depth: -1,
+        source: 'user',
+      });
+    }
+  }
+  return out;
+}
+
 function relativizeForDisplay(abs: string, workspace: string): string {
   const ws = workspace.replace(/\/+$/, '');
   if (abs === ws) return '.';
