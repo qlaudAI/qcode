@@ -861,7 +861,13 @@ export function ChatSurface({
               onPick={(s) => setInput(s)}
             />
           ) : (
-            <div className="flex flex-col gap-5">
+            // Vertical rhythm: gap-6 (24px) between top-level rows
+            // matches Claude.ai's cadence — distinct turns feel
+            // distinct, but consecutive assistant blocks (text →
+            // tool → text) within a turn don't feel sparse because
+            // tool cards are dense. Inside an assistant_text the
+            // Markdown component handles its own paragraph rhythm.
+            <div className="flex flex-col gap-6">
               {messagesQuery.data?.hasMore && threadId && (
                 <LoadEarlierButton threadId={threadId} />
               )}
@@ -894,6 +900,15 @@ export function ChatSurface({
                 // re-animate on each text-delta. Existing rows DON'T
                 // shift on new sibling insertions (no layout="position").
                 const isUser = b.type === 'user_text';
+                // Contextual typing indicator. When the agent is
+                // mid-turn AND a tool is currently running, surface
+                // "Reading src/foo.ts..." instead of generic dots —
+                // the same lived-in feel Codex/Claude.ai have. Only
+                // computed for the LAST block (where TypingDots
+                // would render) to avoid useless work elsewhere.
+                const isLast = i === blocks.length - 1;
+                const activity =
+                  isLast && busy ? deriveCurrentActivity(blocks) : null;
                 return (
                   <motion.div
                     key={i}
@@ -911,7 +926,8 @@ export function ChatSurface({
                     <BlockRow
                       block={b}
                       workspace={workspacePath ?? null}
-                      busy={busy && i === blocks.length - 1}
+                      busy={busy && isLast}
+                      activity={activity}
                       onAllow={() =>
                         b.type === 'approval' ? decide(b.id, 'allow') : undefined
                       }
@@ -1536,6 +1552,7 @@ function BlockRow({
   block,
   busy,
   workspace,
+  activity,
   onAllow,
   onReject,
   onRetry,
@@ -1543,6 +1560,12 @@ function BlockRow({
   block: RenderBlock;
   busy: boolean;
   workspace: string | null;
+  /** Optional contextual activity string. When the agent is mid-turn
+   *  and a tool is running, this carries a phrase like
+   *  "Reading src/foo.ts..." or "Running `pnpm test`...". The
+   *  TypingDots component renders it in place of generic dots so
+   *  the user sees what's actually happening, not just "..." */
+  activity?: string | null;
   onAllow?: () => void;
   onReject?: () => void;
   onRetry?: () => void;
@@ -1714,7 +1737,7 @@ function BlockRow({
         <Avatar />
         <div className="flex-1 pt-0.5">
           {block.skill && <SkillAttribution skill={block.skill} model={block.resolvedModel} />}
-          <TypingDots />
+          <TypingDots activity={activity ?? null} />
         </div>
       </div>
     );
@@ -1798,6 +1821,108 @@ const THINKING_QUIPS = [
   'Yes, it works on my machine.',
 ];
 
+// ─── Contextual activity derivation ───────────────────────────────
+//
+// While the agent is mid-turn, peek the blocks list for the LAST
+// running tool call and turn it into a human-readable phrase the
+// TypingDots component can surface in place of generic dots.
+// Returns null when no tool is currently running — the indicator
+// then shows dots + the ambient quip rotation.
+//
+// Phrasing is intentionally specific ("Reading src/foo.ts" not
+// "Working with files") because specific reads as competent and
+// generic reads as vague. Truncation caps long inputs so a giant
+// path or shell command doesn't overflow the bubble.
+function deriveCurrentActivity(blocks: RenderBlock[]): string | null {
+  // Walk from the end — the most recent running tool wins. Tools
+  // can finish-then-restart in chains, so we want what's running
+  // RIGHT NOW, not the first running one we find.
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    if (!b) continue;
+    if (b.type === 'tool' && b.call.status === 'running') {
+      return phraseForTool(b.call.name, b.call.input);
+    }
+    if (b.type === 'subagent' && b.status === 'running') {
+      return `${b.agentLabel}: ${truncate(b.description, 60)}`;
+    }
+  }
+  return null;
+}
+
+function phraseForTool(name: string, input: unknown): string {
+  const inp = (input ?? {}) as Record<string, unknown>;
+  const str = (key: string): string =>
+    typeof inp[key] === 'string' ? (inp[key] as string) : '';
+  switch (name) {
+    case 'read_file':
+      return `Reading ${truncate(str('path'), 50) || 'file'}…`;
+    case 'write_file':
+      return `Writing ${truncate(str('path'), 50) || 'file'}…`;
+    case 'edit_file':
+      return `Editing ${truncate(str('path'), 50) || 'file'}…`;
+    case 'list_files':
+      return `Listing ${truncate(str('path') || str('dir'), 50) || 'workspace'}…`;
+    case 'glob':
+      return `Searching for ${truncate(str('pattern'), 50) || 'files'}…`;
+    case 'grep':
+      return `Searching for "${truncate(str('pattern'), 50) || ''}"`;
+    case 'bash':
+      return `Running ${truncate(formatCmd(str('command')), 60)}`;
+    case 'verify':
+      return 'Running verify…';
+    case 'browser_navigate':
+      return `Loading ${truncate(str('url'), 50) || 'page'}…`;
+    case 'browser_snapshot':
+      return 'Capturing page snapshot…';
+    case 'browser_screenshot':
+      return 'Taking screenshot…';
+    case 'browser_click':
+      return 'Clicking element…';
+    case 'browser_type':
+      return 'Typing into field…';
+    case 'browser_console':
+      return 'Reading console…';
+    case 'task': {
+      const desc = str('description');
+      return desc ? `Spawning subagent: ${truncate(desc, 50)}` : 'Spawning subagent…';
+    }
+    case 'todo_write':
+      return 'Updating tasks…';
+    case 'skill':
+      return `Loading skill: ${truncate(str('name'), 40)}`;
+    case 'enter_plan_mode':
+      return 'Entering plan mode…';
+    case 'exit_plan_mode':
+      return 'Submitting plan…';
+    case 'qlaud_search_tools':
+      return 'Searching available tools…';
+    case 'qlaud_get_tool_schemas':
+      return 'Loading tool schemas…';
+    case 'qlaud_multi_execute':
+      return 'Executing tools…';
+    case 'qlaud_manage_connections':
+      return 'Managing connections…';
+    default:
+      return `Running ${name}…`;
+  }
+}
+
+/** Format a shell command for display: prefix in backticks, drop
+ *  the noise of common shell prefixes that don't tell the user
+ *  anything ("bash -c", piping noise). Conservative — keeps the
+ *  string truthful. */
+function formatCmd(command: string): string {
+  if (!command) return '`bash`';
+  return `\`${command}\``;
+}
+
+function truncate(s: string, n: number): string {
+  if (!s) return '';
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + '…';
+}
+
 function shuffled<T>(arr: readonly T[]): T[] {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
@@ -1807,12 +1932,16 @@ function shuffled<T>(arr: readonly T[]): T[] {
   return a;
 }
 
-// Animated typing-dots, plus a light one-liner that fades in only
-// after 6s of silence (so fast turns never see it). Rotates every
-// 5s for as long as the agent is still thinking. Jokes are ambient
-// — they're the side-character, not the headliner. Cap visible
-// length so a long quip doesn't reflow the bubble.
-function TypingDots() {
+// Animated typing-dots that ALSO surface what the agent is actually
+// doing. When a tool is running, we render a contextual phrase
+// ("Reading src/foo.ts...", "Running `pnpm test`...") in place of
+// generic dots — the lived-in feel Codex/Claude.ai have. With no
+// active tool, falls back to dots + an ambient quip after 6s.
+//
+// The phrase fades through with motion when the activity changes
+// (different tool starts running) so the indicator FEELS like it
+// tracks the agent's flow rather than blinking abruptly.
+function TypingDots({ activity }: { activity: string | null }) {
   const [phase, setPhase] = useState(0);
   const [showQuip, setShowQuip] = useState(false);
   const quipsRef = useRef<string[]>(shuffled(THINKING_QUIPS));
@@ -1832,12 +1961,28 @@ function TypingDots() {
   const quip = quipsRef.current[phase] ?? '';
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="flex h-5 items-center gap-1">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:0ms]" />
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:200ms]" />
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:400ms]" />
+      <div className="flex min-h-[20px] items-center gap-2">
+        <div className="flex h-5 items-center gap-1">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:0ms]" />
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:200ms]" />
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:400ms]" />
+        </div>
+        {activity && (
+          <motion.span
+            // Re-key on activity so React re-mounts and motion runs
+            // its initial → animate transition each time the agent
+            // switches tools. Subtle 140ms slide-in nudges the eye.
+            key={activity}
+            initial={{ opacity: 0, x: -3 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.14, ease: 'easeOut' }}
+            className="truncate text-[12px] text-muted-foreground"
+          >
+            {activity}
+          </motion.span>
+        )}
       </div>
-      {showQuip && (
+      {showQuip && !activity && (
         <span
           key={phase}
           className="qcode-quip max-w-md text-[11.5px] italic leading-snug text-muted-foreground/70"
