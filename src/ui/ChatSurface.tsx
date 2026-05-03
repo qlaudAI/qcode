@@ -16,6 +16,7 @@ import {
   Square,
   X,
 } from 'lucide-react';
+import { motion } from 'motion/react';
 
 import { isTauri } from '../lib/tauri';
 import { posthog } from '../lib/analytics';
@@ -886,22 +887,42 @@ export function ChatSurface({
                 }
                 const b = group.block;
                 const i = group.index;
+                // Subtle entry per row: user messages slide in from
+                // the right (matching the bubble's alignment),
+                // everything else fades up. motion's `initial` only
+                // runs on first mount so existing rows don't
+                // re-animate on each text-delta. Existing rows DON'T
+                // shift on new sibling insertions (no layout="position").
+                const isUser = b.type === 'user_text';
                 return (
-                  <BlockRow
+                  <motion.div
                     key={i}
-                    block={b}
-                    workspace={workspacePath ?? null}
-                    busy={busy && i === blocks.length - 1}
-                    onAllow={() =>
-                      b.type === 'approval' ? decide(b.id, 'allow') : undefined
-                    }
-                    onReject={() =>
-                      b.type === 'approval' ? decide(b.id, 'reject') : undefined
-                    }
-                    onRetry={() => {
-                      if (b.type === 'error' && b.retry) retry(b.retry);
+                    initial={{
+                      opacity: 0,
+                      x: isUser ? 8 : 0,
+                      y: isUser ? 0 : 4,
                     }}
-                  />
+                    animate={{ opacity: 1, x: 0, y: 0 }}
+                    transition={{
+                      duration: 0.22,
+                      ease: [0.32, 0.72, 0, 1],
+                    }}
+                  >
+                    <BlockRow
+                      block={b}
+                      workspace={workspacePath ?? null}
+                      busy={busy && i === blocks.length - 1}
+                      onAllow={() =>
+                        b.type === 'approval' ? decide(b.id, 'allow') : undefined
+                      }
+                      onReject={() =>
+                        b.type === 'approval' ? decide(b.id, 'reject') : undefined
+                      }
+                      onRetry={() => {
+                        if (b.type === 'error' && b.retry) retry(b.retry);
+                      }}
+                    />
+                  </motion.div>
                 );
               })}
             </div>
@@ -1704,7 +1725,7 @@ function BlockRow({
       <Avatar />
       <div className="flex-1 pt-0.5">
         {block.skill && <SkillAttribution skill={block.skill} model={block.resolvedModel} />}
-        <Markdown source={block.text} />
+        <Markdown source={block.text} streaming={busy} />
       </div>
     </div>
   );

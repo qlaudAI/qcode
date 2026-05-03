@@ -35,7 +35,18 @@ import { getCurrentWorkspace } from '../lib/workspace';
 // inserting shiki's themed tokens, which are static markup. We do
 // NOT enable rehype-raw or any HTML pass-through.
 
-export const Markdown = memo(function Markdown({ source }: { source: string }) {
+export const Markdown = memo(function Markdown({
+  source,
+  streaming = false,
+}: {
+  source: string;
+  /** When true, renders a blinking cursor at the end of the last
+   *  block — the "live typing" affordance Claude.ai and Codex use
+   *  while a turn is in progress. Implemented as a CSS pseudo-
+   *  element on the last child so it lives in the natural inline
+   *  flow of a paragraph (vs floating somewhere awkward). */
+  streaming?: boolean;
+}) {
   // Pre-process: turn bare workspace-relative `path:line` mentions
   // into markdown links pointing at a synthetic `qcode-file://`
   // scheme our link component recognizes. Skips matches inside
@@ -43,7 +54,7 @@ export const Markdown = memo(function Markdown({ source }: { source: string }) {
   // because file paths inside code samples should stay literal.
   const processed = useMemo(() => annotateFileLinks(source), [source]);
   return (
-    <div className="qcode-prose">
+    <div className={cn('qcode-prose', streaming && 'is-streaming')}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
         {processed}
       </ReactMarkdown>
@@ -352,23 +363,43 @@ function getShiki() {
   return shikiPromise;
 }
 
-// Cache: (lang|code) -> rendered HTML. Avoids re-highlighting the
-// same block on every parent re-render (a streaming text delta in
-// the same message triggers a Markdown re-parse, which would
-// otherwise re-highlight every prior code block).
+// Cache: (theme|lang|code) -> rendered HTML. Theme is part of the
+// key so a dark→light swap doesn't return stale tokens; the cache
+// holds both variants side-by-side once both have been requested.
 const HIGHLIGHT_CACHE = new Map<string, string>();
+
+/** Reactively track the dark-mode class on <html> so code blocks
+ *  re-highlight when the user flips themes. The MutationObserver
+ *  is shared across all CodeBlock instances. */
+function useIsDarkMode(): boolean {
+  const [isDark, setIsDark] = useState<boolean>(() =>
+    typeof document !== 'undefined' &&
+    document.documentElement.classList.contains('dark'),
+  );
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    const sync = () => setIsDark(root.classList.contains('dark'));
+    sync();
+    const obs = new MutationObserver(sync);
+    obs.observe(root, { attributes: true, attributeFilter: ['class'] });
+    return () => obs.disconnect();
+  }, []);
+  return isDark;
+}
 
 function CodeBlock({ lang, code }: { lang: string; code: string }) {
   const [copied, setCopied] = useState(false);
-  const [highlighted, setHighlighted] = useState<string | null>(() => {
-    const cached = HIGHLIGHT_CACHE.get(`${lang}|${code}`);
-    return cached ?? null;
-  });
+  const isDark = useIsDarkMode();
+  const theme = isDark ? SHIKI_THEME_DARK : SHIKI_THEME_LIGHT;
   const langLabel = lang || 'text';
+  const cacheKey = `${theme}|${langLabel}|${code}`;
+  const [highlighted, setHighlighted] = useState<string | null>(() => {
+    return HIGHLIGHT_CACHE.get(cacheKey) ?? null;
+  });
 
   useEffect(() => {
-    const key = `${lang}|${code}`;
-    const cached = HIGHLIGHT_CACHE.get(key);
+    const cached = HIGHLIGHT_CACHE.get(cacheKey);
     if (cached) {
       setHighlighted(cached);
       return;
@@ -377,11 +408,9 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
     void getShiki().then(async (shiki) => {
       if (!shiki || cancelled) return;
       try {
-        const isDark = document.documentElement.classList.contains('dark');
-        const theme = isDark ? SHIKI_THEME_DARK : SHIKI_THEME_LIGHT;
         const html = await shiki.codeToHtml(code, { lang: langLabel, theme });
         if (cancelled) return;
-        HIGHLIGHT_CACHE.set(key, html);
+        HIGHLIGHT_CACHE.set(cacheKey, html);
         // Cap cache so a long session doesn't grow unbounded.
         if (HIGHLIGHT_CACHE.size > 200) {
           const firstKey = HIGHLIGHT_CACHE.keys().next().value;
@@ -395,7 +424,7 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
     return () => {
       cancelled = true;
     };
-  }, [code, lang, langLabel]);
+  }, [code, langLabel, theme, cacheKey]);
 
   function copy() {
     void navigator.clipboard.writeText(code).then(() => {

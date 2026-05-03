@@ -194,4 +194,33 @@
     text-decoration-thickness: from-font;
     text-decoration-skip-ink: none;
   }
+
+  /* Streaming cursor — appears at the end of the last block while
+     the assistant is still generating. CSS-only (::after on the
+     last child of the prose container) so it sits in the natural
+     inline flow of a paragraph rather than floating awkwardly.
+     For non-paragraph last children (lists, code blocks, tables)
+     it falls below — acceptable since those rarely END a turn. */
+  .qcode-prose.is-streaming > *:last-child::after {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 1em;
+    margin-left: 3px;
+    margin-bottom: -2px;
+    vertical-align: text-bottom;
+    background-color: hsl(var(--foreground) / 0.85);
+    border-radius: 1px;
+    animation: qcode-cursor-blink 1.05s ease-in-out infinite;
+  }
+  @keyframes qcode-cursor-blink {
+    0%,
+    50% {
+      opacity: 1;
+    }
+    51%,
+    100% {
+      opacity: 0;
+    }
+  }
 }
