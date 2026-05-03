@@ -39,6 +39,14 @@ export type AgentDef = {
    *  cheap for bounded scout work; flagship for anything that needs
    *  judgment (planning, reviewing). */
   useCheapModel: boolean;
+  /** Per-turn iteration cap for this agent. Pattern from Claude Code:
+   *  the cap is bounded explicitly per agent type rather than a
+   *  global default. Builder needs the most (scaffold + multi-file
+   *  edits + verify can chain 100+ tool calls); read-only agents
+   *  cap lower because their work is bounded by definition.
+   *  Effectively unbounded if the model produces a long chain — the
+   *  doom-loop detector + token budget cap are the real ceilings. */
+  maxIterations: number;
 };
 
 // Tool subsets — declared once here so the server prompt + the
@@ -78,6 +86,7 @@ export const AGENTS: Record<AgentType, AgentDef> = {
       "Investigate the codebase. Read-only — list_files, read_file, glob, grep, browser_*. Use for 'find every reference to X', 'map the auth layer', 'what does module Y do'. Returns a tight markdown summary with file:line citations.",
     toolNames: READ_AND_BROWSE,
     useCheapModel: true,
+    maxIterations: 100,
   },
   verifier: {
     type: 'verifier',
@@ -86,6 +95,7 @@ export const AGENTS: Record<AgentType, AgentDef> = {
       "Confirm the work landed correctly after a write or scaffold. Has verify + read tools + bash for inspection. Use after the orchestrator finishes a code change, or when a foreground command timed out and you want to know if it actually completed. Reports PASS/FAIL with specifics.",
     toolNames: ['verify', 'read_file', 'glob', 'list_files', 'bash', 'bash_status'],
     useCheapModel: true,
+    maxIterations: 50,
   },
   builder: {
     type: 'builder',
@@ -94,6 +104,7 @@ export const AGENTS: Record<AgentType, AgentDef> = {
       'Execute a self-contained subtask end-to-end with full toolkit (write, edit, bash, browser, verify). Use for "scaffold X", "add feature Y", "refactor Z" — anything where the subagent owns the whole loop. Returns a one-paragraph summary of what changed.',
     toolNames: FULL_BUILD,
     useCheapModel: false,
+    maxIterations: 200,
   },
   planner: {
     type: 'planner',
@@ -102,6 +113,7 @@ export const AGENTS: Record<AgentType, AgentDef> = {
       "Investigate, then return a concrete file-by-file plan. Read-only. Use when the user asks 'how should we approach X' or before kicking off a Builder for an ambiguous change. Quotes existing code; never edits.",
     toolNames: READ_ONLY,
     useCheapModel: false,
+    maxIterations: 100,
   },
   reviewer: {
     type: 'reviewer',
@@ -110,8 +122,16 @@ export const AGENTS: Record<AgentType, AgentDef> = {
       'Audit a surface for bugs, security issues, or style violations. Read-only. Returns findings with file:line and severity (high/medium/low). Use for "audit src/auth for OWASP issues", "review my recent changes".',
     toolNames: READ_ONLY,
     useCheapModel: true,
+    maxIterations: 75,
   },
 };
+
+/** Default iteration cap for the orchestrator (parent) agent. Higher
+ *  than any single subagent because the parent dispatches multiple
+ *  subagents + does its own work. Pattern from Claude Code:
+ *  effectively unbounded except by the doom-loop detector + token
+ *  budget. Set high enough that real coding sessions don't bump it. */
+export const ORCHESTRATOR_MAX_ITERATIONS = 200;
 
 /** All agent types the orchestrator can dispatch. Used in the task
  *  tool's input schema enum. */

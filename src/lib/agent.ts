@@ -13,7 +13,12 @@
 //      when the user clicks Allow or Reject
 //   4. Executor runs (or skips) based on the decision
 
-import { AGENTS, resolveAgentType, type AgentType } from './agents';
+import {
+  AGENTS,
+  ORCHESTRATOR_MAX_ITERATIONS,
+  resolveAgentType,
+  type AgentType,
+} from './agents';
 import {
   customAgentsRoster,
   findCustomAgent,
@@ -350,9 +355,23 @@ export async function runThreadAgent(opts: RunThreadAgentOpts): Promise<void> {
   // qlaud worker rollback lands us on a version that doesn't know
   // about qlaud_runtime — old worker reads `system`, new worker
   // overrides it with the server-built one.
+  // Per-agent iteration cap. Pattern from Claude Code: each agent
+  // declares its own ceiling (Builder 200, Explorer/Planner 100,
+  // Verifier 50, Reviewer 75) so a long scaffold/refactor doesn't
+  // bump a default that was sized for a quick read. Custom agents
+  // inherit the orchestrator's cap (200) since their workload is
+  // unknown ahead of time. Subagent without a registered type (back-
+  // compat) → orchestrator cap.
+  const maxIterations = opts.isSubagent
+    ? opts.subagentType
+      ? AGENTS[opts.subagentType].maxIterations
+      : ORCHESTRATOR_MAX_ITERATIONS
+    : ORCHESTRATOR_MAX_ITERATIONS;
+
   const qlaudRuntime = {
     plan_mode: planMode,
     is_subagent: !!opts.isSubagent,
+    max_iterations: maxIterations,
     // Forward the named-agent type so the server swaps in the
     // focused persona (Explorer / Verifier / Builder / Planner /
     // Reviewer) instead of the orchestrator's full SYSTEM_PROMPT_AGENT.

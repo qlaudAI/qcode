@@ -366,6 +366,14 @@ export type ThreadStreamOpts = ThreadStreamHandlers & {
   qlaudRuntime?: {
     plan_mode?: boolean;
     is_subagent?: boolean;
+    /** Per-request iteration cap. The orchestrator and each subagent
+     *  type declares its own ceiling — Builder 200, Explorer/Planner
+     *  100, Verifier 50, Reviewer 75. Server clamps to [1, 500]. When
+     *  unset, the server falls back to its own conservative default
+     *  (back-compat for legacy clients). Pattern from Claude Code:
+     *  bound only when explicitly set; doom-loop detector + token-
+     *  budget compaction are the real ceilings. */
+    max_iterations?: number;
     memory?: { source: string; text: string };
     env?: {
       platform: 'macos' | 'linux' | 'windows' | 'unknown';
