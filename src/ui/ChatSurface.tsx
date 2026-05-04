@@ -1226,7 +1226,38 @@ function reduceBlocks(blocks: RenderBlock[], e: AgentEvent): RenderBlock[] {
         return [...blocks, { type: 'checkpoint', result: e.result }];
 
       case 'finished':
-      case 'error':
+        return blocks;
+
+      case 'error': {
+        // Engine + agent code paths fire `{ type: 'error', message }`
+        // events (see claude-code.ts spawn failures, missing-workspace
+        // guard in send(), runEngineClaudeCode auth/multimodal pre-
+        // checks, etc). Without this branch the reducer silently
+        // dropped those events and the user saw nothing — most
+        // visibly: sending a chat with no workspace folder under
+        // claude-code engine produced no reply, no error, just
+        // silence. Convert the AgentEvent into a RenderBlock.error so
+        // it surfaces as a normal error card. No retry payload —
+        // these are pre-flight failures, not stream failures.
+        const message = (e as { message?: unknown }).message;
+        const body =
+          typeof message === 'string' && message
+            ? message
+            : 'Something went wrong before the model could respond.';
+        return [
+          ...blocks,
+          {
+            type: 'error',
+            presentation: {
+              severity: 'error',
+              title: 'Could not run this turn',
+              body,
+            },
+            retry: null,
+          },
+        ];
+      }
+
       default:
         return blocks;
   }
