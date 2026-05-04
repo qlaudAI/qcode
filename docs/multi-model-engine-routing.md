@@ -127,14 +127,35 @@ What this means concretely:
   whole catalog. Not blocking — Phase 2 already gets us there
   with two engines.
 
-  - `apps/edge/src/routes/messages.ts`
-  - Gemini: preserve `thought_signature` from prior response when
-    forwarding tool replays.
-  - Qwen: detect `✿TASK✿/✿ARGS✿` in response text and emit as
-    proper `tool_use` content blocks.
-  - Kimi: preserve `reasoning_content` field on the round-trip
-    when thinking mode is enabled.
-  - MiniMax: lowercase / pre-canonicalize slug at route boundary.
+  Status as of 2026-05-04:
+
+  - ✅ **MiniMax slug case** — fixed in qlaud commit
+    `46b3152`. `resolveModel` now does a case-insensitive
+    fallback so `minimax-m2` resolves to `MiniMax-M2`.
+  - ✅ **Kimi reasoning_content** — fixed in qlaud commit
+    `46b3152`. The Anthropic→OpenAI request translator now
+    encodes thinking blocks as `reasoning_content` when
+    forwarding assistant messages with tool_calls, instead of
+    discarding them per Anthropic spec. Other OpenAI-compat
+    providers ignore the unknown field; Kimi + DeepSeek-Reasoner
+    require it.
+  - ⏩ **Gemini thought_signature** — NOT fixed. Requires
+    server-side state (KV cache keyed by tool_use_id, ~150 LOC):
+    capture signature from Gemini response, replay on follow-up.
+    Anthropic's shape has no slot for opaque per-tool-call
+    metadata so client-passthrough won't work.
+  - ⏩ **Qwen `✿READ✿/✿TASK✿`** — re-investigation showed this
+    is a *model-side* behavior, not a qlaud translation gap.
+    Direct /v1/messages curl with a tools array gets proper
+    `tool_use` blocks back from Qwen. The bug only appears when
+    Claude CLI's full system prompt is loaded — Qwen falls into
+    its internal text-based tool format under heavy system
+    contexts. Fix would require either (a) stripping
+    claude-style preambles before forwarding to Qwen, or (b)
+    response-text parser that detects `✿NAME✿: <json>` and
+    rewrites to `tool_use` blocks. Either is ~80 LOC and
+    fragile. Better path: route Qwen through codex which handles
+    the model's native quirks.
 
 ## Codex spawn config
 
