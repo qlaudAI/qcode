@@ -28,6 +28,7 @@ import {
   textModelsFromCatalog,
   type Catalog,
 } from './catalog';
+import { listMcpServers, type RegisteredMcpServer } from './mcp-servers';
 import {
   clearInFlight,
   hasLanded,
@@ -82,6 +83,7 @@ export const qk = {
   account: ['account'] as const,
   balance: ['balance'] as const,
   catalog: ['catalog'] as const,
+  mcpServers: ['mcp-servers'] as const,
 };
 
 // ─── Threads list ──────────────────────────────────────────────────
@@ -344,6 +346,36 @@ export function useTextModels(): ModelEntry[] {
   if (!data) return MODELS;
   const fromCatalog = textModelsFromCatalog(data);
   return fromCatalog.length > 0 ? fromCatalog : MODELS;
+}
+
+// ─── MCP servers ───────────────────────────────────────────────────
+//
+// Read-only — qcode shows what the user has registered, but the
+// register/configure/revoke flow lives at qlaud.ai/tools. The Settings
+// drawer reads this to display active-connector chips next to the
+// "Use qlaud connectors" toggle so users know what's loaded into the
+// agent's tool surface on their next send.
+
+export function useMcpServersQuery(
+  enabled = true,
+): {
+  data: RegisteredMcpServer[] | undefined;
+  isLoading: boolean;
+  error: Error | null;
+} {
+  const q = useQuery<RegisteredMcpServer[]>({
+    queryKey: qk.mcpServers,
+    enabled,
+    queryFn: () => listMcpServers(),
+    // Registrations don't change often. 60s staleTime + focus refetch
+    // (default on) covers the "I just added one in another tab" case.
+    staleTime: 60_000,
+  });
+  return {
+    data: q.data,
+    isLoading: q.isLoading,
+    error: q.error as Error | null,
+  };
 }
 
 // ─── Account ───────────────────────────────────────────────────────

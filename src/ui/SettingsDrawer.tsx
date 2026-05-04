@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 
 import { cn } from '../lib/cn';
-import { useTextModels } from '../lib/queries';
+import { useMcpServersQuery, useTextModels } from '../lib/queries';
 import { ripgrepInstallHint, ripgrepSource } from '../lib/ripgrep';
 import {
   getSettings,
@@ -334,6 +334,11 @@ export function SettingsDrawer({
                 checked={settings.enableConnectors}
                 onChange={(v) => update('enableConnectors', v)}
               />
+              {/* Active-connector readout — only fetches when the
+               *  toggle is on, so toggling off doesn't burn a network
+               *  call. Shows the user what's actually loaded into
+               *  their agent's tool surface on the next send. */}
+              <McpConnectorStatus enabled={settings.enableConnectors} />
               <p className="text-[11px] text-muted-foreground">
                 Lets the model discover + call MCP servers you connected on{' '}
                 <a
@@ -535,6 +540,99 @@ function DangerButton({
       <span className="text-[11px] text-muted-foreground">{hint}</span>
     </button>
   );
+}
+
+// Active-connector readout for the Connectors section. Fetches
+// /v1/mcp-servers only when the toggle is on, so toggling off does
+// not pay a network round-trip for data that's about to be ignored.
+// Shows the user a quick "what's loaded?" answer without leaving
+// qcode — registration / disconnect still happen at qlaud.ai/tools,
+// but the visibility loop closes here.
+//
+// Display states:
+//   - toggle off       → nothing (the toggle copy already explains it)
+//   - loading          → "Checking your connectors…"
+//   - error            → muted error chip (don't block the section)
+//   - 0 registered     → CTA-shaped link to register
+//   - N registered     → "N active" + name chips, max 6 visible,
+//                        overflow collapsed into "+K more"
+function McpConnectorStatus({ enabled }: { enabled: boolean }) {
+  const { data, isLoading, error } = useMcpServersQuery(enabled);
+  if (!enabled) return null;
+  if (isLoading) {
+    return (
+      <p className="text-[11px] text-muted-foreground">
+        Checking your connectors…
+      </p>
+    );
+  }
+  if (error) {
+    return (
+      <p className="text-[11px] text-muted-foreground">
+        Couldn&rsquo;t reach qlaud right now — your connectors will still
+        attach on the next send if registration is current.
+      </p>
+    );
+  }
+  const servers = data ?? [];
+  if (servers.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-border/70 bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+        No connectors registered yet. Browse{' '}
+        <a
+          href="#"
+          onClick={(e) => {
+            e.preventDefault();
+            void openExternal('https://qlaud.ai/tools');
+          }}
+          className="font-medium text-foreground/85 underline decoration-border hover:decoration-foreground/60"
+        >
+          qlaud.ai/tools
+        </a>{' '}
+        to add Linear, GitHub, Stripe, and 100+ others.
+      </div>
+    );
+  }
+  const MAX_CHIPS = 6;
+  const visible = servers.slice(0, MAX_CHIPS);
+  const overflow = servers.length - visible.length;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-[11px] font-medium text-foreground/80">
+        {servers.length} active:
+      </span>
+      {visible.map((s) => (
+        <span
+          key={s.id}
+          className="rounded-full bg-muted px-2 py-0.5 text-[10.5px] font-medium text-foreground/85"
+          title={`${s.name} — ${s.tools_cached} tools`}
+        >
+          {chipLabel(s.name)}
+        </span>
+      ))}
+      {overflow > 0 && (
+        <span
+          className="rounded-full bg-muted px-2 py-0.5 text-[10.5px] font-medium text-muted-foreground"
+          title={servers
+            .slice(MAX_CHIPS)
+            .map((s) => s.name)
+            .join(', ')}
+        >
+          +{overflow} more
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Server names look like "qlaud-mcp/linear" (catalog slug pattern)
+// or whatever the user passed when registering a raw URL. Trim the
+// catalog prefix so chips read cleanly: "linear" not "qlaud-mcp/linear".
+// Title-case the result so "github" renders as "Github" — close enough
+// to the brand for a chip without a full lookup table.
+function chipLabel(rawName: string): string {
+  const stripped = rawName.replace(/^qlaud-mcp\//, '').replace(/[-_]/g, ' ');
+  return stripped.charAt(0).toUpperCase() + stripped.slice(1);
 }
 
 // Detection-state pill + per-platform install hint for ripgrep.
