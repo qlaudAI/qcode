@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { MessageSquare, Trash2 } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
 
 import { cn } from '../lib/cn';
 import { prefetchThreadMessages } from '../lib/queries';
@@ -30,23 +31,35 @@ export function ThreadList({
   }
   return (
     <ul className="space-y-0.5">
-      {threads.map((t) => (
-        <Row
-          key={t.id}
-          thread={t}
-          snippet={snippetByThread?.get(t.id) ?? null}
-          active={t.id === currentId}
-          onPick={() => onPick(t.id)}
-          onDelete={() => onDelete(t.id)}
-          onHover={() => {
-            // Hover prefetch: warms the message-history query so the
-            // click-to-render is ≤1 frame from cache. Idempotent
-            // (Query dedupes) and gated by the 30s staleTime in
-            // prefetchThreadMessages, so this is cheap on hover-spam.
-            void prefetchThreadMessages(t.id);
-          }}
-        />
-      ))}
+      {/* AnimatePresence wraps each Row so:
+       *   - new threads fade + slide in (a fresh send / synced from
+       *     another device makes a row appear, not just pop in)
+       *   - deleted threads fade + slide out (delete animation
+       *     instead of an instant disappear)
+       *   - layout="position" smooths reorder when lastActiveAt
+       *     changes (a recently-active thread moves up)
+       *  initial={false} on AnimatePresence means existing rows
+       *  don't re-animate when the parent re-renders — only NEW
+       *  rows do. */}
+      <AnimatePresence initial={false}>
+        {threads.map((t) => (
+          <Row
+            key={t.id}
+            thread={t}
+            snippet={snippetByThread?.get(t.id) ?? null}
+            active={t.id === currentId}
+            onPick={() => onPick(t.id)}
+            onDelete={() => onDelete(t.id)}
+            onHover={() => {
+              // Hover prefetch: warms the message-history query so
+              // the click-to-render is ≤1 frame from cache. Idempotent
+              // (Query dedupes) and gated by the 30s staleTime in
+              // prefetchThreadMessages, so this is cheap on hover-spam.
+              void prefetchThreadMessages(t.id);
+            }}
+          />
+        ))}
+      </AnimatePresence>
     </ul>
   );
 }
@@ -69,14 +82,37 @@ function Row({
   const [confirming, setConfirming] = useState(false);
   const stamp = relativeTime(thread.updatedAt);
   return (
-    <li
+    <motion.li
+      // layout="position" only: animate the row's vertical position
+      // when reorder happens (lastActiveAt changes → row moves up),
+      // but DON'T animate width/height — those would jitter on
+      // every text reflow inside the row. Snappy 180ms tween.
+      layout="position"
+      transition={{ duration: 0.18, ease: [0.32, 0.72, 0, 1] }}
+      // Entry: subtle slide-in from the left, like the row was
+      // pushed onto the stack. Exit: collapse height + fade so a
+      // delete reads as "this is going away" not "this vanished."
+      initial={{ opacity: 0, x: -6 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: -8, height: 0, marginTop: 0, marginBottom: 0 }}
       onMouseEnter={onHover}
       onFocus={onHover}
       className={cn(
-        'group relative flex items-start gap-2 rounded px-2 py-1.5 text-left transition-colors',
+        'group relative flex items-start gap-2 overflow-hidden rounded px-2 py-1.5 text-left transition-colors',
         active ? 'bg-muted/80' : 'hover:bg-muted/50',
       )}
     >
+      {/* Active-state indicator — a 2px primary bar on the left
+       *  that animates in when this row becomes active. Layout
+       *  ID makes motion smoothly translate the bar from the
+       *  previous active row to this one when the user picks. */}
+      {active && (
+        <motion.span
+          layoutId="qcode-thread-active-indicator"
+          className="absolute inset-y-1 left-0 w-[2px] rounded-full bg-primary"
+          transition={{ duration: 0.2, ease: [0.32, 0.72, 0, 1] }}
+        />
+      )}
       <button
         onClick={onPick}
         className="flex min-w-0 flex-1 flex-col gap-0.5"
@@ -141,7 +177,7 @@ function Row({
           <Trash2 className="h-3 w-3" />
         </button>
       </div>
-    </li>
+    </motion.li>
   );
 }
 

@@ -873,7 +873,19 @@ export function ChatSurface({
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div ref={scrollRef} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto">
         <StickyActivityBar activity={stickyActivity} devUrl={detectedDevUrl} />
-        <div className="mx-auto w-full max-w-3xl px-3 py-6 sm:px-4 sm:py-8">
+        {/* Session-switch fade. Keying the inner container on threadId
+         *  makes motion re-mount and fade the chat in when the user
+         *  switches threads. Subtle 200ms — enough to register
+         *  visually as "this is a different conversation" without
+         *  feeling sluggish. New chat (threadId=null) reuses the
+         *  same key so the empty state also fades. */}
+        <motion.div
+          key={threadId ?? '__new__'}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.2, ease: 'easeOut' }}
+          className="mx-auto w-full max-w-3xl px-3 py-6 sm:px-4 sm:py-8"
+        >
           {empty ? (
             <EmptyState
               modelLabel={m?.label ?? model}
@@ -993,7 +1005,7 @@ export function ChatSurface({
               })()}
             </div>
           )}
-        </div>
+        </motion.div>
       </div>
 
       {error && (

@@ -99,6 +99,22 @@ export function useThreadsQuery(opts: {
   return useQuery({
     queryKey: qk.threads,
     enabled: opts.authed,
+    // Cross-device awareness: a user can be active in qcode-web and
+    // qcode (desktop) at the same time. We want the sidebar to
+    // reflect changes from "the other device" quickly. Override the
+    // global 60s staleTime down to 10s here AND poll every 45s
+    // while the tab is visible (Query auto-pauses interval refetch
+    // when hidden). Together with refetchOnWindowFocus, that
+    // gives ~10s sync on focus + 45s background sync. The list is
+    // small (a few KB at most), so the cost is negligible.
+    staleTime: 10_000,
+    refetchInterval: (query) => {
+      // Don't poll when tab is hidden; refetchOnWindowFocus handles
+      // the resume case. Pauses on errors so we don't hammer.
+      if (typeof document !== 'undefined' && document.hidden) return false;
+      if (query.state.error) return false;
+      return 45_000;
+    },
     queryFn: async () => {
       // Best-effort orphan cleanup — never blocks the list. If it
       // fails, the list still returns; the next reconcile will retry.
