@@ -40,6 +40,7 @@ import type { AgentEvent } from '../legacy/agent';
 import type { ContentBlock } from '../qlaud-client';
 import { getKey } from '../auth';
 import { getSettings, patchSettings } from '../settings';
+import { QLAUD_MEDIA_SKILL } from '../skills/qlaud-media';
 
 /** Tight, surgical addendum we hand to Claude Code via
  *  `--append-system-prompt`. Doesn't replace Claude's default
@@ -327,6 +328,13 @@ export async function runEngineClaudeCode(
   //                    each request through qcode's ApprovalCard
   //                    via a bundled --permission-prompt-tool MCP
   //                    server.
+  // System-prompt addition: qcode dev hints + qlaud media skill.
+  // Joined with a section break so each is independently legible
+  // when claude-code logs the resolved prompt. The skill ships
+  // unconditionally — it only documents endpoints, doesn't trigger
+  // calls. The agent picks up the documented endpoints when the
+  // user asks for media work; otherwise the tokens are inert.
+  const appendedSystemPrompt = `${QCODE_ENGINE_HINT}\n\n────────────────────────────────────────\n\n${QLAUD_MEDIA_SKILL}`;
   const args: string[] = [
     '--bare',
     '--print',
@@ -335,7 +343,7 @@ export async function runEngineClaudeCode(
     '--verbose',
     ...permissionFlags(getSettings().autoApprove),
     '--model', opts.model,
-    '--append-system-prompt', QCODE_ENGINE_HINT,
+    '--append-system-prompt', appendedSystemPrompt,
   ];
   if (opts.sessionId) {
     args.push('--resume', opts.sessionId);
