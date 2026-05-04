@@ -2,7 +2,7 @@
 #
 # Pairs with release.yml (which builds the desktop binaries on
 # `v*` tags) — this one keeps qcode.qlaud.ai in sync with main on
-# every merge, no manual `pnpm build && wrangler pages deploy`.
+# every merge, no manual `bun run build && wrangler pages deploy`.
 #
 # Drifted during the May-3 session: web was 16 hours behind main
 # because deploys were manual. This workflow plus deploy-edge.yml
@@ -34,7 +34,7 @@ on:
       - 'public/**'
       - 'index.html'
       - 'package.json'
-      - 'pnpm-lock.yaml'
+      - 'bun.lock'
       - 'vite.config.*'
       - 'tailwind.config.*'
       - 'postcss.config.*'
@@ -53,33 +53,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # qcode's package.json doesn't pin a packageManager, so we
-      # specify here. (qlaud-router does pin it; this version split
-      # is per-repo.) Bump in lockstep with the local toolchain.
-      - uses: pnpm/action-setup@v4
+      # Bun replaces pnpm here for ~10x install speed (3-5s vs 25-30s).
+      # Same lockfile shape as a regular npm install — bun.lock is the
+      # text-format successor to bun.lockb (older binary format), which
+      # gives clean diffs in PRs.
+      - uses: oven-sh/setup-bun@v2
         with:
-          version: 10
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
+          bun-version: latest
 
       - name: Install
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
-      # tsc -b runs as part of `pnpm build`, but we surface it as a
+      # tsc -b runs as part of `bun run build`, but we surface it as a
       # discrete step so the Actions UI shows "Typecheck" failing
       # vs "Build" failing — easier triage than a single red cell.
       - name: Typecheck
-        run: pnpm tsc -b
+        run: bun run tsc -b
 
       - name: Build
-        run: pnpm vite build
+        run: bun run vite build
 
       - name: Deploy to Cloudflare Pages
         run: |
-          pnpm dlx wrangler pages deploy dist \
+          bunx wrangler pages deploy dist \
             --project-name=qcode-web \
             --branch=main \
             --commit-hash=${{ github.sha }} \
