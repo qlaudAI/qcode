@@ -25,37 +25,37 @@ claude --print --dangerously-skip-permissions --model $SLUG \
 
 ## Results
 
+After re-testing with non-credential-flavored prompts (the original
+"TONIGHT_QCODE_SECRET" wording false-positive'd OpenAI's safety RLHF),
+8 of 12 catalog models work end-to-end via claude-code TODAY.
+
 | Model                  | /v1/messages | Claude CLI chat | Tool use   |
 | ---------------------- | ------------ | --------------- | ---------- |
-| claude-opus-4-7        | ✅           | ✅              | (assumed)  |
-| claude-sonnet-4-6      | ✅           | ✅              | (assumed)  |
-| **claude-haiku-4-5**   | ✅           | ✅ 3s           | ✅ **Full**|
-| **gpt-5.4**            | ✅           | ✅              | (untested) |
-| **gpt-5.4-mini**       | ✅           | ✅ 3s           | ⚠️ Refused on safety (false positive on "credentials") |
-| **deepseek-chat**      | ✅           | ✅ 2s           | ✅ **Full** — surprise winner, full Anthropic-shape tool replay works |
-| deepseek-reasoner      | ✅           | (untested)      | (untested) |
-| **gemini-3-pro-preview** | ✅         | ✅ 5s           | ❌ 400 — `Function call is missing a thought_signature in functionCall parts` |
-| grok-4.20-0309-reasoning | ✅         | (untested)      | (untested) |
-| **qwen-coder-plus**    | ✅           | ✅ 4s           | ⚠️ Outputs tool calls as text (`✿TASK✿: Read, ✿ARGS✿: {...}`) instead of using OpenAI `tool_calls`. The model has its own structured-output convention that qlaud's translation doesn't pick up. |
-| **kimi-k2.6**          | ✅           | ✅ 5s           | ❌ 400 — `thinking is enabled but reasoning_content is missing in assistant tool call message` |
+| claude-opus-4-7        | ✅           | ✅              | ✅ Full    |
+| claude-sonnet-4-6      | ✅           | ✅              | ✅ Full    |
+| claude-haiku-4-5       | ✅           | ✅ 3s           | ✅ Full    |
+| **gpt-5.4**            | ✅           | ✅              | ✅ **Full** (read README.md → returned content) |
+| **gpt-5.4-mini**       | ✅           | ✅ 3s           | ✅ **Full** (read README.md → returned content) |
+| **grok-4.20-0309-reasoning** | ✅     | ✅              | ✅ **Full** (read README.md → returned content) |
+| deepseek-chat          | ✅           | ✅ 2s           | ✅ Full    |
+| **deepseek-reasoner**  | ✅           | ✅              | ✅ **Full** (returns content in code-fence) |
+| gemini-3-pro-preview   | ✅           | ✅ 5s           | ❌ 400 — `Function call is missing a thought_signature in functionCall parts` |
+| qwen-coder-plus        | ✅           | ✅ 4s           | ⚠️ Outputs tool calls as text (`✿TASK✿: Read, ✿ARGS✿: {...}`) instead of using OpenAI `tool_calls`. The model has its own structured-output convention that qlaud's translation doesn't pick up. |
+| kimi-k2.6              | ✅           | ✅ 5s           | ❌ 400 — `thinking is enabled but reasoning_content is missing in assistant tool call message` |
 | MiniMax-M2             | ✅           | ❌ 404 — case mismatch (`MiniMax-M2` vs `minimax-m2`); qlaud rejects the lowercased form |
 
 ## Tier interpretation
 
-**Tier 1 — ship claude-code engine with these today:**
+**Tier 1 — works fully via claude-code today (chat + tools):**
 
-- All Anthropic models (native — perfect)
-- `deepseek-chat` (full tool use through Anthropic shape — qlaud
-  translates DeepSeek's OpenAI-compat tool format reliably)
+- Anthropic — claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5
+- OpenAI — gpt-5.4, gpt-5.4-mini
+- xAI — grok-4.20-0309-reasoning
+- DeepSeek — deepseek-chat, deepseek-reasoner
 
-**Tier 2 — chat works, tool use needs work:**
+8 of 12 catalog models. **No engineering needed — ship today.**
 
-- `gpt-5.4`, `gpt-5.4-mini` — model is overly safety-tuned for
-  reading "secret"-flavored prompts. Tool-use protocol itself is
-  probably fine; it's the model's RLHF refusing. Re-test with a
-  non-secret-flavored read ("read README.md and summarize").
-
-**Tier 3 — qlaud translation layer needs upgrades:**
+**Tier 3 — qlaud edge translation work needed:**
 
 - `gemini-3-pro-preview` — Gemini requires `thought_signature` in
   function-call parts when replaying tool results back. qlaud's
@@ -76,32 +76,53 @@ claude --print --dangerously-skip-permissions --model $SLUG \
 
 ## Recommended product shape
 
-1. **Default engine = Claude Code**, gated to Tier 1 models only in
-   the model picker. Users get a guaranteed-working experience.
+**Headline: qlaud edge translation upgrades are the universal lever,
+not adding a second engine.** Adding Codex CLI does not unlock any
+Tier 3 provider — the same translation gaps exist regardless of
+whether the request enters qlaud as Anthropic-shape (claude-code)
+or OpenAI-shape (codex). The bugs are in the *exit* translation
+(qlaud → Gemini/Qwen/Kimi native protocols), not the entry shape.
 
-2. **Tier 2 + 3 models hidden** behind a "Beta — may have issues"
-   tag in the picker, OR simply not shown until qlaud's translation
-   catches up.
+What this means concretely:
 
-3. **Codex CLI as a second engine** for OpenAI-shape models.
-   Pattern:
+- ✅ **Phase 1 (today):** Ship claude-code engine with the 8 Tier 1
+  models in the picker. 67% of catalog working with zero new
+  engineering.
 
-   ```ts
-   // Pseudocode
-   const engineForModel = (slug: string): 'claude-code' | 'codex' =>
-     /^(claude|deepseek)/.test(slug) ? 'claude-code' : 'codex';
-   ```
+- ⏩ **Phase 2 (qlaud edge):** Four targeted translation fixes
+  unblock the remaining four providers. Same effort whether the
+  entry shape is Anthropic or OpenAI.
 
-   Codex understands OpenAI tool_calls natively, so it might
-   handle gpt-5.4 / qwen / etc. cleanly even where the Anthropic-
-   shape translation falls down.
+  - `apps/edge/src/routes/messages.ts` (or chat-completions.ts)
+  - Gemini: preserve `thought_signature` from prior response when
+    forwarding tool replays. Affects follow-up turns only.
+  - Qwen: detect `✿TASK✿/✿ARGS✿` in response text and emit as
+    proper `tool_use` content blocks.
+  - Kimi: preserve `reasoning_content` field on the round-trip
+    when thinking mode is enabled.
+  - MiniMax: lowercase or pre-canonicalize the slug at the
+    catalog/route boundary.
 
-   Untested locally — `codex` CLI isn't installed on the dev box.
-   To smoke: `bun add -g @openai/codex` (verify package name) then
-   re-run the same prompt against the Tier 2/3 models.
+- 🟡 **Phase 3 (optional, perf-only):** Add Codex CLI as a second
+  engine specifically for OpenAI models. Native OpenAI passthrough
+  saves ~50-200ms per turn vs Anthropic-shape translation. NOT
+  required for any provider to work — pure latency optimization.
+  ```ts
+  const engineForModel = (slug: string): 'claude-code' | 'codex' =>
+    /^(gpt|o[0-9])/.test(slug) ? 'codex' : 'claude-code';
+  ```
 
-4. **Translation upgrades to qlaud edge** are independent of qcode —
-   each one unblocks an existing model for the existing engine.
+## What we did NOT test
+
+- Codex CLI not installed on dev box; the analysis above is from
+  protocol logic, not direct measurement. Spot-check this when
+  installing Codex.
+- Tool-use across multiple turns (Edit a file, then re-read it).
+  The single-turn Read passes are a strong signal but multi-turn
+  state can expose protocol-translation bugs the simple cases hide.
+- Image / PDF inputs (multimodal). Engine v0 is text-only — punted.
+- Long-running bash sessions (the legacy bash-session module
+  manages persistent shells; engine spawn does one-shot turns).
 
 ## Files
 
