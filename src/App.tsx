@@ -4,6 +4,7 @@ import {
   Download,
   Folder,
   FolderOpen,
+  GitBranch,
   Menu,
   PanelRight,
   Plus,
@@ -53,6 +54,7 @@ import {
   searchThreads,
   type SearchHit,
 } from './lib/search';
+import { useGitBranch } from './lib/git-branch';
 import { generateThreadTitle } from './lib/title-gen';
 import {
   getCurrentWorkspace,
@@ -1246,6 +1248,7 @@ function WorkspacesSection({
           <WorkspaceGroup
             key={path}
             name={g.name}
+            path={path}
             threads={g.threads}
             isActive={path === activeWorkspacePath}
             currentThreadId={currentThreadId}
@@ -1261,6 +1264,7 @@ function WorkspacesSection({
 
 function WorkspaceGroup({
   name,
+  path,
   threads,
   isActive,
   currentThreadId,
@@ -1269,6 +1273,11 @@ function WorkspaceGroup({
   snippetByThread,
 }: {
   name: string;
+  /** Filesystem path — used to probe `git branch --show-current`
+   *  for the branch chip on the active workspace. Optional because
+   *  threads MAY have a workspaceName but no resolvable path
+   *  (legacy data, web). */
+  path: string;
   threads: ThreadSummary[];
   isActive: boolean;
   currentThreadId: string | null;
@@ -1284,6 +1293,12 @@ function WorkspaceGroup({
   // chevron-right for collapsed. Visual grammar matches Codex /
   // VSCode tree views the user already has muscle memory for.
   const FolderIcon = open ? FolderOpen : Folder;
+  // Show the current git branch only for the ACTIVE workspace —
+  // other groups don't need the chip and we'd burn extra bash
+  // spawns probing every collapsed project. The hook returns null
+  // when the path isn't a git repo (or while loading) and the
+  // chip just doesn't render.
+  const branch = useGitBranch(isActive ? path : null);
   return (
     <li>
       <button
@@ -1312,6 +1327,19 @@ function WorkspaceGroup({
         {isActive && (
           <span className="shrink-0 rounded-full bg-primary/15 px-1.5 py-0 text-[9px] font-medium uppercase tracking-wider text-primary">
             Open
+          </span>
+        )}
+        {/* Git branch chip — only for the active workspace, only
+         *  when the workspace IS a git repo. Lucide GitBranch is
+         *  the standard visual; rendering ⎇ as text fallback would
+         *  ship faster but lucide makes the pill look intentional. */}
+        {isActive && branch && (
+          <span
+            className="ml-1 flex shrink-0 items-center gap-1 rounded-full bg-muted px-1.5 py-0 font-mono text-[9px] text-muted-foreground"
+            title={`Current branch: ${branch}`}
+          >
+            <GitBranch className="h-2.5 w-2.5" />
+            <span className="max-w-[80px] truncate">{branch}</span>
           </span>
         )}
         <span
