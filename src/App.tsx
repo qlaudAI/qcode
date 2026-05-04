@@ -1041,23 +1041,27 @@ function Sidebar({
           </button>
         </div>
       )}
-      <div className={cn('space-y-2 px-3', onClose ? 'pt-1' : 'pt-3')}>
+      <div className={cn('space-y-1.5 px-2.5', onClose ? 'pt-1' : 'pt-2.5')}>
+        {/* Primary CTAs — slightly tighter padding, subtle inner
+         *  highlight on hover instead of a full border swap so the
+         *  sidebar feels less boxy. active:scale-[0.98] gives the
+         *  click a subtle "pressed" feedback. */}
         <button
           onClick={onNewChat}
-          className="flex w-full items-center justify-between rounded-md border border-border bg-background/80 px-3 py-2 text-sm font-medium transition-colors hover:border-foreground/30 hover:bg-background"
+          className="group flex w-full items-center justify-between rounded-lg border border-border/60 bg-background/60 px-2.5 py-1.5 text-[13px] font-medium text-foreground/90 shadow-sm transition-all duration-150 hover:border-foreground/20 hover:bg-background hover:shadow active:scale-[0.985]"
         >
           <span className="flex items-center gap-2">
-            <Plus className="h-4 w-4" />
+            <Plus className="h-3.5 w-3.5 text-muted-foreground transition-colors group-hover:text-foreground" />
             New chat
           </span>
           <Kbd>⌘N</Kbd>
         </button>
         <button
           onClick={onOpenFolder}
-          className="flex w-full items-center justify-between rounded-md border border-border bg-background/80 px-3 py-2 text-sm font-medium transition-colors hover:border-foreground/30 hover:bg-background"
+          className="group flex w-full items-center justify-between rounded-lg border border-border/60 bg-background/60 px-2.5 py-1.5 text-[13px] font-medium text-foreground/90 shadow-sm transition-all duration-150 hover:border-foreground/20 hover:bg-background hover:shadow active:scale-[0.985]"
         >
           <span className="flex items-center gap-2">
-            <FolderOpen className="h-4 w-4" />
+            <FolderOpen className="h-3.5 w-3.5 text-muted-foreground transition-colors group-hover:text-foreground" />
             {workspace ? 'Switch folder' : 'Open folder'}
           </span>
           <Kbd>⌘O</Kbd>
@@ -1081,10 +1085,13 @@ function Sidebar({
           snippetByThread={snippetByThread}
         />
         <div>
-          <div className="flex items-baseline justify-between px-2 pb-2 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-            <span>Chats</span>
+          <div className="mb-1.5 flex items-center gap-2 px-2.5">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/80">
+              Chats
+            </span>
+            <span className="h-px flex-1 bg-border/40" aria-hidden />
             {searching && (
-              <span className="text-[9px] normal-case tracking-normal text-muted-foreground/70">
+              <span className="shrink-0 text-[9px] tracking-normal text-muted-foreground/70">
                 Searching…
               </span>
             )}
@@ -1240,8 +1247,11 @@ function WorkspacesSection({
 
   return (
     <div>
-      <div className="px-2 pb-2 text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
-        Workspaces
+      <div className="mb-1.5 flex items-center gap-2 px-2.5">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/80">
+          Workspaces
+        </span>
+        <span className="h-px flex-1 bg-border/40" aria-hidden />
       </div>
       <ul className="space-y-2">
         {sorted.map(([path, g]) => (
@@ -1305,22 +1315,22 @@ function WorkspaceGroup({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         className={cn(
-          'flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[11px] font-medium transition-colors',
+          'group flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] font-medium transition-all duration-150 active:scale-[0.99]',
           isActive
-            ? 'text-foreground hover:bg-muted/60'
-            : 'text-foreground/80 hover:bg-muted/50',
+            ? 'bg-primary/[0.04] text-foreground hover:bg-primary/[0.07]'
+            : 'text-foreground/85 hover:bg-muted/60',
         )}
       >
         <ChevronRight
           className={cn(
-            'h-3 w-3 shrink-0 text-muted-foreground transition-transform duration-150',
+            'h-3 w-3 shrink-0 text-muted-foreground transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)]',
             open && 'rotate-90',
           )}
         />
         <FolderIcon
           className={cn(
-            'h-3 w-3 shrink-0 transition-colors',
-            isActive ? 'text-primary' : 'text-muted-foreground',
+            'h-3.5 w-3.5 shrink-0 transition-colors',
+            isActive ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground',
           )}
         />
         <span className="truncate">{name}</span>

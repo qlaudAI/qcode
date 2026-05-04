@@ -98,18 +98,21 @@ function Row({
       onMouseEnter={onHover}
       onFocus={onHover}
       className={cn(
-        'group relative flex items-start gap-2 overflow-hidden rounded px-2 py-1.5 text-left transition-colors',
-        active ? 'bg-muted/80' : 'hover:bg-muted/50',
+        'group relative flex items-start gap-2 overflow-hidden rounded-md px-2 py-1.5 text-left transition-all duration-150 active:scale-[0.99]',
+        active
+          ? 'bg-primary/[0.06] shadow-sm shadow-primary/5'
+          : 'hover:bg-muted/60',
       )}
     >
-      {/* Active-state indicator — a 2px primary bar on the left
-       *  that animates in when this row becomes active. Layout
-       *  ID makes motion smoothly translate the bar from the
-       *  previous active row to this one when the user picks. */}
+      {/* Active-state indicator — a 2.5px primary bar on the left
+       *  that animates in when this row becomes active. Layout ID
+       *  makes motion smoothly translate the bar from the previous
+       *  active row to this one when the user picks. Slight glow
+       *  via shadow gives it weight without being loud. */}
       {active && (
         <motion.span
           layoutId="qcode-thread-active-indicator"
-          className="absolute inset-y-1 left-0 w-[2px] rounded-full bg-primary"
+          className="absolute inset-y-1 left-0 w-[2.5px] rounded-full bg-primary shadow-[0_0_8px_rgba(var(--primary),0.4)]"
           transition={{ duration: 0.2, ease: [0.32, 0.72, 0, 1] }}
         />
       )}
