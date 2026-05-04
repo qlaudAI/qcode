@@ -1,7 +1,20 @@
-// Workspace state — the open folder qcode is currently working in,
-// plus the recent-folders MRU. Persisted to localStorage (non-
-// sensitive: just paths). The actual file contents come from
-// Tauri's fs plugin on demand; we don't cache them here.
+// Workspace state — first-class registry of folders the user has
+// opened, plus a pointer to the active one. Persisted to
+// localStorage (non-sensitive: just paths + a stable id). Actual
+// file contents come from Tauri's fs plugin on demand; we don't
+// cache them here.
+//
+// alpha.109 and earlier modeled "workspace" as a single in-memory
+// `{ path, name }` plus a separate path-keyed MRU. The sidebar
+// derived its WORKSPACES section by *grouping threads* whose
+// `workspacePath` matched. That had two failure modes:
+//   1. Open a folder, never chat → workspace invisible. The MRU
+//      knew about it, the sidebar didn't.
+//   2. Workspace identity = path string. Renaming/moving the
+//      folder stranded every prior thread.
+// The registry below makes Workspace a stable entity with its own
+// `id`. Threads now reference `workspaceId` as the canonical link;
+// the legacy `workspacePath` still resolves for back-compat.
 
 import { killBashSession } from './legacy/bash-session';
 import { probeEnv } from './legacy/env-probe';
@@ -11,16 +24,51 @@ import { clearPermissionRulesCache } from './legacy/permission-rules';
 import { clearAllReads } from './legacy/read-cache';
 import { isTauri, pickFolder } from './tauri';
 
+// Legacy keys — kept for read-only migration. We don't delete them
+// after seeding the registry so a downgrade to alpha.109 doesn't
+// land users on an empty MRU.
 const CURRENT_KEY = 'qcode.workspace.current';
 const MRU_KEY = 'qcode.workspace.mru';
+// Canonical registry blob.
+const REGISTRY_KEY = 'qcode.workspaces.v1';
 const MRU_MAX = 8;
 
 export type Workspace = {
-  /** Absolute path on disk. */
+  /** Stable id assigned on first registration. Threads link to a
+   *  workspace via this id so renaming or moving the folder keeps
+   *  the relationship intact. Optional in legacy parses — call
+   *  sites that need it should pull through getCurrentWorkspace()
+   *  / listWorkspaces() which always return populated rows. */
+  id?: string;
+  /** Absolute path on disk. The "current location" of this
+   *  workspace — may change if the user moves the folder and re-
+   *  registers, but the id stays stable. */
   path: string;
   /** Last component of the path — handy for the title bar. */
   name: string;
+  /** Wall-clock ms when first registered. Used for stable sort of
+   *  workspaces that have never been touched. Optional in legacy
+   *  parses. */
+  createdAt?: number;
+  /** Wall-clock ms last activated (= last opened in the picker or
+   *  picked from the sidebar). Drives the "recent first" ordering
+   *  in the sidebar's WORKSPACES section. */
+  lastUsedAt?: number;
 };
+
+type WorkspaceRegistry = {
+  workspaces: Workspace[];
+  /** id of the currently active workspace, or null = no workspace
+   *  open (pure-chat mode). */
+  activeId: string | null;
+};
+
+function newId(): string {
+  // crypto.randomUUID is available in Tauri webview + every
+  // browser qcode-web targets. Fallback would only matter in
+  // tests; not worth the bytes.
+  return crypto.randomUUID();
+}
 
 export type FileNode = {
   name: string;
@@ -28,66 +76,259 @@ export type FileNode = {
   isDir: boolean;
 };
 
-export function getCurrentWorkspace(): Workspace | null {
-  if (typeof localStorage === 'undefined') return null;
-  const raw = localStorage.getItem(CURRENT_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as Workspace;
-  } catch {
-    return null;
+// ─── Registry (canonical) ──────────────────────────────────────────
+
+function readRegistry(): WorkspaceRegistry {
+  if (typeof localStorage === 'undefined') {
+    return { workspaces: [], activeId: null };
   }
+  const raw = localStorage.getItem(REGISTRY_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as WorkspaceRegistry;
+      if (parsed && Array.isArray(parsed.workspaces)) return parsed;
+    } catch {
+      /* fall through to migrate */
+    }
+  }
+  // First read on this client — migrate from the legacy current+MRU
+  // keys. We keep the legacy keys intact so downgrades stay safe.
+  const seeded = migrateFromLegacy();
+  writeRegistry(seeded);
+  return seeded;
 }
 
-export function setCurrentWorkspace(w: Workspace | null): void {
-  // Kill any persistent bash session attached to the OLD workspace
-  // before swapping. Carrying a shell rooted in /Users/foo/projA into
-  // a session for /Users/foo/projB would leak cwd/env state and the
-  // user would be very confused by `pytest` running against the
-  // wrong project.
-  const prev = getCurrentWorkspace();
-  if (prev && (!w || prev.path !== w.path)) {
+function writeRegistry(reg: WorkspaceRegistry): void {
+  if (typeof localStorage === 'undefined') return;
+  localStorage.setItem(REGISTRY_KEY, JSON.stringify(reg));
+  emitRegistryChange();
+}
+
+/** Custom event fired on every registry mutation. The sidebar
+ *  subscribes via useWorkspaces() so adding/removing/activating
+ *  a workspace re-renders without wiring callbacks through every
+ *  caller. localStorage's native 'storage' event only fires
+ *  cross-tab, hence this same-tab signal. */
+export const WORKSPACE_REGISTRY_EVENT = 'qcode:workspaces-changed';
+
+function emitRegistryChange(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new Event(WORKSPACE_REGISTRY_EVENT));
+}
+
+function migrateFromLegacy(): WorkspaceRegistry {
+  if (typeof localStorage === 'undefined') {
+    return { workspaces: [], activeId: null };
+  }
+  const now = Date.now();
+  let current: Workspace | null = null;
+  let mru: Workspace[] = [];
+  try {
+    const rawCurrent = localStorage.getItem(CURRENT_KEY);
+    if (rawCurrent) current = JSON.parse(rawCurrent) as Workspace;
+  } catch {
+    /* ignore */
+  }
+  try {
+    const rawMru = localStorage.getItem(MRU_KEY);
+    if (rawMru) {
+      const arr = JSON.parse(rawMru);
+      if (Array.isArray(arr)) mru = arr as Workspace[];
+    }
+  } catch {
+    /* ignore */
+  }
+  // Dedupe by path; current first (it's most-recent by definition),
+  // then MRU in declared order. Each gets a stable id + timestamps.
+  const byPath = new Map<string, Workspace>();
+  const order: string[] = [];
+  if (current) {
+    byPath.set(current.path, {
+      id: newId(),
+      path: current.path,
+      name: current.name,
+      createdAt: now,
+      lastUsedAt: now,
+    });
+    order.push(current.path);
+  }
+  // Walk MRU oldest→newest in terms of lastUsedAt offset so the
+  // sidebar sort below still surfaces the active one first.
+  let offset = 1;
+  for (const w of mru) {
+    if (byPath.has(w.path)) continue;
+    byPath.set(w.path, {
+      id: newId(),
+      path: w.path,
+      name: w.name,
+      createdAt: now - offset,
+      lastUsedAt: now - offset,
+    });
+    order.push(w.path);
+    offset += 1;
+  }
+  const workspaces = order.map((p) => byPath.get(p)!).filter(Boolean);
+  const activeId = current ? workspaces[0]?.id ?? null : null;
+  return { workspaces, activeId };
+}
+
+/** All registered workspaces, sorted most-recently-used first.
+ *  Sidebar's WORKSPACES section iterates over this directly. */
+export function listWorkspaces(): Workspace[] {
+  const reg = readRegistry();
+  return [...reg.workspaces].sort(
+    (a, b) => (b.lastUsedAt ?? 0) - (a.lastUsedAt ?? 0),
+  );
+}
+
+/** Look up a registered workspace by id. Null when the id no
+ *  longer exists (e.g. user removed it via the registry). */
+export function getWorkspaceById(id: string | null | undefined): Workspace | null {
+  if (!id) return null;
+  const reg = readRegistry();
+  return reg.workspaces.find((w) => w.id === id) ?? null;
+}
+
+/** Look up a registered workspace by absolute path. Used to
+ *  resolve legacy threads (which only carry workspacePath) to
+ *  the registry entry that owns that path today. */
+export function getWorkspaceByPath(path: string): Workspace | null {
+  const reg = readRegistry();
+  return reg.workspaces.find((w) => w.path === path) ?? null;
+}
+
+/** Register a folder in the registry. If a workspace with the same
+ *  path already exists, that one is returned (and lastUsedAt
+ *  refreshed). Otherwise a new entry is created with a fresh id.
+ *  Does NOT mark the workspace active — call setActiveWorkspaceId. */
+export function registerWorkspace(input: { path: string; name: string }): Workspace {
+  const reg = readRegistry();
+  const now = Date.now();
+  const existing = reg.workspaces.find((w) => w.path === input.path);
+  if (existing) {
+    existing.lastUsedAt = now;
+    if (input.name && existing.name !== input.name) existing.name = input.name;
+    writeRegistry(reg);
+    return existing;
+  }
+  const created: Workspace = {
+    id: newId(),
+    path: input.path,
+    name: input.name,
+    createdAt: now,
+    lastUsedAt: now,
+  };
+  reg.workspaces.push(created);
+  writeRegistry(reg);
+  return created;
+}
+
+/** Remove a workspace from the registry. Threads previously linked
+ *  to it keep their `workspaceId`/`workspacePath` fields but won't
+ *  group anywhere in the WORKSPACES section — they fall through to
+ *  CHATS (the sidebar's filter is "no matching workspace"). */
+export function removeWorkspace(id: string): void {
+  const reg = readRegistry();
+  const next = reg.workspaces.filter((w) => w.id !== id);
+  if (next.length === reg.workspaces.length) return;
+  reg.workspaces = next;
+  if (reg.activeId === id) reg.activeId = null;
+  writeRegistry(reg);
+}
+
+/** Bump lastUsedAt without changing active. Useful when a workspace
+ *  is referenced (e.g. picked from MRU palette) but not activated. */
+export function touchWorkspace(id: string): void {
+  const reg = readRegistry();
+  const w = reg.workspaces.find((x) => x.id === id);
+  if (!w) return;
+  w.lastUsedAt = Date.now();
+  writeRegistry(reg);
+}
+
+/** Active workspace id (null when in pure-chat mode). */
+export function getActiveWorkspaceId(): string | null {
+  return readRegistry().activeId;
+}
+
+/** Switch which workspace is active. Pass null to enter pure-chat
+ *  mode (no folder open). Tears down any persistent bash session
+ *  and per-workspace caches scoped to the previous active path. */
+export function setActiveWorkspaceId(id: string | null): void {
+  const reg = readRegistry();
+  if (reg.activeId === id) return;
+  const prev = reg.workspaces.find((w) => w.id === reg.activeId) ?? null;
+  const next = id ? reg.workspaces.find((w) => w.id === id) ?? null : null;
+  if (prev && (!next || prev.path !== next.path)) {
     void killBashSession(prev.path);
-    // Drop the read-cache when the workspace changes — entries are
-    // keyed by absolute path so collisions can't happen, but stale
-    // entries from a prior workspace would just sit in memory and
-    // potentially block edits the user actually wants in the new one.
     clearAllReads();
-    // Drop permission rules cache too so the next workspace's rules
-    // load fresh from disk; no risk of stale allow/deny carrying
-    // across folders.
     clearPermissionRulesCache(prev.path);
   }
-  if (w) {
-    localStorage.setItem(CURRENT_KEY, JSON.stringify(w));
-    pushMru(w);
+  reg.activeId = next?.id ?? null;
+  if (next) next.lastUsedAt = Date.now();
+  // Mirror to the legacy CURRENT_KEY too so any code path still
+  // reading it (or a downgrade) sees the same active workspace.
+  if (next) {
+    localStorage.setItem(
+      CURRENT_KEY,
+      JSON.stringify({ path: next.path, name: next.name }),
+    );
   } else {
     localStorage.removeItem(CURRENT_KEY);
   }
+  writeRegistry(reg);
 }
 
-export function getMru(): Workspace[] {
-  if (typeof localStorage === 'undefined') return [];
-  const raw = localStorage.getItem(MRU_KEY);
-  if (!raw) return [];
-  try {
-    return JSON.parse(raw) as Workspace[];
-  } catch {
-    return [];
+// ─── Compat shims ──────────────────────────────────────────────────
+//
+// Existing callers ask for "the current workspace" as a single
+// `{ path, name }`. Internally that's now "the active entry in the
+// registry." Returning the full Workspace (with id + timestamps)
+// is structurally compatible — extra fields are ignored by callers
+// that only destructure path/name.
+
+export function getCurrentWorkspace(): Workspace | null {
+  const reg = readRegistry();
+  if (!reg.activeId) return null;
+  return reg.workspaces.find((w) => w.id === reg.activeId) ?? null;
+}
+
+/** Set / clear the active workspace. Accepts the same shape callers
+ *  used to pass — when a registry entry exists at that path we
+ *  activate it; otherwise we register-then-activate. Passing null
+ *  drops to pure-chat mode. */
+export function setCurrentWorkspace(w: Workspace | null): void {
+  if (!w) {
+    setActiveWorkspaceId(null);
+    return;
   }
+  // If the caller passed a Workspace that already has a registry
+  // id, activate by id. Otherwise resolve / register by path.
+  if (w.id && getWorkspaceById(w.id)) {
+    setActiveWorkspaceId(w.id);
+    return;
+  }
+  const entry = registerWorkspace({ path: w.path, name: w.name });
+  setActiveWorkspaceId(entry.id ?? null);
 }
 
-function pushMru(w: Workspace): void {
-  const next = [w, ...getMru().filter((x) => x.path !== w.path)].slice(0, MRU_MAX);
-  localStorage.setItem(MRU_KEY, JSON.stringify(next));
+/** Legacy MRU helper — now derived from the registry (sorted by
+ *  lastUsedAt) rather than its own list. Kept exported so any
+ *  caller still asking for "recent folders" Just Works without
+ *  needing to learn about the registry. */
+export function getMru(): Workspace[] {
+  return listWorkspaces().slice(0, MRU_MAX);
 }
 
 export async function openFolderPicker(): Promise<Workspace | null> {
   const path = await pickFolder('Open folder');
   if (!path) return null;
   const name = path.split(/[/\\]/).filter(Boolean).pop() ?? path;
-  const w = { path, name };
-  setCurrentWorkspace(w);
+  // Register-then-activate so the returned Workspace carries its
+  // stable id. Existing entries at the same path are reused (no
+  // duplicate registry rows).
+  const entry = registerWorkspace({ path, name });
+  setActiveWorkspaceId(entry.id ?? null);
   // Pre-warm the matcher, project memory, and environment probe so
   // the first walk + first agent turn don't pay extra round-trips.
   // probeEnv runs `node --version` etc. through the persistent shell
@@ -101,7 +342,7 @@ export async function openFolderPicker(): Promise<Workspace | null> {
   // qcode writes. Idempotent: skipped when .git already exists, so
   // re-opening an existing repo is a no-op.
   void initGitIfFresh(path);
-  return w;
+  return entry;
 }
 
 /** Run `git init` in the workspace if it isn't already a git repo.

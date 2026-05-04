@@ -55,10 +55,15 @@ import {
   type SearchHit,
 } from './lib/search';
 import { useGitBranch } from './lib/git-branch';
+import { useWorkspaces } from './lib/use-workspaces';
 import { generateThreadTitle } from './lib/title-gen';
 import {
   getCurrentWorkspace,
+  getWorkspaceById,
+  getWorkspaceByPath,
   openFolderPicker,
+  registerWorkspace,
+  setActiveWorkspaceId,
   setCurrentWorkspace,
   type Workspace,
 } from './lib/workspace';
@@ -283,6 +288,36 @@ export function App() {
     }
   }, [threadsQuery.data, threadsQuery.dataUpdatedAt, currentId]);
 
+  // Backfill the registry from any thread that arrives with a
+  // workspacePath we don't know about yet. Two scenarios this
+  // covers:
+  //   1. Migration day — cached threads from before the split
+  //      have workspacePath but no workspaceId. Their paths might
+  //      not be in the legacy MRU (e.g. a folder you'd opened on a
+  //      different device). Without this they'd orphan into CHATS.
+  //   2. Cross-device — pull a thread created on machine B that
+  //      points at /home/me/x. If the same path exists on machine
+  //      A but you've never opened it here, the thread auto-
+  //      registers it and groups under WORKSPACES.
+  // Idempotent — getWorkspaceByPath gates the registerWorkspace
+  // call so re-renders don't bloat the registry.
+  useEffect(() => {
+    const list = threadsQuery.data ?? [];
+    for (const t of list) {
+      if (!t.workspacePath) continue;
+      if (t.workspaceId && getWorkspaceById(t.workspaceId)) continue;
+      if (getWorkspaceByPath(t.workspacePath)) continue;
+      registerWorkspace({
+        path: t.workspacePath,
+        name:
+          t.workspaceName ?? t.workspacePath.split('/').pop() ?? 'project',
+      });
+    }
+    // dataUpdatedAt rather than data because threadsQuery may
+    // structurally re-share the same array reference; we still
+    // want to scan after every refetch in case metadata landed.
+  }, [threadsQuery.dataUpdatedAt]);
+
   // Workspace-change invalidator. When the user opens a different
   // folder, the threads list's metadata (workspace_path / name)
   // is stale until the next reconcile — drives the brief flash
@@ -364,31 +399,78 @@ export function App() {
   const switchThread = useCallback(
     (id: string) => {
       setCurrentId(id);
-      // Tie workspace to the thread. The thread's workspacePath is
-      // canonical — every send POSTs paths against it, every diff
-      // resolves against it, every bash runs in it. Letting the
-      // active workspace drift away from the loaded thread leads to
-      // "the agent wrote to /test/app while the UI's workspace was
-      // /other and the file tree showed nothing" confusion the user
-      // was hitting in practice. Now: pick a thread, get its workspace.
+      // Tie workspace to the thread. The thread's workspaceId
+      // (post-split) or workspacePath (legacy) is canonical —
+      // every send POSTs paths against it, every diff resolves
+      // against it, every bash runs in it. Letting the active
+      // workspace drift away from the loaded thread leads to
+      // "the agent wrote to /test/app while the UI's workspace
+      // was /other and the file tree showed nothing" confusion
+      // the user was hitting in practice.
+      //
+      // Resolution order:
+      //   1. workspaceId → registry lookup (stable across renames)
+      //   2. workspacePath → registry lookup by path
+      //   3. workspacePath → register-then-activate (legacy thread
+      //      whose folder isn't yet in our registry)
+      //   4. neither → pure-chat mode (clear active workspace)
       const list = queryClient.getQueryData<ThreadSummary[]>(qk.threads);
       const t = list?.find((x) => x.id === id);
-      if (t?.workspacePath && t.workspacePath !== workspace?.path) {
-        const ws: Workspace = {
+      let resolved: Workspace | null = null;
+      if (t?.workspaceId) {
+        resolved = getWorkspaceById(t.workspaceId);
+      }
+      if (!resolved && t?.workspacePath) {
+        resolved = getWorkspaceByPath(t.workspacePath);
+      }
+      if (!resolved && t?.workspacePath) {
+        resolved = registerWorkspace({
           path: t.workspacePath,
-          name: t.workspaceName ?? t.workspacePath.split('/').pop() ?? 'project',
-        };
-        setWorkspace(ws);
-        setCurrentWorkspace(ws);
-      } else if (!t?.workspacePath && workspace) {
+          name:
+            t.workspaceName ?? t.workspacePath.split('/').pop() ?? 'project',
+        });
+      }
+      if (resolved && resolved.path !== workspace?.path) {
+        setWorkspace(resolved);
+        setActiveWorkspaceId(resolved.id ?? null);
+      } else if (!resolved && workspace) {
         // Thread has no workspace (pure chat) — clear active so
         // file/bash tools fail loudly instead of silently writing
         // into the previously-open folder.
         setWorkspace(null);
-        setCurrentWorkspace(null);
+        setActiveWorkspaceId(null);
       }
     },
     [workspace?.path],
+  );
+
+  // Click a workspace row in the sidebar → activate it AND auto-pick
+  // the most recent thread that belongs to it. Matches what users
+  // already get when they open a folder via the picker (workspace
+  // becomes active + a fresh chat surface opens). The picker route
+  // clears currentId for a blank slate; sidebar activation prefers
+  // continuing the user's most recent conversation in that project,
+  // which feels more like switching projects in an IDE than starting
+  // over. If there are zero threads in the workspace yet, falls
+  // through to the blank-slate path.
+  const onActivateWorkspace = useCallback(
+    (id: string) => {
+      const ws = getWorkspaceById(id);
+      if (!ws) return;
+      // No-op when the workspace is already active AND we're on
+      // a thread that belongs to it. Saves a re-pick that would
+      // briefly flash a different thread.
+      if (ws.id === workspace?.id && currentId) return;
+      setWorkspace(ws);
+      setActiveWorkspaceId(id);
+      const list =
+        queryClient.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
+      const match = list
+        .filter((t) => t.workspaceId === id || t.workspacePath === ws.path)
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      setCurrentId(match?.id ?? null);
+    },
+    [currentId, workspace?.id],
   );
 
   // Optimistic delete via Query mutation — sidebar updates the
@@ -648,6 +730,10 @@ export function App() {
               switchThread(id);
             }}
             onDeleteThread={removeThread}
+            onActivateWorkspace={(id) => {
+              closeSidebarIfMobile();
+              onActivateWorkspace(id);
+            }}
           />
         </div>
         <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-background/85 backdrop-blur-sm">
@@ -946,6 +1032,7 @@ function Sidebar({
   onNewChat,
   onPickThread,
   onDeleteThread,
+  onActivateWorkspace,
   onClose,
 }: {
   workspace: Workspace | null;
@@ -955,11 +1042,19 @@ function Sidebar({
   onNewChat: () => void;
   onPickThread: (id: string) => void;
   onDeleteThread: (id: string) => void;
+  /** Activate a workspace from the registry (sidebar header click).
+   *  Replaces the current workspace + auto-picks its most recent
+   *  thread. */
+  onActivateWorkspace: (id: string) => void;
   /** Optional close-button handler — when provided renders an X
    *  in the top-right of the sidebar that hides the panel. Mirrors
    *  the right-rail's close affordance. */
   onClose?: () => void;
 }) {
+  // Subscribe to the workspace registry — the WORKSPACES section
+  // iterates over this list directly so adding/removing/activating
+  // a workspace re-renders without prop drilling.
+  const workspaces = useWorkspaces();
   // Two-tier filter:
   //   1. Instant: title-substring match runs on every keystroke for
   //      sub-frame feedback. Auto-generated titles often miss what
@@ -1077,11 +1172,13 @@ function Sidebar({
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pt-4">
         <WorkspacesSection
+          workspaces={workspaces}
           threads={visibleThreads}
           currentThreadId={currentThreadId}
-          activeWorkspacePath={workspace?.path ?? null}
+          activeWorkspaceId={workspace?.id ?? null}
           onPick={onPickThread}
           onDelete={onDeleteThread}
+          onActivateWorkspace={onActivateWorkspace}
           snippetByThread={snippetByThread}
         />
         <div>
@@ -1097,7 +1194,7 @@ function Sidebar({
             )}
           </div>
           <ThreadList
-            threads={visibleThreads.filter((t) => !t.workspacePath)}
+            threads={chatsOnly(visibleThreads, workspaces)}
             currentId={currentThreadId}
             onPick={onPickThread}
             onDelete={onDeleteThread}
@@ -1199,50 +1296,97 @@ function SidebarFilter({
   );
 }
 
-// Bucket workspace-tagged threads by workspace path. The currently
-// open workspace floats to the top + auto-expands; other projects
-// collapse so the sidebar doesn't drown in old folders. "Chats"
-// (no workspace) render in their own section below — see Sidebar.
+// Filter for the CHATS section: threads that don't belong to ANY
+// workspace in the registry (pure chat) OR threads whose workspace
+// path resolves to nothing (orphan from a deleted registry entry).
+// The post-split rule is "no resolvable workspace = chat" — we can't
+// just check `!workspacePath` anymore because a thread might have a
+// path that's been removed from the registry, in which case grouping
+// it under a no-longer-visible workspace would just hide it.
+function chatsOnly(
+  threads: ThreadSummary[],
+  workspaces: Workspace[],
+): ThreadSummary[] {
+  if (workspaces.length === 0) return threads.filter((t) => !t.workspacePath);
+  const idSet = new Set(workspaces.map((w) => w.id).filter(Boolean) as string[]);
+  const pathSet = new Set(workspaces.map((w) => w.path));
+  return threads.filter((t) => {
+    if (t.workspaceId && idSet.has(t.workspaceId)) return false;
+    if (t.workspacePath && pathSet.has(t.workspacePath)) return false;
+    return true;
+  });
+}
+
+// Render the registered workspaces. Each workspace shows up whether
+// or not it has threads — opening a folder is enough to surface it
+// here. Threads that match a workspace (by id or, for legacy threads,
+// by path) appear nested inside its group; pure-chat threads land in
+// the CHATS section instead.
+//
+// The active workspace floats to the top + auto-expands; other
+// workspaces collapse so the sidebar doesn't drown in old projects.
 function WorkspacesSection({
+  workspaces,
   threads,
   currentThreadId,
-  activeWorkspacePath,
+  activeWorkspaceId,
   onPick,
   onDelete,
+  onActivateWorkspace,
   snippetByThread,
 }: {
+  workspaces: Workspace[];
   threads: ThreadSummary[];
   currentThreadId: string | null;
-  activeWorkspacePath: string | null;
+  activeWorkspaceId: string | null;
   onPick: (id: string) => void;
   onDelete: (id: string) => void;
+  onActivateWorkspace: (id: string) => void;
   snippetByThread?: Map<string, string> | null;
 }) {
-  // Group by workspacePath. Only threads with a path land here;
-  // workspace-less threads are filtered out by the caller.
-  const groups = new Map<
-    string,
-    { name: string; threads: ThreadSummary[] }
-  >();
-  for (const t of threads) {
-    if (!t.workspacePath) continue;
-    const g = groups.get(t.workspacePath);
-    if (g) g.threads.push(t);
-    else
-      groups.set(t.workspacePath, {
-        name: t.workspaceName ?? t.workspacePath.split('/').pop() ?? 'project',
-        threads: [t],
-      });
-  }
-  if (groups.size === 0) return null;
+  if (workspaces.length === 0) return null;
 
-  // Sort groups: active workspace first, then by most-recent thread.
-  const sorted = [...groups.entries()].sort(([aPath, a], [bPath, b]) => {
-    if (aPath === activeWorkspacePath) return -1;
-    if (bPath === activeWorkspacePath) return 1;
-    const aMax = Math.max(...a.threads.map((t) => t.updatedAt));
-    const bMax = Math.max(...b.threads.map((t) => t.updatedAt));
-    return bMax - aMax;
+  // Match threads to workspaces by id (preferred) OR path (legacy
+  // / cross-device). One thread may match exactly one workspace —
+  // we pick the registry entry it points at via id first, then by
+  // path. A thread whose workspace was removed from the registry
+  // is filtered out here and falls through to chatsOnly().
+  const threadsByWorkspaceId = new Map<string, ThreadSummary[]>();
+  const wsByPath = new Map(workspaces.map((w) => [w.path, w]));
+  const wsById = new Map(
+    workspaces.filter((w) => w.id).map((w) => [w.id!, w]),
+  );
+  for (const t of threads) {
+    let target: Workspace | undefined;
+    if (t.workspaceId) target = wsById.get(t.workspaceId);
+    if (!target && t.workspacePath) target = wsByPath.get(t.workspacePath);
+    if (!target?.id) continue;
+    const arr = threadsByWorkspaceId.get(target.id);
+    if (arr) arr.push(t);
+    else threadsByWorkspaceId.set(target.id, [t]);
+  }
+
+  // Sort workspaces: active first, then most-recently-used (by
+  // lastUsedAt — populated whenever the user opens or activates).
+  // Falls back to most-recent thread updatedAt for a workspace
+  // that's never been activated explicitly (legacy migration
+  // case where lastUsedAt could be a pre-split timestamp).
+  const sorted = [...workspaces].sort((a, b) => {
+    if (a.id === activeWorkspaceId) return -1;
+    if (b.id === activeWorkspaceId) return 1;
+    const aT =
+      a.lastUsedAt ??
+      Math.max(
+        0,
+        ...(threadsByWorkspaceId.get(a.id ?? '') ?? []).map((t) => t.updatedAt),
+      );
+    const bT =
+      b.lastUsedAt ??
+      Math.max(
+        0,
+        ...(threadsByWorkspaceId.get(b.id ?? '') ?? []).map((t) => t.updatedAt),
+      );
+    return bT - aT;
   });
 
   return (
@@ -1254,16 +1398,18 @@ function WorkspacesSection({
         <span className="h-px flex-1 bg-border/40" aria-hidden />
       </div>
       <ul className="space-y-2">
-        {sorted.map(([path, g]) => (
+        {sorted.map((w) => (
           <WorkspaceGroup
-            key={path}
-            name={g.name}
-            path={path}
-            threads={g.threads}
-            isActive={path === activeWorkspacePath}
+            key={w.id ?? w.path}
+            id={w.id ?? null}
+            name={w.name}
+            path={w.path}
+            threads={threadsByWorkspaceId.get(w.id ?? '') ?? []}
+            isActive={!!w.id && w.id === activeWorkspaceId}
             currentThreadId={currentThreadId}
             onPick={onPick}
             onDelete={onDelete}
+            onActivate={onActivateWorkspace}
             snippetByThread={snippetByThread}
           />
         ))}
@@ -1273,6 +1419,7 @@ function WorkspacesSection({
 }
 
 function WorkspaceGroup({
+  id,
   name,
   path,
   threads,
@@ -1280,24 +1427,38 @@ function WorkspaceGroup({
   currentThreadId,
   onPick,
   onDelete,
+  onActivate,
   snippetByThread,
 }: {
+  /** Registry id. Null only for legacy entries that haven't been
+   *  re-registered yet (extremely rare — the migration covers
+   *  every legacy workspace). When null, header click only
+   *  toggles expansion. */
+  id: string | null;
   name: string;
   /** Filesystem path — used to probe `git branch --show-current`
-   *  for the branch chip on the active workspace. Optional because
-   *  threads MAY have a workspaceName but no resolvable path
-   *  (legacy data, web). */
+   *  for the branch chip on the active workspace. */
   path: string;
   threads: ThreadSummary[];
   isActive: boolean;
   currentThreadId: string | null;
   onPick: (id: string) => void;
   onDelete: (id: string) => void;
+  /** Activate this workspace from the registry. */
+  onActivate: (id: string) => void;
   snippetByThread?: Map<string, string> | null;
 }) {
   // Active project auto-expanded. Other projects collapse — the
-  // user clicks the header to expand and pick an old conversation.
+  // user clicks the header chevron to expand and pick an old
+  // conversation, OR clicks the row body to activate the
+  // workspace (which auto-jumps to its most recent thread).
   const [open, setOpen] = useState(isActive);
+  // Re-sync open state when isActive flips (e.g. user activated a
+  // different workspace via picker). Without this an inactive
+  // workspace would stay collapsed forever even after activation.
+  useEffect(() => {
+    if (isActive) setOpen(true);
+  }, [isActive]);
   const sorted = [...threads].sort((a, b) => b.updatedAt - a.updatedAt);
   // Open folder + chevron-down for the active group; closed folder +
   // chevron-right for collapsed. Visual grammar matches Codex /
@@ -1309,58 +1470,90 @@ function WorkspaceGroup({
   // when the path isn't a git repo (or while loading) and the
   // chip just doesn't render.
   const branch = useGitBranch(isActive ? path : null);
+  // Click behavior: chevron toggles expansion only; the rest of
+  // the row activates the workspace (and the activation handler
+  // auto-jumps to its most recent thread). For an already-active
+  // workspace, body-click toggles expansion instead so the user
+  // can collapse it without leaving.
+  const onRowClick = () => {
+    if (!id) {
+      setOpen((v) => !v);
+      return;
+    }
+    if (isActive) {
+      setOpen((v) => !v);
+      return;
+    }
+    onActivate(id);
+  };
   return (
     <li>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
+      <div
         className={cn(
-          'group flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] font-medium transition-all duration-150 active:scale-[0.99]',
+          'group flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition-all duration-150',
           isActive
             ? 'bg-primary/[0.04] text-foreground hover:bg-primary/[0.07]'
             : 'text-foreground/85 hover:bg-muted/60',
         )}
       >
-        <ChevronRight
-          className={cn(
-            'h-3 w-3 shrink-0 text-muted-foreground transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)]',
-            open && 'rotate-90',
-          )}
-        />
-        <FolderIcon
-          className={cn(
-            'h-3.5 w-3.5 shrink-0 transition-colors',
-            isActive ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground',
-          )}
-        />
-        <span className="truncate">{name}</span>
-        {isActive && (
-          <span className="shrink-0 rounded-full bg-primary/15 px-1.5 py-0 text-[9px] font-medium uppercase tracking-wider text-primary">
-            Open
-          </span>
-        )}
-        {/* Git branch chip — only for the active workspace, only
-         *  when the workspace IS a git repo. Lucide GitBranch is
-         *  the standard visual; rendering ⎇ as text fallback would
-         *  ship faster but lucide makes the pill look intentional. */}
-        {isActive && branch && (
-          <span
-            className="ml-1 flex shrink-0 items-center gap-1 rounded-full bg-muted px-1.5 py-0 font-mono text-[9px] text-muted-foreground"
-            title={`Current branch: ${branch}`}
-          >
-            <GitBranch className="h-2.5 w-2.5" />
-            <span className="max-w-[80px] truncate">{branch}</span>
-          </span>
-        )}
-        <span
-          className={cn(
-            'ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground transition-opacity',
-            open ? 'opacity-50' : 'opacity-100',
-          )}
+        <button
+          type="button"
+          aria-label={open ? 'Collapse workspace' : 'Expand workspace'}
+          aria-expanded={open}
+          onClick={(e) => {
+            e.stopPropagation();
+            setOpen((v) => !v);
+          }}
+          className="grid h-4 w-4 shrink-0 place-items-center rounded transition-colors hover:bg-muted"
         >
-          {threads.length}
-        </span>
-      </button>
+          <ChevronRight
+            className={cn(
+              'h-3 w-3 text-muted-foreground transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)]',
+              open && 'rotate-90',
+            )}
+          />
+        </button>
+        <button
+          type="button"
+          onClick={onRowClick}
+          aria-label={isActive ? `Workspace ${name} (active)` : `Activate workspace ${name}`}
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-left active:scale-[0.99]"
+        >
+          <FolderIcon
+            className={cn(
+              'h-3.5 w-3.5 shrink-0 transition-colors',
+              isActive ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground',
+            )}
+          />
+          <span className="truncate">{name}</span>
+          {isActive && (
+            <span className="shrink-0 rounded-full bg-primary/15 px-1.5 py-0 text-[9px] font-medium uppercase tracking-wider text-primary">
+              Open
+            </span>
+          )}
+          {/* Git branch chip — only for the active workspace, only
+           *  when the workspace IS a git repo. Lucide GitBranch is
+           *  the standard visual; rendering ⎇ as text fallback would
+           *  ship faster but lucide makes the pill look intentional. */}
+          {isActive && branch && (
+            <span
+              className="ml-1 flex shrink-0 items-center gap-1 rounded-full bg-muted px-1.5 py-0 font-mono text-[9px] text-muted-foreground"
+              title={`Current branch: ${branch}`}
+            >
+              <GitBranch className="h-2.5 w-2.5" />
+              <span className="max-w-[80px] truncate">{branch}</span>
+            </span>
+          )}
+          <span
+            className={cn(
+              'ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground transition-opacity',
+              open ? 'opacity-50' : 'opacity-100',
+            )}
+          >
+            {threads.length}
+          </span>
+        </button>
+      </div>
       {/* Animated reveal — grid-rows trick avoids the height:auto
        *  transition issue and keeps content from rendering when
        *  collapsed (no a11y noise from offscreen-but-rendered rows). */}

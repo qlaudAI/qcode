@@ -149,6 +149,17 @@ export function useThreadsQuery(opts: {
           typeof meta.workspace_name === 'string'
             ? meta.workspace_name
             : (liveRow?.workspaceName ?? cached?.workspaceName);
+        // workspaceId is a per-device link — server metadata only
+        // carries it as a hint (the originating client's registry
+        // id). On THIS client we prefer the live/cached id, then
+        // metadata as a tiebreaker, then nothing (the sidebar will
+        // resolve by path against the local registry).
+        const wsId =
+          liveRow?.workspaceId ??
+          cached?.workspaceId ??
+          (typeof meta.workspace_id === 'string'
+            ? meta.workspace_id
+            : undefined);
         const title =
           liveRow?.title ?? cached?.title ?? metaTitle ?? 'New chat';
         const titleSource =
@@ -162,6 +173,7 @@ export function useThreadsQuery(opts: {
           createdAt: r.created_at,
           updatedAt: r.last_active_at,
           ...(titleSource ? { titleSource } : {}),
+          ...(wsId ? { workspaceId: wsId } : {}),
           ...(wsPath ? { workspacePath: wsPath } : {}),
           ...(wsName ? { workspaceName: wsName } : {}),
         };
@@ -357,8 +369,14 @@ export function useCreateThreadMutation() {
     }) => {
       const meta = args.workspace
         ? {
+            // Always send path + name (canonical, cross-device).
             workspace_path: args.workspace.path,
             workspace_name: args.workspace.name,
+            // Per-device registry id. Sent so the originating
+            // client can re-link the thread to its registry entry
+            // after a cache wipe; other devices ignore it and fall
+            // back to path matching.
+            ...(args.workspace.id ? { workspace_id: args.workspace.id } : {}),
           }
         : undefined;
       return createRemoteThread(meta ? { metadata: meta } : undefined).then(
@@ -372,6 +390,9 @@ export function useCreateThreadMutation() {
             updatedAt: t.last_active_at,
             ...(args.workspace
               ? {
+                  ...(args.workspace.id
+                    ? { workspaceId: args.workspace.id }
+                    : {}),
                   workspacePath: args.workspace.path,
                   workspaceName: args.workspace.name,
                 }

@@ -25,11 +25,18 @@ export type ThreadSummary = {
   model: string;
   createdAt: number;
   updatedAt: number;
-  /** Workspace path the thread was scoped to at creation time. Empty
-   *  / undefined = pure chat (no codebase). The sidebar splits
-   *  threads into "Workspaces" (has workspacePath) and "Chats" using
-   *  this field. Persisted both locally and in the qlaud thread's
-   *  metadata so it survives reinstalls. */
+  /** Stable id of the workspace registry entry the thread belongs
+   *  to. The canonical link as of the workspace/chat split — the
+   *  registry owns name + current path, so threads survive folder
+   *  renames/moves without restranding. Per-device (ids are
+   *  generated on the client that registered the workspace), so a
+   *  thread fetched on a different device falls back to
+   *  workspacePath matching. */
+  workspaceId?: string;
+  /** Workspace path the thread was scoped to at creation time.
+   *  Pre-split this was the sole link; post-split it's a fallback
+   *  for legacy threads / cross-device resolution. The sidebar
+   *  groups by `workspaceId || workspacePath` so both eras coexist. */
   workspacePath?: string;
   /** Last segment of the workspace path, cached for sidebar display
    *  so we don't re-derive it on every render. */
