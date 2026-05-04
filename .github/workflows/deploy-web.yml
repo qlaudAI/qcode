@@ -1,0 +1,91 @@
+# Auto-deploy qcode-web (Cloudflare Pages) on push to main.
+#
+# Pairs with release.yml (which builds the desktop binaries on
+# `v*` tags) — this one keeps qcode.qlaud.ai in sync with main on
+# every merge, no manual `pnpm build && wrangler pages deploy`.
+#
+# Drifted during the May-3 session: web was 16 hours behind main
+# because deploys were manual. This workflow plus deploy-edge.yml
+# in qlaud-router eliminate the "stale deploy" class of bugs.
+#
+# Required secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN  — token with `Account.Cloudflare Pages:Edit`
+#                           scope for the qcode-web Pages project.
+#                           A token with broader Pages:Edit also works.
+#   CLOUDFLARE_ACCOUNT_ID — same account id used elsewhere.
+#
+# Path filter: only files that affect the BROWSER build trigger a
+# deploy. Tauri-only paths (src-tauri/, capabilities/, .dmg signing
+# config) DON'T change web behavior, so a desktop-only commit
+# doesn't burn deploy minutes here. release.yml handles the
+# desktop side.
+#
+# Concurrency cancels in-progress runs because Pages deploys are
+# blue/green — a fresh build supersedes a stale one cleanly with
+# no half-state risk.
+
+name: Deploy qcode-web
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'index.html'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'vite.config.*'
+      - 'tailwind.config.*'
+      - 'postcss.config.*'
+      - 'tsconfig*.json'
+      - '.github/workflows/deploy-web.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # tsc -b runs as part of `pnpm build`, but we surface it as a
+      # discrete step so the Actions UI shows "Typecheck" failing
+      # vs "Build" failing — easier triage than a single red cell.
+      - name: Typecheck
+        run: pnpm tsc -b
+
+      - name: Build
+        run: pnpm vite build
+
+      - name: Deploy to Cloudflare Pages
+        run: |
+          pnpm dlx wrangler pages deploy dist \
+            --project-name=qcode-web \
+            --branch=main \
+            --commit-hash=${{ github.sha }} \
+            --commit-message="${GITHUB_ACTOR}: ${COMMIT_MESSAGE}"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Pull the commit subject for the Pages deploy log so the
+          # CF dashboard shows a meaningful entry per deploy
+          # ("ffd0751: feat(ui): sidebar motion ...") instead of a
+          # generic "Production deployment" everywhere.
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
