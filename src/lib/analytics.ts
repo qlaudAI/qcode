@@ -30,11 +30,27 @@ export function initAnalytics(): void {
     (import.meta.env.VITE_POSTHOG_HOST as string | undefined) ??
     'https://p.qlaud.ai';
 
+  // Tauri's WebView serves the app from `tauri://localhost` and has a
+  // tight CSP. PostHog's defaults monkey-patch fetch / XMLHttpRequest
+  // for autocapture + session recording — and that patching breaks the
+  // streaming SSE response coming back from `/v1/messages`, leaving
+  // the UI showing the user's message but never rendering claude's
+  // reply. (Reproduced: alpha.89 CI build had token set → broken;
+  // alpha.89 local build had token unset → worked. Same source.)
+  //
+  // We still want explicit `posthog.capture('turn_sent', ...)` calls
+  // to fire, so we initialize — just turn off the features that wrap
+  // the network layer. Web keeps full autocapture.
+  const desktop = isTauri();
   posthog.init(key, {
     api_host: host,
     // ui_host so PostHog UI deep-links from event tooltips work —
     // they should target PostHog, not our proxy.
     ui_host: 'https://us.posthog.com',
+    // The three settings that matter for the SSE-interference bug:
+    autocapture: !desktop,
+    capture_pageview: !desktop,
+    disable_session_recording: desktop,
   });
 
   // Super-properties — ride every event for cross-surface slicing.
