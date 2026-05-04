@@ -50,6 +50,13 @@ export const MODELS: ModelEntry[] = [
     blurb: 'OpenAI’s fast tier. Solid for everyday tasks.',
   },
   {
+    slug: 'grok-4.20-0309-reasoning',
+    label: 'Grok 4.20 Reasoning',
+    provider: 'xAI',
+    tier: 'reasoning',
+    blurb: 'xAI flagship with extended reasoning. Strong on logic + code.',
+  },
+  {
     slug: 'deepseek-chat',
     label: 'DeepSeek Chat',
     provider: 'DeepSeek',
@@ -84,6 +91,13 @@ export const MODELS: ModelEntry[] = [
     tier: 'flagship',
     blurb: 'Google’s flagship. Multimodal, large context.',
   },
+  {
+    slug: 'MiniMax-M2',
+    label: 'MiniMax M2',
+    provider: 'MiniMax',
+    tier: 'cheap',
+    blurb: 'MiniMax’s open-weights M2. Wide context, low pricing.',
+  },
 ];
 
 export const DEFAULT_MODEL = 'claude-sonnet-4-6';
@@ -101,11 +115,13 @@ const CONTEXT_WINDOWS: Record<string, number> = {
   'claude-haiku-4-5-20251001': 200_000,
   'gpt-5.4': 200_000,
   'gpt-5.4-mini': 128_000,
+  'grok-4.20-0309-reasoning': 256_000,
   'deepseek-chat': 128_000,
   'deepseek-reasoner': 64_000,
   'kimi-k2.6': 200_000,
   'qwen-coder-plus': 128_000,
   'gemini-3-pro-preview': 2_000_000,
+  'MiniMax-M2': 200_000,
 };
 
 /** Look up the (approximate) context window for a model slug. Falls

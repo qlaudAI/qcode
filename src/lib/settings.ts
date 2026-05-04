@@ -55,16 +55,26 @@ export type AutoApproveMode = 'yolo' | 'smart' | 'strict';
 export type OutputStyle = 'default' | 'compact' | 'explain';
 
 /** Engine Mode: which agent runtime drives a turn.
- *  - 'qcode-legacy' — the homegrown loop in src/lib/legacy/agent.ts
- *    routed through qlaud's streaming-with-tools edge handler.
- *    Slated for deletion once Engine Mode wraps cover all flows.
- *  - 'claude-code' — spawn the official `claude` CLI in the workspace
- *    with ANTHROPIC_BASE_URL=qlaud. Anthropic's loop, qlaud's gateway.
- *    Codex / Qwen Code / Aider land as additional members of this
- *    union once their adapters ship.
- *  Per-workspace would be ideal eventually, but for v0 a global
- *  setting keeps the wiring simple — flip the toggle, all sends use
- *  the chosen engine. */
+ *
+ *  Architecture as of alpha.110:
+ *  - Desktop (Tauri) → ALWAYS 'claude-code'. We bundle the bun
+ *    sidecar + claude-code package, so every desktop install
+ *    speaks Anthropic's loop. With the qlaud /v1/messages
+ *    translation gaps closed, 12/12 catalog models work via
+ *    this single engine — there's no longer a reason to expose
+ *    an engine picker. getSettings() coerces the stored value
+ *    on read; the SettingsDrawer hides the section.
+ *  - Web → ALWAYS 'qcode-legacy'. Browsers can't spawn
+ *    subprocesses, so we hit qlaud's POST /v1/threads/:id/messages
+ *    instead. Despite the "legacy" name this is the canonical
+ *    thin-client path: qlaud runs the LLM server-side, the
+ *    browser streams SSE + dispatches `client_tools` for the
+ *    pieces it can do (none in pure-browser today, but the loop
+ *    is in place for future polish).
+ *
+ *  The type stays a union so we can rename / split later without
+ *  a breaking type change; user-facing copy never says "engine"
+ *  on desktop. */
 export type Engine = 'qcode-legacy' | 'claude-code';
 
 export type Settings = {
@@ -139,10 +149,28 @@ const DEFAULTS: Settings = {
   autoApprove: 'smart',
   autoCommit: false,
   outputStyle: 'default',
-  // Default stays legacy until Engine Mode is proven on real users.
-  // The wrap path (claude-code) ships dark via the engine picker.
+  // Engine is always coerced to the platform's canonical value on
+  // read — see coerceEngine(). This default only matters for the
+  // very first read on a fresh install before localStorage has
+  // anything stored.
   engine: 'qcode-legacy',
 };
+
+/** Coerce stored engine value to the platform's canonical choice.
+ *  Ignores user-stored values entirely — the "engine" concept is
+ *  no longer user-configurable (see Engine docs). Tauri =
+ *  claude-code, web = qcode-legacy. Idempotent: repeat calls return
+ *  the same answer for the same platform. */
+function coerceEngine(): Engine {
+  // Tauri detection: window.__TAURI_INTERNALS__ is set by the
+  // Tauri runtime in the desktop webview. Same probe isTauri()
+  // uses, but inlined here to avoid a circular import (settings.ts
+  // is imported very early). Web build = no Tauri = qcode-legacy.
+  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+    return 'claude-code';
+  }
+  return 'qcode-legacy';
+}
 
 /** Coerce the stored autoApprove value to a tri-state mode. Handles
  *  three cases:
@@ -162,9 +190,11 @@ function coerceAutoApprove(v: unknown): AutoApproveMode {
 }
 
 export function getSettings(): Settings {
-  if (typeof localStorage === 'undefined') return { ...DEFAULTS };
+  if (typeof localStorage === 'undefined') {
+    return { ...DEFAULTS, engine: coerceEngine() };
+  }
   const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) return { ...DEFAULTS };
+  if (!raw) return { ...DEFAULTS, engine: coerceEngine() };
   try {
     const parsed = JSON.parse(raw) as Partial<Settings> & {
       autoApprove?: unknown;
@@ -173,9 +203,14 @@ export function getSettings(): Settings {
       ...DEFAULTS,
       ...parsed,
       autoApprove: coerceAutoApprove(parsed.autoApprove),
+      // Always platform-coerced — even if the user has 'qcode-legacy'
+      // stored from alpha.109 era, getSettings() returns 'claude-code'
+      // on desktop. The stored value is left intact so a downgrade
+      // doesn't strand the user; new patches refresh it on write.
+      engine: coerceEngine(),
     };
   } catch {
-    return { ...DEFAULTS };
+    return { ...DEFAULTS, engine: coerceEngine() };
   }
 }
 

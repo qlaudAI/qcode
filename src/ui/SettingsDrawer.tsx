@@ -161,7 +161,9 @@ export function SettingsDrawer({
               current session.
             </p>
 
-            <FieldLabel>Subagent model</FieldLabel>
+            <FieldLabel>
+              {isTauri() ? 'Background model' : 'Subagent model'}
+            </FieldLabel>
             <select
               value={settings.subagentModel ?? '__parent__'}
               onChange={(e) =>
@@ -172,7 +174,7 @@ export function SettingsDrawer({
               }
               className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/30"
             >
-              <option value="__parent__">Same as parent (no override)</option>
+              <option value="__parent__">Same as default (no override)</option>
               {MODELS.map((m) => (
                 <option key={m.slug} value={m.slug}>
                   {m.label} · {m.provider} · {m.tier}
@@ -180,10 +182,23 @@ export function SettingsDrawer({
               ))}
             </select>
             <p className="text-[11px] text-muted-foreground">
-              The `task` tool spawns a subagent for bounded scout work
-              (find files, summarize a module). Pick a cheap model here
-              to keep subagent fan-out from running up the bill — the
-              parent stays on whatever you picked above.
+              {isTauri() ? (
+                <>
+                  Drives Claude Code&rsquo;s background calls — title
+                  generation, summarization, internal planning helpers.
+                  Pairing your main pick with a cheap model here (e.g.
+                  Sonnet + Haiku, GPT-5.4 + GPT-5.4 mini) saves ~3–5×
+                  on those tokens with no quality hit on the main agent.
+                </>
+              ) : (
+                <>
+                  The <span className="font-mono">task</span> tool spawns
+                  a subagent for bounded scout work (find files, summarize
+                  a module). Pick a cheap model here to keep subagent
+                  fan-out from running up the bill — the parent stays on
+                  whatever you picked above.
+                </>
+              )}
             </p>
           </Section>
 
@@ -214,61 +229,15 @@ export function SettingsDrawer({
             </p>
           </Section>
 
-          <Section title="Engine">
-            <div className="flex gap-1.5 rounded-md border border-border bg-background p-1">
-              {(
-                // Claude Code engine spawns the local `claude`
-                // binary via Tauri's shell plugin — only available
-                // in the desktop build. On qcode-web (no Tauri host)
-                // the option is hidden so users don't pick it and
-                // hit a confusing "Command.create not available"
-                // error on the first send. Web users get the qcode
-                // legacy path, which routes through qlaud's
-                // /v1/threads/:id/messages and supports server-side
-                // MCP tools but no local file/shell access.
-                (isTauri()
-                  ? [
-                      { value: 'qcode-legacy', label: 'qcode (legacy)' },
-                      { value: 'claude-code', label: 'Claude Code' },
-                    ]
-                  : [{ value: 'qcode-legacy', label: 'qcode (legacy)' }]) as ReadonlyArray<{
-                  value: 'qcode-legacy' | 'claude-code';
-                  label: string;
-                }>
-              ).map((opt) => (
-                <button
-                  key={opt.value}
-                  onClick={() => update('engine', opt.value)}
-                  className={cn(
-                    'flex-1 rounded px-2 py-1 text-[12px] font-medium transition-colors',
-                    settings.engine === opt.value
-                      ? 'bg-foreground text-background'
-                      : 'text-foreground/70 hover:bg-muted',
-                  )}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-            <p className="text-[11px] text-muted-foreground">
-              <span className="font-medium text-foreground/80">qcode (legacy)</span>{' '}
-              runs qcode's own agent loop server-side via qlaud's
-              tool-dispatch edge.{' '}
-              {isTauri() && (
-                <>
-                  <span className="font-medium text-foreground/80">Claude Code</span>{' '}
-                  spawns Anthropic's official{' '}
-                  <span className="font-mono">claude</span> CLI in your
-                  workspace with{' '}
-                  <span className="font-mono">ANTHROPIC_BASE_URL</span> pointed
-                  at qlaud — the official agent runtime, your usage still
-                  shows up in the qlaud dashboard. Requires{' '}
-                  <span className="font-mono">claude</span> on your PATH (Engine
-                  Mode v0 — multimodal + approval cards land in v1).
-                </>
-              )}
-            </p>
-          </Section>
+          {/* Engine picker — hidden on desktop. With alpha.110
+           *  closing every qlaud /v1/messages translation gap,
+           *  Claude Code is the single engine and works for all 12
+           *  catalog models. There's no useful choice to expose.
+           *  Web doesn't get a picker either — it always routes
+           *  through qlaud's /v1/threads/:id/messages (server-side
+           *  LLM, browser as thin client). The Engine setting still
+           *  exists in localStorage for downgrade safety; it's just
+           *  no longer user-configurable. */}
 
           <Section title="Auto-approve">
             <div className="flex gap-1.5 rounded-md border border-border bg-background p-1">
@@ -347,28 +316,36 @@ export function SettingsDrawer({
             <RipgrepStatus />
           </Section>
 
-          <Section title="Connectors">
-            <Toggle
-              label="Use qlaud connectors (MCP)"
-              checked={settings.enableConnectors}
-              onChange={(v) => update('enableConnectors', v)}
-            />
-            <p className="text-[11px] text-muted-foreground">
-              Lets the model discover + call MCP servers you connected on{' '}
-              <a
-                href="#"
-                onClick={(e) => {
-                  e.preventDefault();
-                  void openExternal('https://qlaud.ai/tools');
-                }}
-                className="text-foreground/85 underline decoration-border hover:decoration-foreground/60"
-              >
-                qlaud.ai/tools
-              </a>
-              . When enabled, qcode adds 4 discovery tools alongside the
-              7 local ones — same approval flow for any write action.
-            </p>
-          </Section>
+          {/* Connectors toggle — drives qcode-legacy's qlaud_runtime
+           *  meta-tools loop. With Claude Code as the desktop engine,
+           *  MCP servers are configured natively in
+           *  ~/.claude/settings.json; this toggle does nothing on
+           *  desktop. We hide it there to avoid suggesting it has an
+           *  effect. Web (qcode-legacy path) still uses it. */}
+          {!isTauri() && (
+            <Section title="Connectors">
+              <Toggle
+                label="Use qlaud connectors (MCP)"
+                checked={settings.enableConnectors}
+                onChange={(v) => update('enableConnectors', v)}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Lets the model discover + call MCP servers you connected on{' '}
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    void openExternal('https://qlaud.ai/tools');
+                  }}
+                  className="text-foreground/85 underline decoration-border hover:decoration-foreground/60"
+                >
+                  qlaud.ai/tools
+                </a>
+                . When enabled, qcode adds 4 discovery tools alongside the
+                7 local ones — same approval flow for any write action.
+              </p>
+            </Section>
+          )}
 
           <Section title="Conversations">
             <DangerButton

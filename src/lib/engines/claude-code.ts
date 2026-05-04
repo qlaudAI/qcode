@@ -389,11 +389,34 @@ export async function runEngineClaudeCode(
   // claude wrapper script as the first arg. Bun runs the .cjs
   // wrapper which in turn execs the platform-specific claude
   // native binary that came in the same install.
+  // Two-model config. The user's main pick drives every heavy turn
+  // (--model also sets it, but ANTHROPIC_MODEL belt-and-suspenders
+  // covers the rare path where claude reads from env). The
+  // background pick — settings.subagentModel — drives Claude Code's
+  // auxiliary calls (title gen, summarization, internal planning
+  // helpers) via ANTHROPIC_SMALL_FAST_MODEL. Picking
+  // Sonnet+Haiku, GPT-5.4+5.4-mini, or any flagship+cheap pair
+  // here saves ~3-5x on those background tokens with no quality
+  // hit on the main agent. Null = let claude-code use its built-in
+  // default (currently haiku-4-5) — safe choice for new users.
+  const settings = getSettings();
+  const backgroundModel = settings.subagentModel;
   const cmd = Command.sidecar('binaries/bun', [...claudeSpec.argsPrefix, ...args], {
     cwd: opts.workspace,
     env: {
       ANTHROPIC_BASE_URL: QLAUD_BASE_URL,
       ANTHROPIC_API_KEY: apiKey,
+      // Main model — also passed via --model flag in args. Setting
+      // both is intentional: --model is the primary signal, the
+      // env var is a fallback if any sub-process inside claude
+      // reads from env.
+      ANTHROPIC_MODEL: opts.model,
+      // Background / small-task model. Routed through qlaud just
+      // like the main one (catalog handles routing per slug).
+      // Skipped when null so claude-code falls back to its own
+      // default rather than us pinning a value the user didn't
+      // explicitly opt into.
+      ...(backgroundModel ? { ANTHROPIC_SMALL_FAST_MODEL: backgroundModel } : {}),
       // PATH is the headline reason this env block exists at all.
       // Without it, Tauri's spawn inherits macOS launchd's minimal
       // PATH and `claude` (Homebrew / npm-global / bun-global) isn't
