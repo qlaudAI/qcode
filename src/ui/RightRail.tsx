@@ -376,10 +376,25 @@ function FilesView({ workspacePath }: { workspacePath?: string | null }) {
 // the dev server typically allows iframing same-origin, so this just
 // works for what it's actually for.
 
+// Matches dev-server "ready" banners across frameworks: Vite's
+// "Local: http://localhost:5173", Next's "ready on
+// http://localhost:3000", Astro/Remix/Nuxt/Storybook variants. Same
+// regex ChatSurface uses for its sticky activity bar — kept inline
+// here to avoid a circular import (RightRail is imported from
+// ChatSurface).
+const DEV_URL_RE =
+  /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d{2,5})?(?:\/[^\s'"<>)]*)?/g;
+
 function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
-  // Pull the most recent URL from any browser_navigate tool call.
-  // Re-derives on every render — cheap, blocks list rarely changes
-  // mid-render and the lookup is at most 100s of items.
+  // Two sources for what to load in the iframe, in priority order:
+  //   1. lastNavigatedUrl — the agent explicitly called
+  //      browser_navigate(url). User/agent intent is direct.
+  //   2. lastDevServerUrl — a bash tool's output contained a
+  //      "Local: http://..." / "ready on http://..." banner.
+  //      Picked up automatically when the agent runs `pnpm dev`,
+  //      Vite/Next/Astro/etc., on whatever port they grabbed.
+  // Either one updating triggers the iframe to load the new URL,
+  // unless the user has typed something different in the URL bar.
   const lastNavigatedUrl = useMemo(() => {
     for (let i = blocks.length - 1; i >= 0; i--) {
       const b = blocks[i];
@@ -395,19 +410,42 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
     return '';
   }, [blocks]);
 
-  const [url, setUrl] = useState(lastNavigatedUrl || 'http://localhost:3000');
-  const [loadedUrl, setLoadedUrl] = useState(lastNavigatedUrl);
+  const lastDevServerUrl = useMemo(() => {
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i];
+      if (!b || b.type !== 'tool') continue;
+      const tb = b as ToolBlock;
+      if (tb.call.name !== 'bash' && tb.call.name !== 'verify') continue;
+      const out = (tb.call as { output?: string }).output;
+      if (!out) continue;
+      const matches = Array.from(out.matchAll(DEV_URL_RE));
+      if (matches.length === 0) continue;
+      // Last match in this output wins — dev servers print "Local:"
+      // and "Network:" lines; "Local:" comes first so taking the
+      // last-but-most-specific match still works (we trim trailing
+      // punctuation either way).
+      const last = matches[matches.length - 1]?.[0];
+      if (last) return last.replace(/[.,;)]+$/, '');
+    }
+    return '';
+  }, [blocks]);
+
+  // Effective auto-source: explicit navigate beats inferred dev URL.
+  const autoSource = lastNavigatedUrl || lastDevServerUrl;
+
+  const [url, setUrl] = useState(autoSource || 'http://localhost:3000');
+  const [loadedUrl, setLoadedUrl] = useState(autoSource);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
-  // Auto-load when the agent navigates to a new URL (and the user
-  // hasn't typed something different). Keeps the panel in sync with
-  // what the model is doing without forcing the user to refresh.
+  // Auto-load when the agent navigates OR a dev server boots on a
+  // detected port. Keeps the panel in sync with what's actually
+  // running without forcing the user to retype the URL.
   useEffect(() => {
-    if (lastNavigatedUrl && lastNavigatedUrl !== loadedUrl) {
-      setUrl(lastNavigatedUrl);
-      setLoadedUrl(lastNavigatedUrl);
+    if (autoSource && autoSource !== loadedUrl) {
+      setUrl(autoSource);
+      setLoadedUrl(autoSource);
     }
-  }, [lastNavigatedUrl, loadedUrl]);
+  }, [autoSource, loadedUrl]);
 
   function load() {
     const trimmed = url.trim();
