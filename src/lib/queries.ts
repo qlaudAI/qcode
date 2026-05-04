@@ -130,7 +130,19 @@ export function useThreadsQuery(opts: {
       // Best-effort orphan cleanup — never blocks the list. If it
       // fails, the list still returns; the next reconcile will retry.
       void purgeEmptyRemoteThreads();
-      const remote = await listRemoteThreads();
+      // Exclude engine-shadow threads from the sidebar. The qlaud
+      // /v1/messages route creates a parallel thread row keyed by
+      // claude-code's session id (with metadata: { kind: 'engine' })
+      // to track usage server-side — those aren't user-facing chats.
+      // The qcode-tracked thread (created via POST /v1/threads with
+      // workspace metadata) is the canonical sidebar row. Filter
+      // engine shadows out before any title/workspace resolution so
+      // they don't pollute CHATS as "New chat" entries.
+      const allRemote = await listRemoteThreads();
+      const remote = allRemote.filter((r) => {
+        const meta = (r.metadata ?? {}) as Record<string, unknown>;
+        return meta.kind !== 'engine';
+      });
       // Title resolution order:
       //   1. Live in-memory Query data — most-recent patches win
       //      (eliminates the race where a refetch landing between
