@@ -34,7 +34,8 @@ import {
   type AttachedText,
 } from '../lib/uploads';
 import { getProjectMemory, type ProjectMemory } from '../lib/legacy/memory';
-import { MODELS, contextWindowFor } from '../lib/models';
+import { contextWindowFor } from '../lib/models';
+import { useTextModels } from '../lib/queries';
 import { planToAgentHandoff, setLastMode } from '../lib/mode-tracking';
 import { getSettings } from '../lib/settings';
 import type { ContentBlock, Message } from '../lib/qlaud-client';
@@ -205,7 +206,8 @@ export function ChatSurface({
   /** Close handler for the rail's X button. */
   onCloseRightRail?: () => void;
 }) {
-  const m = MODELS.find((x) => x.slug === model);
+  const models = useTextModels();
+  const m = models.find((x) => x.slug === model);
   const [blocks, setBlocks] = useState<RenderBlock[]>([]);
   const [compaction, setCompaction] = useState<CompactionInfo | null>(null);
   const [input, setInput] = useState('');
@@ -2241,7 +2243,8 @@ function UsagePill({
   model: string;
   durationMs: number;
 }) {
-  const m = MODELS.find((x) => x.slug === model);
+  const models = useTextModels();
+  const m = models.find((x) => x.slug === model);
   const cost =
     costUsd == null
       ? null

@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ChevronDown, Check } from 'lucide-react';
 
 import { cn } from '../lib/cn';
-import { MODELS } from '../lib/models';
+import { MODELS, type ModelEntry } from '../lib/models';
+import { useTextModels } from '../lib/queries';
 
 // Drop the brand prefix on tight viewports so the picker doesn't
 // wrap. "Claude Sonnet 4.6" → "Sonnet 4.6", "GPT-5.4 mini" stays
@@ -20,7 +21,16 @@ export function ModelPicker({
   onChange: (slug: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const current = MODELS.find((m) => m.slug === value) ?? MODELS[0];
+  // Live catalog (with localStorage seed) drives the list. Falls
+  // back to bundled MODELS during the very first cold start before
+  // the network fetch lands.
+  const models = useTextModels();
+  // Group memoization: the catalog can change between renders (refetch
+  // lands), so re-derive the grouped view when it does. Cheap —
+  // ~12 entries, single linear pass.
+  const grouped = useMemo(() => groupByProvider(models), [models]);
+  const current =
+    models.find((m) => m.slug === value) ?? models[0] ?? MODELS[0]!;
 
   return (
     <div className="relative">
@@ -50,7 +60,7 @@ export function ModelPicker({
             role="listbox"
             className="absolute right-0 z-40 mt-1.5 max-h-96 w-80 overflow-y-auto rounded-lg border border-border bg-background shadow-lg"
           >
-            {GROUPED_PROVIDERS.map((group) => (
+            {grouped.map((group) => (
               <li key={group.provider}>
                 <div className="sticky top-0 z-10 border-b border-border/40 bg-muted/40 px-3 py-1.5 text-[10px] font-medium uppercase tracking-widest text-muted-foreground backdrop-blur">
                   {group.provider}
@@ -102,14 +112,17 @@ export function ModelPicker({
   );
 }
 
-const GROUPED_PROVIDERS = (() => {
-  const map = new Map<string, typeof MODELS>();
-  for (const m of MODELS) {
-    if (!map.has(m.provider)) map.set(m.provider, []);
-    map.get(m.provider)!.push(m);
+function groupByProvider(
+  models: ModelEntry[],
+): Array<{ provider: string; models: ModelEntry[] }> {
+  const map = new Map<string, ModelEntry[]>();
+  for (const m of models) {
+    const arr = map.get(m.provider);
+    if (arr) arr.push(m);
+    else map.set(m.provider, [m]);
   }
   return Array.from(map.entries()).map(([provider, models]) => ({
     provider,
     models,
   }));
-})();
+}

@@ -22,10 +22,18 @@ import {
 import { fetchAccount, type AccountInfo } from './account';
 import { fetchBalance, type BalanceInfo } from './billing';
 import {
+  fetchCatalog,
+  loadCachedCatalog,
+  saveCachedCatalog,
+  textModelsFromCatalog,
+  type Catalog,
+} from './catalog';
+import {
   clearInFlight,
   hasLanded,
   isInFlight,
 } from './in-flight';
+import { MODELS, type ModelEntry } from './models';
 import {
   createRemoteThread,
   deleteRemoteThread,
@@ -73,6 +81,7 @@ export const qk = {
   threadMessages: (id: string) => ['threads', id, 'messages'] as const,
   account: ['account'] as const,
   balance: ['balance'] as const,
+  catalog: ['catalog'] as const,
 };
 
 // ─── Threads list ──────────────────────────────────────────────────
@@ -290,6 +299,51 @@ export function invalidateThreadMessages(threadId: string): Promise<void> {
   return queryClient.invalidateQueries({
     queryKey: qk.threadMessages(threadId),
   });
+}
+
+// ─── Catalog ───────────────────────────────────────────────────────
+//
+// qlaud's /v1/catalog is the canonical source of model metadata.
+// qcode used to ship a hardcoded MODELS array that drifted every
+// time qlaud added a model. Now: bundle still exists as the offline
+// fallback / first-paint seed, but the live catalog wins as soon as
+// the fetch lands. No app rebuild needed when qlaud adds models.
+
+/** Pulls /v1/catalog. Public (no auth) and edge-cached for 5 min,
+ *  so this is essentially free even on cold start. Mirrors to
+ *  localStorage so the next cold start renders instantly without
+ *  waiting for the network. */
+export function useCatalogQuery() {
+  return useQuery<Catalog>({
+    queryKey: qk.catalog,
+    queryFn: async () => {
+      const c = await fetchCatalog();
+      saveCachedCatalog(c);
+      return c;
+    },
+    // Catalog changes are slow (hours-to-days cadence on qlaud's
+    // side). 5 min staleTime mirrors the edge cache; longer would
+    // mean a model added today doesn't appear until restart.
+    staleTime: 5 * 60_000,
+    // Hydrate from localStorage on cold start so the picker paints
+    // before the fetch lands. Falsy initial = Query fires the
+    // fetch immediately.
+    initialData: () => loadCachedCatalog() ?? undefined,
+  });
+}
+
+/** Resolved text-generation model list for the picker. Prefers the
+ *  live catalog (or its localStorage cache); falls back to the
+ *  bundled MODELS array when the catalog hasn't loaded yet AND
+ *  there's no cached blob (very first cold start, offline). The
+ *  fallback keeps the picker functional rather than rendering an
+ *  empty dropdown — the bundled list is always at least a usable
+ *  subset of what qlaud actually serves. */
+export function useTextModels(): ModelEntry[] {
+  const { data } = useCatalogQuery();
+  if (!data) return MODELS;
+  const fromCatalog = textModelsFromCatalog(data);
+  return fromCatalog.length > 0 ? fromCatalog : MODELS;
 }
 
 // ─── Account ───────────────────────────────────────────────────────

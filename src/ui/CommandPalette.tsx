@@ -14,7 +14,7 @@ import {
 
 import { cn } from '../lib/cn';
 import { fuzzyScore } from '../lib/fuzzy';
-import { MODELS } from '../lib/models';
+import { useTextModels } from '../lib/queries';
 import { listAllFiles, type Workspace } from '../lib/workspace';
 
 // Cmd-K palette. macOS Spotlight / VS Code-style: search files in
@@ -57,6 +57,9 @@ export function CommandPalette(props: Props) {
   const [files, setFiles] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const filesLoadedFor = useRef<string | null>(null);
+  // Live catalog drives the model fuzzy-match. Stays current with
+  // qlaud's catalog without a qcode rebuild.
+  const models = useTextModels();
 
   // Load (and cache) file list on first open per workspace.
   useEffect(() => {
@@ -143,7 +146,7 @@ export function CommandPalette(props: Props) {
       const s = fuzzyScore(query, `${a.label} ${a.keywords ?? ''}`);
       if (s !== null) scored.push({ item: { kind: 'action', action: a }, score: s + 5 });
     }
-    for (const m of MODELS) {
+    for (const m of models) {
       const s = fuzzyScore(query, `${m.label} ${m.provider}`);
       if (s !== null)
         scored.push({
@@ -157,7 +160,7 @@ export function CommandPalette(props: Props) {
     }
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, 50).map((x) => x.item);
-  }, [query, actions, files]);
+  }, [query, actions, files, models]);
 
   // Clamp active when items change.
   useEffect(() => {

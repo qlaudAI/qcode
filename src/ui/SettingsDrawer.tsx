@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 
 import { cn } from '../lib/cn';
-import { MODELS } from '../lib/models';
+import { useTextModels } from '../lib/queries';
 import { ripgrepInstallHint, ripgrepSource } from '../lib/ripgrep';
 import {
   getSettings,
@@ -52,6 +52,11 @@ export function SettingsDrawer({
   onRefreshAccount,
 }: Props) {
   const [settings, setSettings] = useState<Settings>(() => getSettings());
+  // Live model list — same source the title-bar picker reads from
+  // so the Settings dropdowns never disagree with what's selectable.
+  // useTextModels falls back to bundled MODELS when the catalog
+  // hasn't loaded yet, so this is safe before the network lands.
+  const models = useTextModels();
 
   // Re-hydrate when the drawer opens — covers cross-tab edits in
   // vite-dev where another tab might have saved. Also kick off an
@@ -135,7 +140,7 @@ export function SettingsDrawer({
               onChange={(e) => update('defaultModel', e.target.value)}
               className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/30"
             >
-              {MODELS.map((m) => (
+              {models.map((m) => (
                 <option key={m.slug} value={m.slug}>
                   {m.label} · {m.provider}
                 </option>
@@ -175,7 +180,7 @@ export function SettingsDrawer({
               className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/30"
             >
               <option value="__parent__">Same as default (no override)</option>
-              {MODELS.map((m) => (
+              {models.map((m) => (
                 <option key={m.slug} value={m.slug}>
                   {m.label} · {m.provider} · {m.tier}
                 </option>
