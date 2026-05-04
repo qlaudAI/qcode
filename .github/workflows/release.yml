@@ -55,9 +55,30 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # rust-cache caches the cargo registry + git deps + target dir
+      # by default. We split that: keep registry caching (downloading
+      # crates.io is slow), but explicitly wipe the compiled `target/`
+      # before every build. Rust incremental compilation is supposed to
+      # be deterministic but in practice can leak state between tagged
+      # builds — equivalent to needing `rm -rf .next` on Next.js. The
+      # `cache-targets: false` opt-out tells the action to NOT save or
+      # restore target/, only the dep registries.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          cache-targets: false
+
+      - name: Force clean build artifacts
+        shell: bash
+        run: |
+          # Belt-and-suspenders. If anything got restored above (or the
+          # checkout left stale dist/), nuke it. Cargo registry under
+          # ~/.cargo/registry is preserved by rust-cache so dep
+          # downloads still hit cache — only build outputs are reset.
+          rm -rf src-tauri/target dist node_modules/.vite tsconfig.tsbuildinfo
+          echo "post-wipe paths:"
+          ls src-tauri/target 2>/dev/null || echo "  src-tauri/target: (clean)"
+          ls dist 2>/dev/null            || echo "  dist: (clean)"
 
       - name: Install JS deps
         run: pnpm install --frozen-lockfile=false
