@@ -415,7 +415,12 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
       const b = blocks[i];
       if (!b || b.type !== 'tool') continue;
       const tb = b as ToolBlock;
-      if (tb.call.name !== 'bash' && tb.call.name !== 'verify') continue;
+      // Case-insensitive: legacy agent emits 'bash' / 'verify',
+      // claude CLI engine emits 'Bash' (capital). Without the
+      // lowercase normalization the engine-mode preview pane
+      // never picks up dev-server boots from bash output.
+      const name = tb.call.name.toLowerCase();
+      if (name !== 'bash' && name !== 'verify') continue;
       const out = (tb.call as { output?: string }).output;
       if (!out) continue;
       const matches = Array.from(out.matchAll(DEV_URL_RE));

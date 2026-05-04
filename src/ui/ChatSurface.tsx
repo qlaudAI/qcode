@@ -2052,7 +2052,12 @@ function deriveDevServerUrl(blocks: RenderBlock[]): string | null {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const b = blocks[i];
     if (!b || b.type !== 'tool') continue;
-    if (b.call.name !== 'bash' && b.call.name !== 'verify') continue;
+    // Case-insensitive: legacy agent emits 'bash' / 'verify',
+    // claude CLI engine emits 'Bash'. Without lowercasing the
+    // sticky activity bar misses every engine-mode dev-server
+    // banner.
+    const name = b.call.name.toLowerCase();
+    if (name !== 'bash' && name !== 'verify') continue;
     const out = b.call.output ?? '';
     if (!out) continue;
     const matches = Array.from(out.matchAll(DEV_URL_RE));
