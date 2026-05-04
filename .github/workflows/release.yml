@@ -157,6 +157,23 @@ jobs:
           VITE_APP_VERSION: ${{ github.ref_name }}
         run: pnpm tauri build --target ${{ matrix.target }}
 
+      # Tauri's macOS bundler always names the updater payload
+      # `qcode.app.tar.gz` regardless of arch, so the arm64 + x86_64
+      # matrix runs collide on upload (last writer wins). Rename per
+      # target so both arches survive in the GH Release, and so the
+      # edge worker's pickUpdaterAsset can match by the arch substring
+      # in the filename.
+      - name: Rename macOS updater bundle with target arch
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          cd src-tauri/target/${{ matrix.target }}/release/bundle/macos
+          if [ -f qcode.app.tar.gz ]; then
+            mv qcode.app.tar.gz "qcode_${{ matrix.target }}.app.tar.gz"
+            mv qcode.app.tar.gz.sig "qcode_${{ matrix.target }}.app.tar.gz.sig"
+            ls -la qcode_*.app.tar.gz qcode_*.app.tar.gz.sig
+          fi
+
       - name: Upload release artifacts
         uses: softprops/action-gh-release@v2
         with:
