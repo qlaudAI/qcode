@@ -122,6 +122,56 @@ The user is on a desktop app, so localhost is THEIR machine. Treat dev servers a
  *  forwards as cf-aig-metadata.client_session_id. */
 const QLAUD_BASE_URL = 'https://api.qlaud.ai';
 
+/** Cached user login PATH (resolved on first claude spawn).
+ *
+ *  When qcode.app launches from Finder/Spotlight/Dock, it inherits
+ *  macOS's tiny launchd PATH — just /usr/bin:/bin:/usr/sbin:/sbin.
+ *  Anything the user installed via Homebrew (/opt/homebrew/bin),
+ *  bun (~/.bun/bin), nvm (~/.nvm/...), npm-global (~/.npm-global/bin),
+ *  or pnpm (~/Library/pnpm) is invisible — including `claude` itself
+ *  if it was installed via npm/pnpm/bun. Result: spawn fails with
+ *  "No such file or directory (os error 2)" even though the user
+ *  has claude on PATH in their actual terminal.
+ *
+ *  Workaround: spawn `bash -lc 'echo $PATH'` once on first need.
+ *  bash/sh always live at /bin so we can run them without our own
+ *  PATH being correct. -lc tells bash to source the user's login
+ *  files (~/.zshrc / ~/.bash_profile / etc) so PATH is whatever the
+ *  user has in their real terminal. Cache the result for the rest
+ *  of this qcode session — login PATH doesn't change between
+ *  spawns. */
+let cachedLoginPath: string | null = null;
+const FALLBACK_PATH =
+  '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+
+async function getHome(): Promise<string> {
+  try {
+    const { homeDir } = await import('@tauri-apps/api/path');
+    return (await homeDir()).replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+async function getLoginPath(): Promise<string> {
+  if (cachedLoginPath) return cachedLoginPath;
+  try {
+    // -l = login shell (sources ~/.zprofile / ~/.bash_profile)
+    // -c = run a single command and exit
+    const out = await Command.create('bash', ['-lc', 'echo $PATH']).execute();
+    const path = (out.stdout || '').trim();
+    if (out.code === 0 && path) {
+      cachedLoginPath = path;
+      return path;
+    }
+  } catch {
+    // bash isn't even findable — extremely rare, but the fallback
+    // below covers the most-common Homebrew + npm-global locations.
+  }
+  cachedLoginPath = FALLBACK_PATH;
+  return FALLBACK_PATH;
+}
+
 /** Same shape as RunThreadAgentOpts but trimmed to what an engine
  *  actually needs. Custom approval / autoApprove / autoCommit fields
  *  from the legacy path are ignored — claude handles those itself. */
@@ -242,11 +292,51 @@ export async function runEngineClaudeCode(
   }
   args.push(promptText);
 
+  // Validate workspace before spawning. ENOENT during spawn could
+  // come from EITHER a missing claude binary OR a missing cwd, and
+  // the macOS error message is identical. Pre-check the cwd so we
+  // can surface a clear "workspace folder doesn't exist" instead of
+  // the misleading "Is Claude Code installed?" message when the
+  // user's actual problem is a deleted/renamed workspace.
+  try {
+    const { stat } = await import('@tauri-apps/plugin-fs');
+    const info = await stat(opts.workspace);
+    if (!info.isDirectory) {
+      opts.onEvent({
+        type: 'error',
+        message: `Workspace path is not a directory: ${opts.workspace}. Pick a different workspace folder (⌘O).`,
+      });
+      return;
+    }
+  } catch {
+    opts.onEvent({
+      type: 'error',
+      message: `Workspace folder no longer exists: ${opts.workspace}. It may have been deleted, moved, or unmounted. Pick a workspace (⌘O) and resend.`,
+    });
+    return;
+  }
+
+  // Resolve the user's real login PATH so spawn can find `claude`
+  // (and any node/npm tools claude itself may shell out to). Cached
+  // after first call. See getLoginPath() comment for why this is
+  // necessary on macOS apps launched from Finder.
+  const loginPath = await getLoginPath();
+
   const cmd = Command.create('claude', args, {
     cwd: opts.workspace,
     env: {
       ANTHROPIC_BASE_URL: QLAUD_BASE_URL,
       ANTHROPIC_API_KEY: apiKey,
+      // PATH is the headline reason this env block exists at all.
+      // Without it, Tauri's spawn inherits macOS launchd's minimal
+      // PATH and `claude` (Homebrew / npm-global / bun-global) isn't
+      // findable. We pass the user's full login PATH instead.
+      PATH: loginPath,
+      // Pass through HOME so claude's own config dir resolution
+      // works (claude reads ~/.claude/ for credentials/sessions).
+      // We resolve via Tauri's path API rather than process.env
+      // because process isn't defined in the webview context.
+      HOME: await getHome(),
       // Disable claude's own telemetry. We're routing through qlaud
       // for billing + observability; redundant + slightly leaky
       // otherwise.
@@ -485,13 +575,22 @@ export async function runEngineClaudeCode(
   try {
     child = await cmd.spawn();
   } catch (e) {
-    opts.onEvent({
-      type: 'error',
-      message:
-        e instanceof Error && e.message.includes('not allowed')
-          ? `Tauri capability rejected the spawn — make sure 'claude' is in capabilities/default.json. (${e.message})`
-          : `Failed to spawn claude: ${e instanceof Error ? e.message : String(e)}. Is Claude Code installed? Run \`claude --version\` from your terminal.`,
-    });
+    const msg = e instanceof Error ? e.message : String(e);
+    let userMessage: string;
+    if (msg.includes('not allowed')) {
+      userMessage = `Tauri capability rejected the spawn — make sure 'claude' is in capabilities/default.json. (${msg})`;
+    } else if (msg.includes('os error 2') || msg.toLowerCase().includes('no such file')) {
+      // ENOENT — by far the most common failure on a fresh macOS
+      // install. We've already prepended the user's full login PATH
+      // to the spawn env (see getLoginPath above), so reaching here
+      // means claude genuinely isn't on their PATH. Give actionable
+      // install instructions that match what the user would do at
+      // their terminal.
+      userMessage = `Couldn't find the \`claude\` CLI on your PATH. Install it with one of:\n  • npm i -g @anthropic-ai/claude-code\n  • bun add -g @anthropic-ai/claude-code\n  • brew install anthropic/anthropic/claude-code\n\nThen restart qcode so the new PATH is picked up. (\`claude --version\` from your terminal should print a version when this is fixed.)`;
+    } else {
+      userMessage = `Failed to spawn claude: ${msg}.`;
+    }
+    opts.onEvent({ type: 'error', message: userMessage });
     return;
   }
 
