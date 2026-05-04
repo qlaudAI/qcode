@@ -321,41 +321,78 @@ export function SettingsDrawer({
             <RipgrepStatus />
           </Section>
 
-          {/* Connectors toggle — drives qcode-legacy's qlaud_runtime
-           *  meta-tools loop. With Claude Code as the desktop engine,
-           *  MCP servers are configured natively in
-           *  ~/.claude/settings.json; this toggle does nothing on
-           *  desktop. We hide it there to avoid suggesting it has an
-           *  effect. Web (qcode-legacy path) still uses it. */}
-          {!isTauri() && (
-            <Section title="Connectors">
+          {/* Connectors section — visible on every surface, but the
+           *  semantics differ:
+           *
+           *  - Web (qcode-legacy path): toggle drives qlaud_runtime's
+           *    tools_mode='dynamic' so qlaud auto-attaches every
+           *    registered MCP on every send.
+           *
+           *  - Desktop (claude-code engine): the toggle isn't load-
+           *    bearing — Claude Code reads its own MCP config from
+           *    ~/.claude.json. We still show the registered list so
+           *    users have one place to see what's in their qlaud
+           *    account, but we replace the toggle with an honest
+           *    status line so we don't fake a capability we don't
+           *    yet wire. Auto-sync to ~/.claude.json is on the
+           *    Phase C list. */}
+          <Section title="Connectors">
+            {isTauri() ? (
+              <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+                Claude Code on this device reads its own MCP config
+                from{' '}
+                <span className="font-mono">~/.claude.json</span>. The
+                list below shows what you&rsquo;ve registered with qlaud
+                for reference — auto-sync to Claude Code is coming in
+                a future update.
+              </div>
+            ) : (
               <Toggle
                 label="Use qlaud connectors (MCP)"
                 checked={settings.enableConnectors}
                 onChange={(v) => update('enableConnectors', v)}
               />
-              {/* Active-connector readout — only fetches when the
-               *  toggle is on, so toggling off doesn't burn a network
-               *  call. Shows the user what's actually loaded into
-               *  their agent's tool surface on the next send. */}
-              <McpConnectorStatus enabled={settings.enableConnectors} />
-              <p className="text-[11px] text-muted-foreground">
-                Lets the model discover + call MCP servers you connected on{' '}
-                <a
-                  href="#"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    void openExternal('https://qlaud.ai/tools');
-                  }}
-                  className="text-foreground/85 underline decoration-border hover:decoration-foreground/60"
-                >
-                  qlaud.ai/tools
-                </a>
-                . When enabled, qcode adds 4 discovery tools alongside the
-                7 local ones — same approval flow for any write action.
-              </p>
-            </Section>
-          )}
+            )}
+            {/* Active-connector readout — fetched when the section
+             *  is meaningful: web reads only when the toggle is on
+             *  (otherwise nothing's loading anyway), desktop always
+             *  reads since it's purely informational. */}
+            <McpConnectorStatus
+              enabled={isTauri() ? true : settings.enableConnectors}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              {isTauri() ? (
+                <>
+                  Manage your registered MCP servers (browse 100+ curated
+                  catalog entries, add credentials) at{' '}
+                </>
+              ) : (
+                <>
+                  Lets the model discover + call MCP servers you connected
+                  on{' '}
+                </>
+              )}
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  void openExternal('https://qlaud.ai/tools');
+                }}
+                className="text-foreground/85 underline decoration-border hover:decoration-foreground/60"
+              >
+                qlaud.ai/tools
+              </a>
+              {isTauri() ? (
+                <>.</>
+              ) : (
+                <>
+                  . When enabled, qcode adds 4 discovery tools alongside
+                  the 7 local ones — same approval flow for any write
+                  action.
+                </>
+              )}
+            </p>
+          </Section>
 
           <Section title="Conversations">
             <DangerButton
