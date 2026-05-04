@@ -61,6 +61,14 @@ jobs:
         with:
           bun-version: latest
 
+      # Wrangler 4+ requires Node 22+. The runner's default is Node 20,
+      # so we install 22 explicitly. We install bun BEFORE node so the
+      # `cache: ~` line on setup-node doesn't confuse itself (we're not
+      # using its cache anyway — bun has its own).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install
         run: bun install --frozen-lockfile
 
