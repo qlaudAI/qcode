@@ -146,6 +146,25 @@ export function useThreadsQuery(opts: {
       const liveById = new Map((live ?? []).map((s) => [s.id, s]));
       const cache = loadCachedSummaries();
       const cacheById = new Map(cache.map((s) => [s.id, s]));
+      // Belt-and-suspenders against a transient list-drop: if a
+      // thread was created locally (optimistic insert from the
+      // create mutation's onSuccess) but isn't yet visible in the
+      // server's list response — usually because the list was
+      // already in flight when create completed — keep the local
+      // row in the merged result so the UI doesn't see the chat
+      // disappear and re-grab a different thread. We only preserve
+      // recently-created entries (60s window) so a deleted thread
+      // can still age out cleanly. The server-side purge has a
+      // matching 60s grace period (see qlaud apps/edge/src/routes/
+      // threads.ts handleDeleteEmptyThreads).
+      const remoteIds = new Set(remote.map((r) => r.id));
+      const RECENT_LOCAL_MS = 60_000;
+      const now = Date.now();
+      const localOnly: ThreadSummary[] = (live ?? []).filter(
+        (s) =>
+          !remoteIds.has(s.id) && now - (s.createdAt ?? 0) < RECENT_LOCAL_MS,
+      );
+
       const merged: ThreadSummary[] = remote.map((r) => {
         const liveRow = liveById.get(r.id);
         const cached = cacheById.get(r.id);
@@ -189,8 +208,17 @@ export function useThreadsQuery(opts: {
           ...(wsName ? { workspaceName: wsName } : {}),
         };
       });
-      saveCachedSummaries(merged);
-      return merged;
+      // Local-only rows ride at the top so they remain visible (the
+      // sidebar paints newest-first by `updatedAt`, and just-created
+      // entries naturally have the freshest timestamp). When the
+      // next list refetch lands — by which point the server has
+      // either persisted the thread normally or actually purged it
+      // because it stayed empty past the grace window — the row
+      // will either fold cleanly into the remote-derived merge or
+      // age out of the local-only bucket.
+      const final = [...localOnly, ...merged];
+      saveCachedSummaries(final);
+      return final;
     },
     // Localstorage is the seed; query refetches in the background.
     initialData: () => {

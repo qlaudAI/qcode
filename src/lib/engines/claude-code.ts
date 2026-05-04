@@ -90,9 +90,15 @@ DO NOT ask the user permission first ("Want me to do that?" is the wrong default
   fi
 
   # ─── verify a running app
+  # Use dynamic await import — Node's static \`import\` requires a
+  # plain string literal, not a template literal. Dynamic import
+  # accepts a runtime expression so we can resolve \$HOME cleanly.
+  # Default chromium.launch() (no channel pin) avoids the
+  # "Unsupported chromium channel chrome-headless-shell" error on
+  # Playwright versions <1.49.
   cat > /tmp/verify.mjs <<'EOF'
-  import { chromium } from \`\${process.env.HOME}/.qcode/runtime/node_modules/playwright\`;
-  const b = await chromium.launch({ channel: 'chrome-headless-shell' });
+  const { chromium } = await import(\`\${process.env.HOME}/.qcode/runtime/node_modules/playwright\`);
+  const b = await chromium.launch();
   const p = await b.newPage();
   const errors = [];
   p.on('pageerror', e => errors.push('pageerror: ' + e.message));
@@ -100,7 +106,7 @@ DO NOT ask the user permission first ("Want me to do that?" is the wrong default
   const r = await p.goto('http://localhost:5173', { waitUntil: 'networkidle' });
   console.log('status', r.status());
   console.log('title', await p.title());
-  console.log('h1', await p.$eval('h1', e => e.innerText).catch(() => '(none)'));
+  console.log('h1', await p.\$eval('h1', e => e.innerText).catch(() => '(none)'));
   await p.screenshot({ path: '/tmp/preview.png' });
   console.log('errors', errors.length ? errors : 'none');
   await b.close();
