@@ -61,16 +61,25 @@ const QCODE_ENGINE_HINT = `qcode dev-workflow hints (running you inside the qcod
 
 LIVE PREVIEW PANE — qcode shows a live iframe of any localhost URL on the right side of the chat. It auto-syncs to whatever localhost URL appears in your bash output ("Local: http://localhost:5174" / "ready on http://localhost:3000" banners). The user can SEE the running app rendered live without leaving qcode. So when you boot a dev server, the user already sees it. You don't need to "tell them to open it in their browser."
 
-VERIFYING RUNNING APPS — you do NOT have a built-in browser/playwright tool here. To programmatically check that a running app actually rendered (HTTP 200 + DOM elements + no console errors + screenshot), use Playwright via Bash. Just install + run + clean up — DO NOT ask the user permission first ("Want me to do that?" is the wrong default). Pattern:
+VERIFYING RUNNING APPS — you do NOT have a built-in browser tool here. Use Playwright via Bash. DO NOT install per-project (no \`npm i -D @playwright/test\` in the user's project) — that pollutes their package.json and re-downloads Chromium for every workspace. Use the GLOBAL qcode-runtime install at \`~/.qcode/runtime\` instead, which is shared across every chat and every project.
 
-  # 1. install ad-hoc into the project (or /tmp if you don't want to touch package.json)
-  npm i -D @playwright/test playwright >/dev/null 2>&1
-  npx playwright install chromium >/dev/null 2>&1   # only the first time
+DO NOT ask the user permission first ("Want me to do that?" is the wrong default). Just do it.
 
-  # 2. run a one-shot verification script via node
+  # ─── ONE-TIME bootstrap (only if ~/.qcode/runtime/node_modules/playwright doesn't exist yet)
+  if [ ! -d "$HOME/.qcode/runtime/node_modules/playwright" ]; then
+    mkdir -p "$HOME/.qcode/runtime" && cd "$HOME/.qcode/runtime"
+    npm init -y >/dev/null
+    # playwright-core is enough — we don't need the full @playwright/test runner.
+    # chrome-headless-shell is the slim ~80MB build (vs full Chromium ~150MB).
+    npm i playwright >/dev/null
+    npx playwright install chrome-headless-shell >/dev/null
+    cd - >/dev/null
+  fi
+
+  # ─── verify a running app
   cat > /tmp/verify.mjs <<'EOF'
-  import { chromium } from 'playwright';
-  const b = await chromium.launch();
+  import { chromium } from \`\${process.env.HOME}/.qcode/runtime/node_modules/playwright\`;
+  const b = await chromium.launch({ channel: 'chrome-headless-shell' });
   const p = await b.newPage();
   const errors = [];
   p.on('pageerror', e => errors.push('pageerror: ' + e.message));
@@ -85,7 +94,7 @@ VERIFYING RUNNING APPS — you do NOT have a built-in browser/playwright tool he
   EOF
   node /tmp/verify.mjs
 
-This gives you HTTP status, page title, key DOM elements, console + page errors, and a screenshot file the user can open. Same approach works for clicking buttons, filling forms, or running e2e flows — just extend the script.
+The bootstrap step takes ~30s the FIRST time the user uses qcode (one-time across their machine, not per project). Every subsequent run is instant — \`~/.qcode/runtime\` persists between projects, restarts, even qcode upgrades. Same approach works for clicking buttons, filling forms, e2e flows — extend the script with page.click / page.fill / page.waitForSelector.
 
 Localhost / dev-server access — ports change between runs (Vite picks 5174 if 5173 is busy; Next picks 3001 if 3000 is taken). NEVER hardcode a port from package.json scripts. Before any \`curl\`, \`fetch\`, or playwright \`page.goto\` to a localhost URL, verify the LIVE port two ways:
   1. Scan recent bash output for "Local:" / "ready on" / "Listening on" / "started server" banners — Vite, Next, Astro, Storybook, Remix, Nuxt, SvelteKit, Tauri's vite, Express, Fastify, NestJS, Django, Flask, Rails all print one of those.
