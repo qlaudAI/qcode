@@ -369,15 +369,25 @@ export function ChatSurface({
             import('../lib/threads'),
           ]);
         const sessionId = getClaudeSessionId(threadId);
-        if (!sessionId) {
-          // Fresh thread, claude hasn't written any session yet —
-          // first send populates the session and the next reload
-          // restores from D1.
-          setBlocks([]);
-          return;
-        }
+        // Two cases land in this branch when engine === 'claude-code':
+        //   1. Engine-mode thread that already had a turn → sessionId
+        //      maps to claude's session id (messages persisted under
+        //      that key in thread_messages).
+        //   2. A thread NOT yet associated with a claude session —
+        //      either (a) fresh, never sent, or (b) created via web /
+        //      qcode-legacy where messages were persisted under the
+        //      qcode threadId itself. Case (b) is by far the more
+        //      common one: any thread the user created in the browser
+        //      has no claudeSessionByThread mapping on this device.
+        // Falling back to threadId as the fetch key handles both: the
+        // edge's GET /v1/threads/:id/messages is keyed by the row id,
+        // which is whatever was used when the thread was created.
+        // Without this fallback, opening a web-created thread on
+        // desktop while engine=claude-code renders an empty welcome
+        // state.
+        const fetchKey = sessionId || threadId;
         try {
-          const result = await getRemoteThreadMessages(sessionId, {
+          const result = await getRemoteThreadMessages(fetchKey, {
             limit: 200,
           });
           if (cancelled) return;
@@ -387,9 +397,9 @@ export function ChatSurface({
             setBlocks([]);
           }
         } catch {
-          // 404 = session never had a write yet (first turn in flight),
-          // network errors = transient. Either way leave blocks empty
-          // rather than blanking what's on screen.
+          // 404 = nothing persisted yet under either key (first turn
+          // in flight or a brand-new chat), network errors = transient.
+          // Leave blocks empty rather than blanking what's on screen.
         }
       })();
       return () => {
