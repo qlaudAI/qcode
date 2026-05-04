@@ -74,43 +74,87 @@ After re-testing with non-credential-flavored prompts (the original
   /v1/messages rejects it. Either accept case-insensitive, or
   document the canonical lowercase slug.
 
-## Recommended product shape
+## Recommended product shape — DUAL ENGINE
 
-**Headline: qlaud edge translation upgrades are the universal lever,
-not adding a second engine.** Adding Codex CLI does not unlock any
-Tier 3 provider — the same translation gaps exist regardless of
-whether the request enters qlaud as Anthropic-shape (claude-code)
-or OpenAI-shape (codex). The bugs are in the *exit* translation
-(qlaud → Gemini/Qwen/Kimi native protocols), not the entry shape.
+**Headline: Codex CLI as a second engine unblocks all 4 Tier 3
+providers TODAY, no qlaud edge work required.** This is the
+opposite of my first hypothesis — the failing providers work
+fine via qlaud's `/v1/chat/completions` endpoint (OpenAI shape).
+The bugs are localized to qlaud's `/v1/messages` endpoint
+(Anthropic shape), which is less battle-tested because Anthropic-
+to-provider-native translation has more bridge code than the
+OpenAI-to-provider-native path.
+
+Direct test that established this — same 4 failing providers
+hit via `/v1/chat/completions` with a tool definition:
+
+```
+✅ gemini-3-pro-preview  → tool_call returned WITH thought_signature
+                            in extra_content.google
+✅ qwen-coder-plus       → standard OpenAI tool_calls (✿TASK✿ text
+                            problem only appears on /v1/messages)
+✅ kimi-k2.6             → standard OpenAI tool_calls (no
+                            reasoning_content error)
+✅ MiniMax-M2            → standard OpenAI tool_calls
+```
 
 What this means concretely:
 
-- ✅ **Phase 1 (today):** Ship claude-code engine with the 8 Tier 1
-  models in the picker. 67% of catalog working with zero new
-  engineering.
+- ✅ **Phase 1 (today):** Ship claude-code engine with 8 Tier 1
+  models. 67% of catalog with zero new engineering.
 
-- ⏩ **Phase 2 (qlaud edge):** Four targeted translation fixes
-  unblock the remaining four providers. Same effort whether the
-  entry shape is Anthropic or OpenAI.
+- ✅ **Phase 2 (next):** Add Codex CLI as a second engine bound
+  to the 4 Tier 3 models. Together with Phase 1 = 12/12 catalog
+  working. Engine routing:
 
-  - `apps/edge/src/routes/messages.ts` (or chat-completions.ts)
+  ```ts
+  const engineForModel = (slug: string): 'claude-code' | 'codex' => {
+    // Anthropic + OpenAI + xAI + DeepSeek — full tool use via
+    // qlaud's /v1/messages endpoint
+    if (/^(claude|gpt|grok|deepseek)/.test(slug)) return 'claude-code';
+    // Gemini, Qwen, Kimi, MiniMax — qlaud's /v1/messages tool-replay
+    // translation drops fields these providers require. Route via
+    // Codex's /v1/chat/completions path which handles them cleanly.
+    return 'codex';
+  };
+  ```
+
+- ⏩ **Phase 3 (optional, future):** Fix qlaud's `/v1/messages`
+  Anthropic-shape translation to handle the same providers
+  cleanly. Would let claude-code be the single engine for the
+  whole catalog. Not blocking — Phase 2 already gets us there
+  with two engines.
+
+  - `apps/edge/src/routes/messages.ts`
   - Gemini: preserve `thought_signature` from prior response when
-    forwarding tool replays. Affects follow-up turns only.
+    forwarding tool replays.
   - Qwen: detect `✿TASK✿/✿ARGS✿` in response text and emit as
     proper `tool_use` content blocks.
   - Kimi: preserve `reasoning_content` field on the round-trip
     when thinking mode is enabled.
-  - MiniMax: lowercase or pre-canonicalize the slug at the
-    catalog/route boundary.
+  - MiniMax: lowercase / pre-canonicalize slug at route boundary.
 
-- 🟡 **Phase 3 (optional, perf-only):** Add Codex CLI as a second
-  engine specifically for OpenAI models. Native OpenAI passthrough
-  saves ~50-200ms per turn vs Anthropic-shape translation. NOT
-  required for any provider to work — pure latency optimization.
-  ```ts
-  const engineForModel = (slug: string): 'claude-code' | 'codex' =>
-    /^(gpt|o[0-9])/.test(slug) ? 'codex' : 'claude-code';
-  ```
+## Codex spawn config
+
+Per qlaud's published docs:
+
+```toml
+# ~/.codex/config.toml
+[model_providers.qlaud]
+name = "qlaud"
+base_url = "https://api.qlaud.ai/v1"
+env_key = "QLAUD_API_KEY"
+wire_api = "chat"
+
+model_provider = "qlaud"
+model = "gpt-5.4"
+```
+
+For qcode, we'd write this config dynamically per session (with
+the right model slug + the user's qlaud key) and spawn `codex`
+similarly to how `claude` is spawned today. The same per-platform
+sidecar bundling pattern (codex binary in `src-tauri/binaries/`)
+keeps the zero-prereq UX.
 
 ## What we did NOT test
 
