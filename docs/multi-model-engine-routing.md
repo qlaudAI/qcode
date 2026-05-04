@@ -104,8 +104,10 @@ What this means concretely:
   models. 67% of catalog with zero new engineering.
 
 - ✅ **Phase 2 (next):** Add Codex CLI as a second engine bound
-  to the 4 Tier 3 models. Together with Phase 1 = 12/12 catalog
-  working. Engine routing:
+  to the 4 Tier 3 models. Together with Phase 1 = **12/12 catalog
+  working — confirmed end-to-end agentic multi-turn (read_file
+  tool → tool_result replay → final response with file content)
+  for Gemini, Qwen, Kimi, MiniMax.** Engine routing:
 
   ```ts
   const engineForModel = (slug: string): 'claude-code' | 'codex' => {
