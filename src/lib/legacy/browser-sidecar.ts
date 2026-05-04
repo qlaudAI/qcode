@@ -26,7 +26,7 @@
 
 import { type Child, Command } from '@tauri-apps/plugin-shell';
 
-import { getPlatform } from './tauri';
+import { getPlatform } from '../tauri';
 
 type JsonRpcRequest = {
   jsonrpc: '2.0';

@@ -18,7 +18,11 @@
         { "name": "powershell", "cmd": "powershell", "args": true },
         { "name": "npx", "cmd": "npx", "args": true },
         { "name": "npx.cmd", "cmd": "npx.cmd", "args": true },
-        { "name": "node", "cmd": "node", "args": true }
+        { "name": "node", "cmd": "node", "args": true },
+        { "name": "claude", "cmd": "claude", "args": true },
+        { "name": "codex", "cmd": "codex", "args": true },
+        { "name": "qwen", "cmd": "qwen", "args": true },
+        { "name": "aider", "cmd": "aider", "args": true }
       ]
     },
     {
@@ -32,7 +36,11 @@
         { "name": "powershell", "cmd": "powershell", "args": true },
         { "name": "npx", "cmd": "npx", "args": true },
         { "name": "npx.cmd", "cmd": "npx.cmd", "args": true },
-        { "name": "node", "cmd": "node", "args": true }
+        { "name": "node", "cmd": "node", "args": true },
+        { "name": "claude", "cmd": "claude", "args": true },
+        { "name": "codex", "cmd": "codex", "args": true },
+        { "name": "qwen", "cmd": "qwen", "args": true },
+        { "name": "aider", "cmd": "aider", "args": true }
       ]
     },
     "shell:allow-stdin-write",

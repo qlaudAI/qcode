@@ -16,11 +16,12 @@ import {
   Square,
   X,
 } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
 
-import { isTauri } from '../lib/tauri';
+import { isTauri, openExternal } from '../lib/tauri';
 import { posthog } from '../lib/analytics';
 
-import { runThreadAgent, type AgentEvent } from '../lib/agent';
+import { runThreadAgent, type AgentEvent } from '../lib/legacy/agent';
 import { buildAttachmentContext } from '../lib/attachments';
 import { cn } from '../lib/cn';
 import { type AttachedImage } from '../lib/images';
@@ -32,7 +33,7 @@ import {
   type AttachedFile,
   type AttachedText,
 } from '../lib/uploads';
-import { getProjectMemory, type ProjectMemory } from '../lib/memory';
+import { getProjectMemory, type ProjectMemory } from '../lib/legacy/memory';
 import { MODELS, contextWindowFor } from '../lib/models';
 import { planToAgentHandoff, setLastMode } from '../lib/mode-tracking';
 import { getSettings } from '../lib/settings';
@@ -40,7 +41,7 @@ import type { ContentBlock, Message } from '../lib/qlaud-client';
 import { type CompactionInfo } from '../lib/threads';
 import { useThreadMessagesQuery } from '../lib/queries';
 import { QlaudMark } from './QlaudMark';
-import type { ApprovalDecision, ApprovalRequest } from '../lib/tools';
+import type { ApprovalDecision, ApprovalRequest } from '../lib/legacy/tools';
 import {
   registerApproval,
   rejectAllApprovals,
@@ -51,14 +52,14 @@ import {
   listAllFiles,
 } from '../lib/workspace';
 import { readGitInfo } from '../lib/git-info';
-import { ApprovalCard } from './ApprovalCard';
+import { ApprovalCard } from './legacy/ApprovalCard';
 import { Markdown } from './Markdown';
 import { MentionMenu, getMentionResults } from './MentionMenu';
 import {
   ToolCallCard,
   aggregateDiffStats,
   type ToolCallView,
-} from './ToolCallCard';
+} from './legacy/ToolCallCard';
 import { RightRail, type RightRailView } from './RightRail';
 import { invalidateThreadMessages, loadEarlierMessages } from '../lib/queries';
 import {
@@ -346,6 +347,57 @@ export function ChatSurface({
       lastLoadedRef.current = null;
       return;
     }
+
+    // Engine Mode rehydrate. When engine === 'claude-code' the
+    // qcode-legacy path's messagesQuery returns nothing because the
+    // conversation never went through `/v1/threads/:id/messages`.
+    // But qlaud edge mirrors Engine Mode requests into the SAME
+    // `thread_messages` table (keyed by Claude's session id), so we
+    // can read the conversation back via the standard
+    // `GET /v1/threads/:sid/messages` endpoint with full seq pagination
+    // and ownership checks. Same data shape ChatSurface already
+    // renders for the legacy path → historyToBlocks works unchanged.
+    const engine = getSettings().engine;
+    if (engine === 'claude-code') {
+      if (lastLoadedRef.current === threadId) return;
+      lastLoadedRef.current = threadId;
+      let cancelled = false;
+      void (async () => {
+        const [{ getClaudeSessionId }, { getRemoteThreadMessages }] =
+          await Promise.all([
+            import('../lib/engines/claude-code'),
+            import('../lib/threads'),
+          ]);
+        const sessionId = getClaudeSessionId(threadId);
+        if (!sessionId) {
+          // Fresh thread, claude hasn't written any session yet —
+          // first send populates the session and the next reload
+          // restores from D1.
+          setBlocks([]);
+          return;
+        }
+        try {
+          const result = await getRemoteThreadMessages(sessionId, {
+            limit: 200,
+          });
+          if (cancelled) return;
+          if (result.messages.length > 0) {
+            setBlocks(historyToBlocks(result.messages));
+          } else {
+            setBlocks([]);
+          }
+        } catch {
+          // 404 = session never had a write yet (first turn in flight),
+          // network errors = transient. Either way leave blocks empty
+          // rather than blanking what's on screen.
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    // Legacy path — qlaud-thread fetch.
     if (!messagesQuery.data) return;
     // Normal navigation: skip if we've already rendered this thread
     // once (avoids the post-send overwrite that strips usage pills).
@@ -598,50 +650,87 @@ export function ChatSurface({
       if (runId !== activeRunIdRef.current) return;
 
       const settingsAtSend = getSettings();
-      await runThreadAgent({
-        threadId: id,
-        model,
-        mode,
-        workspace: workspace?.path ?? null,
-        content: userContent,
-        // Read at send time so toggling the setting takes effect on
-        // the very next turn without a remount.
-        enableConnectors: settingsAtSend.enableConnectors,
-        autoApprove: settingsAtSend.autoApprove,
-        autoCommit: settingsAtSend.autoCommit,
-        signal: abortRef.current.signal,
-        onEvent: (e) => {
-          // Stale-run guard: drop events from any run that's been
-          // superseded (user switched threads, aborted, re-sent).
-          // Without this, a late tool_done from an aborted thread
-          // mutates the active thread's blocks.
-          if (runId !== activeRunIdRef.current) return;
-          // Track that *something* arrived so we can detect "stream
-          // returned 200 but produced zero events" — a silent failure
-          // mode where the user sees nothing happen on send.
-          eventsSeen += 1;
-          if (e.type === 'finished') {
-            finished = {
-              usage: e.usage,
-              costUsd: e.costUsd,
-              seq: e.seq,
-            };
-          }
-          handleEvent(e, setBlocks);
-        },
-        onApproval: (toolUseId, _request) =>
-          new Promise<ApprovalDecision>((resolve) => {
-            // If this run is no longer active by the time the model
-            // asks for approval, auto-reject so the executor can
-            // unwind. Otherwise the user would see an approval card
-            // for a turn they already abandoned.
-            if (runId !== activeRunIdRef.current) {
-              resolve('reject');
-              return;
-            }
-            registerApproval(toolUseId, resolve);
-          }),
-      });
+
+      // Engine Mode branch. With settings.engine === 'claude-code'
+      // we spawn the official Claude Code CLI inside the user's
+      // workspace, with ANTHROPIC_BASE_URL pointing at qlaud, and
+      // surface its stream-json output via the same AgentEvent
+      // pipeline. Anthropic owns the agent loop; qlaud is the
+      // transport. See src/lib/engines/claude-code.ts.
+      //
+      // Critical: the legacy path requires a thread persisted on the
+      // qlaud edge. The Claude Code path persists nothing server-side
+      // for the conversation state — claude stores it on disk via
+      // its session_id. Both still need a workspace open (claude
+      // can't usefully run without one).
+      const sharedOnEvent = (e: AgentEvent) => {
+        // Stale-run guard: drop events from any run that's been
+        // superseded (user switched threads, aborted, re-sent).
+        // Without this, a late tool_done from an aborted thread
+        // mutates the active thread's blocks.
+        if (runId !== activeRunIdRef.current) return;
+        // Track that *something* arrived so we can detect "stream
+        // returned 200 but produced zero events" — a silent failure
+        // mode where the user sees nothing happen on send.
+        eventsSeen += 1;
+        if (e.type === 'finished') {
+          finished = {
+            usage: e.usage,
+            costUsd: e.costUsd,
+            seq: e.seq,
+          };
+        }
+        handleEvent(e, setBlocks);
+      };
+
+      if (settingsAtSend.engine === 'claude-code') {
+        if (!workspace?.path) {
+          sharedOnEvent({
+            type: 'error',
+            message:
+              'Claude Code engine needs an open workspace folder. Open one (⌘O) and resend.',
+          });
+        } else {
+          const { runEngineClaudeCode, getClaudeSessionId, setClaudeSessionId } =
+            await import('../lib/engines/claude-code');
+          await runEngineClaudeCode({
+            sessionId: getClaudeSessionId(id),
+            onSessionId: (sid) => setClaudeSessionId(id, sid),
+            model,
+            workspace: workspace.path,
+            content: userContent,
+            signal: abortRef.current.signal,
+            onEvent: sharedOnEvent,
+          });
+        }
+      } else {
+        await runThreadAgent({
+          threadId: id,
+          model,
+          mode,
+          workspace: workspace?.path ?? null,
+          content: userContent,
+          // Read at send time so toggling the setting takes effect on
+          // the very next turn without a remount.
+          enableConnectors: settingsAtSend.enableConnectors,
+          autoApprove: settingsAtSend.autoApprove,
+          autoCommit: settingsAtSend.autoCommit,
+          signal: abortRef.current.signal,
+          onEvent: sharedOnEvent,
+          onApproval: (toolUseId, _request) =>
+            new Promise<ApprovalDecision>((resolve) => {
+              // If this run is no longer active by the time the model
+              // asks for approval, auto-reject so the executor can
+              // unwind. Otherwise the user would see an approval card
+              // for a turn they already abandoned.
+              if (runId !== activeRunIdRef.current) {
+                resolve('reject');
+                return;
+              }
+              registerApproval(toolUseId, resolve);
+            }),
+        });
+      }
 
       // Per-thread state updates fire regardless of which thread
       // the UI is currently showing — the title/mode/balance belong
@@ -756,10 +845,23 @@ export function ChatSurface({
 
   const empty = blocks.length === 0;
 
+  // Top-of-chat activity pill: when the agent is mid-turn and a
+  // tool is running, show a sticky pill at the top of the scroll
+  // viewport so the user knows what's happening even after they
+  // scroll up to read earlier turns. Mirrors the inline TypingDots
+  // activity but with always-visible affordance.
+  const stickyActivity = busy ? deriveCurrentActivity(blocks) : null;
+  // Derive the latest detected dev-server URL from bash outputs in
+  // this thread. When set, surface a "Browse →" chip near the
+  // activity pill so the user can click straight to the running
+  // server (Vite/Next/Astro/etc. — port-agnostic).
+  const detectedDevUrl = useMemo(() => deriveDevServerUrl(blocks), [blocks]);
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div ref={scrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto">
+        <StickyActivityBar activity={stickyActivity} devUrl={detectedDevUrl} />
         <div className="mx-auto w-full max-w-3xl px-3 py-6 sm:px-4 sm:py-8">
           {empty ? (
             <EmptyState
@@ -772,7 +874,13 @@ export function ChatSurface({
               onPick={(s) => setInput(s)}
             />
           ) : (
-            <div className="flex flex-col gap-5">
+            // Vertical rhythm: each row owns its top margin (no
+            // parent gap-) so we can give DIFFERENT spacing within
+            // a turn (text → tool → text, tight) vs across turns
+            // (user_text → assistant, breathe). The turn-boundary
+            // class is set per row below based on its relationship
+            // to the predecessor.
+            <div className="flex flex-col">
               {messagesQuery.data?.hasMore && threadId && (
                 <LoadEarlierButton threadId={threadId} />
               )}
@@ -786,36 +894,92 @@ export function ChatSurface({
                 />
               )}
               <TodoListPanel blocks={blocks} />
-              {groupBlocks(blocks).map((group, gi) => {
-                if (group.type === 'tool-bundle') {
+              {(() => {
+                const groups = groupBlocks(blocks);
+                // Track the prior group's "side" — 'user' or
+                // 'assistant'. Anything that isn't user_text reads
+                // as the assistant's response stream (tool dispatch,
+                // tool bundle, assistant text, subagent, finished
+                // marker, error, etc. — all part of the response).
+                let prevSide: 'user' | 'assistant' | null = null;
+                return groups.map((group, gi) => {
+                  const groupSide: 'user' | 'assistant' =
+                    group.type === 'single' && group.block.type === 'user_text'
+                      ? 'user'
+                      : 'assistant';
+                  // Turn boundaries: user_text appears, OR an
+                  // assistant block follows a user_text. Between
+                  // turns we breathe (mt-10 = 40px); within a turn
+                  // (assistant→assistant) we keep tight (mt-3 = 12px).
+                  // First row has no top margin.
+                  const isTurnBoundary =
+                    gi !== 0 &&
+                    (groupSide !== prevSide || groupSide === 'user');
+                  const marginClass =
+                    gi === 0 ? '' : isTurnBoundary ? 'mt-10' : 'mt-3';
+                  prevSide = groupSide;
+
+                  if (group.type === 'tool-bundle') {
+                    return (
+                      <div key={`bundle-${gi}`} className={marginClass}>
+                        <ToolBundle
+                          tools={group.tools}
+                          workspace={workspacePath ?? null}
+                        />
+                      </div>
+                    );
+                  }
+                  const b = group.block;
+                  const i = group.index;
+                  // Subtle entry per row: user messages slide in from
+                  // the right (matching the bubble's alignment),
+                  // everything else fades up. motion's `initial` only
+                  // runs on first mount so existing rows don't
+                  // re-animate on each text-delta.
+                  const isUser = b.type === 'user_text';
+                  // Contextual typing indicator. When the agent is
+                  // mid-turn AND a tool is currently running, surface
+                  // "Reading src/foo.ts..." instead of generic dots —
+                  // the same lived-in feel Codex/Claude.ai have. Only
+                  // computed for the LAST block (where TypingDots
+                  // would render) to avoid useless work elsewhere.
+                  const isLast = i === blocks.length - 1;
+                  const activity =
+                    isLast && busy ? deriveCurrentActivity(blocks) : null;
                   return (
-                    <ToolBundle
-                      key={`bundle-${gi}`}
-                      tools={group.tools}
-                      workspace={workspacePath ?? null}
-                    />
+                    <motion.div
+                      key={i}
+                      className={marginClass}
+                      initial={{
+                        opacity: 0,
+                        x: isUser ? 8 : 0,
+                        y: isUser ? 0 : 4,
+                      }}
+                      animate={{ opacity: 1, x: 0, y: 0 }}
+                      transition={{
+                        duration: 0.22,
+                        ease: [0.32, 0.72, 0, 1],
+                      }}
+                    >
+                      <BlockRow
+                        block={b}
+                        workspace={workspacePath ?? null}
+                        busy={busy && isLast}
+                        activity={activity}
+                        onAllow={() =>
+                          b.type === 'approval' ? decide(b.id, 'allow') : undefined
+                        }
+                        onReject={() =>
+                          b.type === 'approval' ? decide(b.id, 'reject') : undefined
+                        }
+                        onRetry={() => {
+                          if (b.type === 'error' && b.retry) retry(b.retry);
+                        }}
+                      />
+                    </motion.div>
                   );
-                }
-                const b = group.block;
-                const i = group.index;
-                return (
-                  <BlockRow
-                    key={i}
-                    block={b}
-                    workspace={workspacePath ?? null}
-                    busy={busy && i === blocks.length - 1}
-                    onAllow={() =>
-                      b.type === 'approval' ? decide(b.id, 'allow') : undefined
-                    }
-                    onReject={() =>
-                      b.type === 'approval' ? decide(b.id, 'reject') : undefined
-                    }
-                    onRetry={() => {
-                      if (b.type === 'error' && b.retry) retry(b.retry);
-                    }}
-                  />
-                );
-              })}
+                });
+              })()}
             </div>
           )}
         </div>
@@ -1427,6 +1591,7 @@ function BlockRow({
   block,
   busy,
   workspace,
+  activity,
   onAllow,
   onReject,
   onRetry,
@@ -1434,6 +1599,12 @@ function BlockRow({
   block: RenderBlock;
   busy: boolean;
   workspace: string | null;
+  /** Optional contextual activity string. When the agent is mid-turn
+   *  and a tool is running, this carries a phrase like
+   *  "Reading src/foo.ts..." or "Running `pnpm test`...". The
+   *  TypingDots component renders it in place of generic dots so
+   *  the user sees what's actually happening, not just "..." */
+  activity?: string | null;
   onAllow?: () => void;
   onReject?: () => void;
   onRetry?: () => void;
@@ -1605,7 +1776,7 @@ function BlockRow({
         <Avatar />
         <div className="flex-1 pt-0.5">
           {block.skill && <SkillAttribution skill={block.skill} model={block.resolvedModel} />}
-          <TypingDots />
+          <TypingDots activity={activity ?? null} />
         </div>
       </div>
     );
@@ -1616,7 +1787,7 @@ function BlockRow({
       <Avatar />
       <div className="flex-1 pt-0.5">
         {block.skill && <SkillAttribution skill={block.skill} model={block.resolvedModel} />}
-        <Markdown source={block.text} />
+        <Markdown source={block.text} streaming={busy} />
       </div>
     </div>
   );
@@ -1689,6 +1860,108 @@ const THINKING_QUIPS = [
   'Yes, it works on my machine.',
 ];
 
+// ─── Contextual activity derivation ───────────────────────────────
+//
+// While the agent is mid-turn, peek the blocks list for the LAST
+// running tool call and turn it into a human-readable phrase the
+// TypingDots component can surface in place of generic dots.
+// Returns null when no tool is currently running — the indicator
+// then shows dots + the ambient quip rotation.
+//
+// Phrasing is intentionally specific ("Reading src/foo.ts" not
+// "Working with files") because specific reads as competent and
+// generic reads as vague. Truncation caps long inputs so a giant
+// path or shell command doesn't overflow the bubble.
+function deriveCurrentActivity(blocks: RenderBlock[]): string | null {
+  // Walk from the end — the most recent running tool wins. Tools
+  // can finish-then-restart in chains, so we want what's running
+  // RIGHT NOW, not the first running one we find.
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    if (!b) continue;
+    if (b.type === 'tool' && b.call.status === 'running') {
+      return phraseForTool(b.call.name, b.call.input);
+    }
+    if (b.type === 'subagent' && b.status === 'running') {
+      return `${b.agentLabel}: ${truncate(b.description, 60)}`;
+    }
+  }
+  return null;
+}
+
+function phraseForTool(name: string, input: unknown): string {
+  const inp = (input ?? {}) as Record<string, unknown>;
+  const str = (key: string): string =>
+    typeof inp[key] === 'string' ? (inp[key] as string) : '';
+  switch (name) {
+    case 'read_file':
+      return `Reading ${truncate(str('path'), 50) || 'file'}…`;
+    case 'write_file':
+      return `Writing ${truncate(str('path'), 50) || 'file'}…`;
+    case 'edit_file':
+      return `Editing ${truncate(str('path'), 50) || 'file'}…`;
+    case 'list_files':
+      return `Listing ${truncate(str('path') || str('dir'), 50) || 'workspace'}…`;
+    case 'glob':
+      return `Searching for ${truncate(str('pattern'), 50) || 'files'}…`;
+    case 'grep':
+      return `Searching for "${truncate(str('pattern'), 50) || ''}"`;
+    case 'bash':
+      return `Running ${truncate(formatCmd(str('command')), 60)}`;
+    case 'verify':
+      return 'Running verify…';
+    case 'browser_navigate':
+      return `Loading ${truncate(str('url'), 50) || 'page'}…`;
+    case 'browser_snapshot':
+      return 'Capturing page snapshot…';
+    case 'browser_screenshot':
+      return 'Taking screenshot…';
+    case 'browser_click':
+      return 'Clicking element…';
+    case 'browser_type':
+      return 'Typing into field…';
+    case 'browser_console':
+      return 'Reading console…';
+    case 'task': {
+      const desc = str('description');
+      return desc ? `Spawning subagent: ${truncate(desc, 50)}` : 'Spawning subagent…';
+    }
+    case 'todo_write':
+      return 'Updating tasks…';
+    case 'skill':
+      return `Loading skill: ${truncate(str('name'), 40)}`;
+    case 'enter_plan_mode':
+      return 'Entering plan mode…';
+    case 'exit_plan_mode':
+      return 'Submitting plan…';
+    case 'qlaud_search_tools':
+      return 'Searching available tools…';
+    case 'qlaud_get_tool_schemas':
+      return 'Loading tool schemas…';
+    case 'qlaud_multi_execute':
+      return 'Executing tools…';
+    case 'qlaud_manage_connections':
+      return 'Managing connections…';
+    default:
+      return `Running ${name}…`;
+  }
+}
+
+/** Format a shell command for display: prefix in backticks, drop
+ *  the noise of common shell prefixes that don't tell the user
+ *  anything ("bash -c", piping noise). Conservative — keeps the
+ *  string truthful. */
+function formatCmd(command: string): string {
+  if (!command) return '`bash`';
+  return `\`${command}\``;
+}
+
+function truncate(s: string, n: number): string {
+  if (!s) return '';
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + '…';
+}
+
 function shuffled<T>(arr: readonly T[]): T[] {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
@@ -1698,12 +1971,99 @@ function shuffled<T>(arr: readonly T[]): T[] {
   return a;
 }
 
-// Animated typing-dots, plus a light one-liner that fades in only
-// after 6s of silence (so fast turns never see it). Rotates every
-// 5s for as long as the agent is still thinking. Jokes are ambient
-// — they're the side-character, not the headliner. Cap visible
-// length so a long quip doesn't reflow the bubble.
-function TypingDots() {
+// ─── Dev-server URL detection ─────────────────────────────────────
+//
+// Watches bash tool outputs in the current conversation for the
+// "Local: http://localhost:5173" / "ready on http://localhost:3000"
+// startup banners every dev server prints. Returns the most recent
+// match — port-agnostic, framework-agnostic. Vite, Next, Astro,
+// Storybook, Remix, Nuxt, SvelteKit, Tauri's vite, all match the
+// same regex. Refs the last match so the chip surfaces immediately
+// after `pnpm dev` lands and stays available across follow-up turns.
+const DEV_URL_RE =
+  /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d{2,5})?(?:\/[^\s'"<>)]*)?/g;
+function deriveDevServerUrl(blocks: RenderBlock[]): string | null {
+  // Walk newest-first so a fresh dev-server output overrides an
+  // older one (npm scripts that restart on changes).
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    if (!b || b.type !== 'tool') continue;
+    if (b.call.name !== 'bash' && b.call.name !== 'verify') continue;
+    const out = b.call.output ?? '';
+    if (!out) continue;
+    const matches = Array.from(out.matchAll(DEV_URL_RE));
+    if (matches.length === 0) continue;
+    // Prefer the LAST match in the output (dev servers print
+    // status lines repeatedly; the latest "ready" line wins).
+    const last = matches[matches.length - 1]?.[0];
+    if (last) return last.replace(/[.,;)]+$/, '');
+  }
+  return null;
+}
+
+// ─── Sticky activity bar ─────────────────────────────────────────
+//
+// Always-visible status surface at the top of the chat viewport.
+// Shows the current tool activity (if any) AND the detected dev
+// server URL (if any). Both fade in/out so the bar stays out of
+// the way when nothing is happening — same posture Codex's
+// "what's running now" pill takes.
+
+function StickyActivityBar({
+  activity,
+  devUrl,
+}: {
+  activity: string | null;
+  devUrl: string | null;
+}) {
+  const visible = !!activity || !!devUrl;
+  return (
+    <AnimatePresence initial={false}>
+      {visible && (
+        <motion.div
+          key="sticky-activity"
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={{ duration: 0.18, ease: [0.32, 0.72, 0, 1] }}
+          className="sticky top-2 z-20 mx-auto flex w-full max-w-3xl flex-wrap items-center justify-end gap-2 px-3 sm:px-4"
+        >
+          {activity && (
+            <div className="flex items-center gap-2 rounded-full border border-border/60 bg-background/85 px-3 py-1 text-[11.5px] text-foreground/80 shadow-sm backdrop-blur-sm">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/60" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-primary" />
+              </span>
+              <span className="max-w-[280px] truncate">{activity}</span>
+            </div>
+          )}
+          {devUrl && (
+            <button
+              type="button"
+              onClick={() => void openExternal(devUrl)}
+              className="group inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-background/85 px-3 py-1 font-mono text-[11px] text-foreground/85 shadow-sm backdrop-blur-sm transition-all hover:border-primary/60 hover:bg-primary/5 hover:text-foreground"
+              title={`Open ${devUrl} in your browser`}
+            >
+              <span className="text-muted-foreground">↗</span>
+              <span className="max-w-[200px] truncate">{devUrl.replace(/^https?:\/\//, '')}</span>
+            </button>
+          )}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+// Animated typing-dots that ALSO surface what the agent is actually
+// doing. When a tool is running, we render a contextual phrase
+// ("Reading src/foo.ts...", "Running `pnpm test`...") in place of
+// generic dots — the lived-in feel Codex/Claude.ai have. With no
+// active tool, falls back to dots + an ambient quip after 6s.
+//
+// The phrase fades through with motion when the activity changes
+// (different tool starts running) so the indicator FEELS like it
+// tracks the agent's flow rather than blinking abruptly.
+function TypingDots({ activity }: { activity: string | null }) {
   const [phase, setPhase] = useState(0);
   const [showQuip, setShowQuip] = useState(false);
   const quipsRef = useRef<string[]>(shuffled(THINKING_QUIPS));
@@ -1723,12 +2083,28 @@ function TypingDots() {
   const quip = quipsRef.current[phase] ?? '';
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="flex h-5 items-center gap-1">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:0ms]" />
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:200ms]" />
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:400ms]" />
+      <div className="flex min-h-[20px] items-center gap-2">
+        <div className="flex h-5 items-center gap-1">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:0ms]" />
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:200ms]" />
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted-foreground/60 [animation-delay:400ms]" />
+        </div>
+        {activity && (
+          <motion.span
+            // Re-key on activity so React re-mounts and motion runs
+            // its initial → animate transition each time the agent
+            // switches tools. Subtle 140ms slide-in nudges the eye.
+            key={activity}
+            initial={{ opacity: 0, x: -3 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ duration: 0.14, ease: 'easeOut' }}
+            className="truncate text-[12px] text-muted-foreground"
+          >
+            {activity}
+          </motion.span>
+        )}
       </div>
-      {showQuip && (
+      {showQuip && !activity && (
         <span
           key={phase}
           className="qcode-quip max-w-md text-[11.5px] italic leading-snug text-muted-foreground/70"

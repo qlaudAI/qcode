@@ -32,7 +32,7 @@ import {
   streamThreadMessage,
   type ClientToolDef,
   type ContentBlock,
-} from './qlaud-client';
+} from '../qlaud-client';
 import {
   ALL_TOOLS,
   READ_TOOLS,
@@ -43,9 +43,9 @@ import {
   type ToolResult,
 } from './tools';
 import { submitToolResult } from './tool-results';
-import { createRemoteThread } from './threads';
-import { getSettings } from './settings';
-import { posthog } from './analytics';
+import { createRemoteThread } from '../threads';
+import { getSettings } from '../settings';
+import { posthog } from '../analytics';
 
 const SYSTEM_PROMPT_AGENT = `You are qcode, a multi-model coding agent running on the user's desktop.
 
@@ -236,7 +236,7 @@ export type RunThreadAgentOpts = {
   /** Auto-approve mode forwarded to executeTool. Subagents inherit
    *  the parent's mode unless overridden. See lib/settings.ts for
    *  the yolo/smart/strict semantics. */
-  autoApprove?: import('./settings').AutoApproveMode;
+  autoApprove?: import('../settings').AutoApproveMode;
   /** When true, snapshot working-tree state at turn start and commit
    *  the agent's writes when the turn ends. Skipped on non-git folders,
    *  pre-existing dirty trees, and special git states (merge/rebase/
@@ -795,7 +795,7 @@ async function safeSubmit(
     console.warn(
       `[agent] submitToolResult failed for tool_use_id=${toolUseId}: ${reason}`,
     );
-    void import('./analytics').then((a) =>
+    void import('../analytics').then((a) =>
       a.posthog.capture('tool_result_post_failed', {
         thread_id: threadId,
         tool_use_id: toolUseId,
@@ -842,7 +842,7 @@ async function runSubagentForTask(args: {
     toolUseId: string,
     request: ApprovalRequest,
   ) => Promise<ApprovalDecision>;
-  autoApprove?: import('./settings').AutoApproveMode;
+  autoApprove?: import('../settings').AutoApproveMode;
   /** When set, dispatch into THIS existing subagent thread instead of
    *  spawning a new one. The prompt is appended as a follow-up turn
    *  with the agent's full prior context (files it read, decisions

@@ -26,7 +26,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '../lib/cn';
 import { readWorkspaceDiff, type FileDiff } from '../lib/git-info';
 import { FileTree } from './FileTree';
-import type { ToolCallView } from './ToolCallCard';
+import type { ToolCallView } from './legacy/ToolCallCard';
 
 export type RightRailView =
   | 'tasks'

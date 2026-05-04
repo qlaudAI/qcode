@@ -22,8 +22,9 @@ import {
   Terminal,
   Wrench,
 } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
 
-import { cn } from '../lib/cn';
+import { cn } from '../../lib/cn';
 import { BashView } from './tool-output/BashView';
 import { BrowserView } from './tool-output/BrowserView';
 import { GlobView } from './tool-output/GlobView';
@@ -109,7 +110,14 @@ export function ToolCallCard({
   }
 
   return (
-    <div
+    <motion.div
+      // Subtle entry — tool cards arrive mid-stream; a tiny lift +
+      // fade keeps the eye anchored on the new card without the
+      // jolt of an instant pop-in. Initial state only fires on
+      // first mount; status flips (running → done) DON'T re-trigger.
+      initial={{ opacity: 0, y: -3 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.18, ease: 'easeOut' }}
       className={cn(
         'overflow-hidden bg-background/70 backdrop-blur-sm transition-colors',
         // Embedded inside a ToolBundle: drop the outer border so a
@@ -131,7 +139,7 @@ export function ToolCallCard({
         onClick={() => hasOutput && setOpen(!effectivelyOpen)}
         disabled={!hasOutput}
         className={cn(
-          'flex w-full items-center gap-2.5 text-left',
+          'flex w-full items-center gap-2.5 text-left transition-colors',
           embedded ? 'px-2 py-1' : 'px-3 py-2',
           hasOutput && 'cursor-pointer hover:bg-muted/40',
           !hasOutput && 'cursor-default',
@@ -146,27 +154,45 @@ export function ToolCallCard({
             </span>
             <SummaryRow summary={summary} />
             {streaming && (
-              <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
-                live
-              </span>
+              <motion.span
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ duration: 0.2, ease: 'easeOut' }}
+                className="shrink-0 rounded-full bg-primary/15 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-primary"
+              >
+                <span className="inline-block animate-pulse">●</span> live
+              </motion.span>
             )}
           </div>
         </div>
         {hasOutput && (
-          <ChevronRight
-            className={cn(
-              'h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform',
-              effectivelyOpen && 'rotate-90',
-            )}
-          />
+          <motion.span
+            animate={{ rotate: effectivelyOpen ? 90 : 0 }}
+            transition={{ duration: 0.18, ease: [0.32, 0.72, 0, 1] }}
+            className="inline-flex shrink-0 text-muted-foreground"
+          >
+            <ChevronRight className="h-3.5 w-3.5" />
+          </motion.span>
         )}
       </button>
-      {effectivelyOpen && hasOutput && (
-        <div className="border-t border-border/40 bg-muted/20">
-          <Output call={call} />
-        </div>
-      )}
-    </div>
+      <AnimatePresence initial={false}>
+        {effectivelyOpen && hasOutput && (
+          <motion.div
+            key="content"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{
+              height: { duration: 0.22, ease: [0.32, 0.72, 0, 1] },
+              opacity: { duration: 0.16, ease: 'easeOut' },
+            }}
+            className="overflow-hidden border-t border-border/40 bg-muted/20"
+          >
+            <Output call={call} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
   );
 }
 

@@ -22,12 +22,12 @@ import {
   firstImage,
   textOf,
 } from './browser-sidecar';
-import { computeDiff, type DiffLine } from './diff';
-import type { IgnoreMatcher } from './gitignore';
+import { computeDiff, type DiffLine } from '../diff';
+import type { IgnoreMatcher } from '../gitignore';
 import { runHook } from './hooks';
-import { hasRipgrep, rgGlob, rgGrep } from './ripgrep';
-import { isTauri } from './tauri';
-import { getMatcher } from './workspace';
+import { hasRipgrep, rgGlob, rgGrep } from '../ripgrep';
+import { isTauri } from '../tauri';
+import { getMatcher } from '../workspace';
 
 // Anthropic-shape tool definition. Sent verbatim to /v1/messages.
 export type ToolDef = {
@@ -624,7 +624,7 @@ const BASH_SAFE_PATTERNS: RegExp[] = [
 /** Whether write_file / edit_file should bypass the approval prompt.
  *  yolo + smart auto-approve workspace writes (the path-jail already
  *  guarantees the target is inside the open folder); strict prompts. */
-function autoApproveWrite(mode: import('./settings').AutoApproveMode | undefined): boolean {
+function autoApproveWrite(mode: import('../settings').AutoApproveMode | undefined): boolean {
   return mode === 'yolo' || mode === 'smart';
 }
 
@@ -635,7 +635,7 @@ function autoApproveWrite(mode: import('./settings').AutoApproveMode | undefined
  *  in smart so dev servers don't spawn behind your back. strict
  *  prompts for everything. */
 function autoApproveBash(
-  mode: import('./settings').AutoApproveMode | undefined,
+  mode: import('../settings').AutoApproveMode | undefined,
   command: string,
   runInBackground: boolean,
 ): boolean {
@@ -682,7 +682,7 @@ export type ExecuteOpts = {
    *  honors the deny-list); smart auto-approves workspace writes +
    *  safe-bash whitelist; strict prompts for everything. The deny-
    *  list (BASH_DENYLIST, workspace path-jail) always wins regardless. */
-  autoApprove?: import('./settings').AutoApproveMode;
+  autoApprove?: import('../settings').AutoApproveMode;
 };
 
 export async function executeTool(
@@ -1638,7 +1638,7 @@ async function runEnterPlanMode(
   // reads at send time so the next turn picks it up. Cleared via the
   // existing title-bar Plan/Agent toggle if the user wants to bail
   // out of plan mode without going through ExitPlanMode.
-  const { patchSettings } = await import('./settings');
+  const { patchSettings } = await import('../settings');
   patchSettings({ mode: 'plan' });
   return ok(
     call.id,
@@ -1672,7 +1672,7 @@ async function runExitPlanMode(
     );
   }
   // Flip back to agent mode + persist the plan.
-  const { patchSettings } = await import('./settings');
+  const { patchSettings } = await import('../settings');
   patchSettings({ mode: 'agent' });
   let persistedPath = '';
   if (opts.workspace) {

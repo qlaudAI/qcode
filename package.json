@@ -24,9 +24,13 @@
     "@tauri-apps/plugin-updater": "^2.0.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.460.0",
+    "motion": "^12.38.0",
     "posthog-js": "^1.372.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "shiki": "^4.0.2",
     "tailwind-merge": "^2.5.4"
   },
   "devDependencies": {

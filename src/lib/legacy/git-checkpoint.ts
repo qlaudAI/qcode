@@ -16,7 +16,7 @@
 // (forks people's CI, can trigger reviews, can be force-pushed). The
 // user retains control of every push. Auto-commit only.
 
-import { isTauri } from './tauri';
+import { isTauri } from '../tauri';
 
 const COMMIT_AUTHOR = 'qcode <bot@qlaud.ai>';
 

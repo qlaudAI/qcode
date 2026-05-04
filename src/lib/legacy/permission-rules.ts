@@ -26,7 +26,7 @@
 //   - No match → fall through to YOLO/Smart/Strict mode behavior
 
 import { CONFIG_DIR_ALIASES } from './qcode-paths';
-import { isTauri } from './tauri';
+import { isTauri } from '../tauri';
 
 export type PermissionRule = string;
 

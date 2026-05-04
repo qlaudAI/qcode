@@ -14,7 +14,7 @@
 // lines of text; reading it directly is ~free and all of `tauri-
 // plugin-fs` already has read permission for the workspace path.
 
-import { runBashSession } from './bash-session';
+import { runBashSession } from './legacy/bash-session';
 import { isTauri } from './tauri';
 
 export type GitInfo = {

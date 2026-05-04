@@ -7,9 +7,9 @@ import {
   X,
 } from 'lucide-react';
 
-import { cn } from '../lib/cn';
-import type { ApprovalRequest } from '../lib/tools';
-import { DiffView } from './DiffView';
+import { cn } from '../../lib/cn';
+import type { ApprovalRequest } from '../../lib/legacy/tools';
+import { DiffView } from '../DiffView';
 
 export type ApprovalCardProps = {
   request: ApprovalRequest;

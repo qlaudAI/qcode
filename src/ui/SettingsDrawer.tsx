@@ -214,6 +214,44 @@ export function SettingsDrawer({
             </p>
           </Section>
 
+          <Section title="Engine">
+            <div className="flex gap-1.5 rounded-md border border-border bg-background p-1">
+              {(
+                [
+                  { value: 'qcode-legacy', label: 'qcode (legacy)' },
+                  { value: 'claude-code', label: 'Claude Code' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => update('engine', opt.value)}
+                  className={cn(
+                    'flex-1 rounded px-2 py-1 text-[12px] font-medium transition-colors',
+                    settings.engine === opt.value
+                      ? 'bg-foreground text-background'
+                      : 'text-foreground/70 hover:bg-muted',
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              <span className="font-medium text-foreground/80">qcode (legacy)</span>{' '}
+              runs qcode's own agent loop server-side via qlaud's
+              tool-dispatch edge.{' '}
+              <span className="font-medium text-foreground/80">Claude Code</span>{' '}
+              spawns Anthropic's official{' '}
+              <span className="font-mono">claude</span> CLI in your
+              workspace with{' '}
+              <span className="font-mono">ANTHROPIC_BASE_URL</span> pointed
+              at qlaud — the official agent runtime, your usage still
+              shows up in the qlaud dashboard. Requires{' '}
+              <span className="font-mono">claude</span> on your PATH (Engine
+              Mode v0 — multimodal + approval cards land in v1).
+            </p>
+          </Section>
+
           <Section title="Auto-approve">
             <div className="flex gap-1.5 rounded-md border border-border bg-background p-1">
               {(

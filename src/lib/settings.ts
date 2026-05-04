@@ -54,6 +54,19 @@ export type AutoApproveMode = 'yolo' | 'smart' | 'strict';
  *              for choices. Best for unfamiliar codebases or learning. */
 export type OutputStyle = 'default' | 'compact' | 'explain';
 
+/** Engine Mode: which agent runtime drives a turn.
+ *  - 'qcode-legacy' — the homegrown loop in src/lib/legacy/agent.ts
+ *    routed through qlaud's streaming-with-tools edge handler.
+ *    Slated for deletion once Engine Mode wraps cover all flows.
+ *  - 'claude-code' — spawn the official `claude` CLI in the workspace
+ *    with ANTHROPIC_BASE_URL=qlaud. Anthropic's loop, qlaud's gateway.
+ *    Codex / Qwen Code / Aider land as additional members of this
+ *    union once their adapters ship.
+ *  Per-workspace would be ideal eventually, but for v0 a global
+ *  setting keeps the wiring simple — flip the toggle, all sends use
+ *  the chosen engine. */
+export type Engine = 'qcode-legacy' | 'claude-code';
+
 export type Settings = {
   /** Model picked when a new chat is created. The title-bar dropdown
    *  still lets the user override per-thread. */
@@ -105,6 +118,13 @@ export type Settings = {
    *  Forwarded to the server in qlaud_runtime so the system prompt
    *  reflects the choice. */
   outputStyle: OutputStyle;
+  /** Which agent runtime drives a turn. See Engine doc. */
+  engine: Engine;
+  /** Per-thread Claude Code session id, persisted so multi-turn
+   *  conversations chain via `claude --resume <id>`. Claude Code owns
+   *  the conversation state on disk (`~/.claude/projects/...`); qcode
+   *  just remembers the handle. Keyed by qcode threadId. */
+  claudeSessionByThread?: Record<string, string>;
 };
 
 const DEFAULT_SUBAGENT_MODEL = 'claude-haiku-4-5';
@@ -119,6 +139,9 @@ const DEFAULTS: Settings = {
   autoApprove: 'smart',
   autoCommit: false,
   outputStyle: 'default',
+  // Default stays legacy until Engine Mode is proven on real users.
+  // The wrap path (claude-code) ships dark via the engine picker.
+  engine: 'qcode-legacy',
 };
 
 /** Coerce the stored autoApprove value to a tri-state mode. Handles

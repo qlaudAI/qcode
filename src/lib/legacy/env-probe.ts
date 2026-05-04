@@ -18,8 +18,8 @@
 // One pipelined command, parsed by sentinel.
 
 import { runBashSession } from './bash-session';
-import { ripgrepSource } from './ripgrep';
-import { getPlatform, isTauri } from './tauri';
+import { ripgrepSource } from '../ripgrep';
+import { getPlatform, isTauri } from '../tauri';
 
 export type EnvSnapshot = {
   platform: 'macos' | 'linux' | 'windows' | 'unknown';

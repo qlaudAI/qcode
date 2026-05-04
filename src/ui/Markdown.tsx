@@ -1,188 +1,470 @@
-import { useMemo, useState } from 'react';
-import { Check, Copy, FileText } from 'lucide-react';
+import { memo, useEffect, useMemo, useState } from 'react';
+import { Check, Copy, FileText, ExternalLink } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { motion } from 'motion/react';
+import type { Components } from 'react-markdown';
 
 import { cn } from '../lib/cn';
-import { parseMarkdown, type Block, type Inline } from '../lib/markdown';
 import { openExternal } from '../lib/tauri';
 import { getCurrentWorkspace } from '../lib/workspace';
 
-// Renders a parsed markdown block tree. Code blocks get a copy
-// button + language label; everything else is straight text styling.
+// Polished markdown rendering for the chat surface. Targets the
+// quality bar set by Claude.ai and the Codex desktop app:
 //
-// Safety: we never set innerHTML. All rendering goes through React,
-// which escapes by default. Links default to target="_blank" with
-// noopener/noreferrer — the agent runs locally but the URL it
-// emits could be anything.
+//   - GFM (tables, task lists, strikethrough, autolinks) via
+//     remark-gfm — the assistant emits all of these and the old
+//     hand-rolled parser silently dropped them.
+//   - Shiki syntax highlighting for code blocks with language
+//     header, copy button, and a max-height scroll cap. Loaded
+//     lazily on first code block so the cold path doesn't pay
+//     the highlighter weight.
+//   - Smooth fade-in for newly-streamed blocks via motion. Subtle
+//     enough to not feel chatty; just removes the abrupt pop-in.
+//   - Inline file paths (`src/foo.ts:42`) become click-to-open
+//     buttons that hand off to the user's default editor via
+//     openExternal — same UX the old component had, ported.
+//
+// Streaming: the component re-parses on each `source` change, but
+// each block reducer is memoized by its own content. Shiki
+// highlights are cached per (lang, code) pair so a block that
+// finishes streaming doesn't re-highlight on every parent re-render.
+//
+// Safety: react-markdown disables raw HTML by default. shiki output
+// is HTML but shiki escapes its input — the only "unsafe" route is
+// inserting shiki's themed tokens, which are static markup. We do
+// NOT enable rehype-raw or any HTML pass-through.
 
-export function Markdown({ source }: { source: string }) {
-  const blocks = useMemo(() => parseMarkdown(source), [source]);
+export const Markdown = memo(function Markdown({
+  source,
+  streaming = false,
+}: {
+  source: string;
+  /** When true, renders a blinking cursor at the end of the last
+   *  block — the "live typing" affordance Claude.ai and Codex use
+   *  while a turn is in progress. Implemented as a CSS pseudo-
+   *  element on the last child so it lives in the natural inline
+   *  flow of a paragraph (vs floating somewhere awkward). */
+  streaming?: boolean;
+}) {
+  // Pre-process: turn bare workspace-relative `path:line` mentions
+  // into markdown links pointing at a synthetic `qcode-file://`
+  // scheme our link component recognizes. Skips matches inside
+  // fenced code blocks (those start with ``` and end with ```)
+  // because file paths inside code samples should stay literal.
+  const processed = useMemo(() => annotateFileLinks(source), [source]);
   return (
-    <div className="space-y-3 text-sm leading-relaxed text-foreground">
-      {blocks.map((b, i) => (
-        <BlockView key={i} block={b} />
-      ))}
+    <div className={cn('qcode-prose', streaming && 'is-streaming')}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+        {processed}
+      </ReactMarkdown>
     </div>
   );
+});
+
+// ─── File-link pre-processor ─────────────────────────────────────
+//
+// The agent often references files like `src/lib/agent.ts:42`.
+// Transform those into markdown links with a custom href scheme so
+// our `a` component can render them as click-to-open chips.
+//
+// Skips any text inside fenced code blocks (delimited by triple
+// backticks) so paths shown in code samples stay literal.
+function annotateFileLinks(source: string): string {
+  // Match: optional ./ then segment(s) ending in .<ext> with
+  // optional :line suffix. Tight to avoid false positives on URLs
+  // and URL-looking prose. Only triggers on tokens with a clear
+  // file extension.
+  const FILE_RE = /(?<![\w/[(])((?:\.\.?\/)?(?:[\w.-]+\/)*[\w.-]+\.[a-zA-Z0-9]{1,8})(?::(\d+))?(?![\w/])/g;
+  // Split into fenced/non-fenced segments. Fenced regions pass
+  // through verbatim.
+  const parts = source.split(/(```[\s\S]*?```)/g);
+  return parts
+    .map((part, i) => {
+      if (i % 2 === 1) return part; // fenced — leave alone
+      return part.replace(FILE_RE, (match, p, line) => {
+        // Avoid double-wrapping if it's already a markdown link
+        // target — a clumsy heuristic but cheap.
+        return `[${match}](qcode-file:${p}${line ? ':' + line : ''})`;
+      });
+    })
+    .join('');
 }
 
-function BlockView({ block }: { block: Block }) {
-  if (block.type === 'heading') {
-    const Tag = (`h${block.level}` as 'h1' | 'h2' | 'h3') as
-      | 'h1'
-      | 'h2'
-      | 'h3';
-    const classes = {
-      1: 'text-base font-semibold tracking-tight',
-      2: 'text-[15px] font-semibold tracking-tight',
-      3: 'text-[14px] font-semibold tracking-tight',
-    } as const;
-    return <Tag className={classes[block.level]}>{block.text}</Tag>;
-  }
-  if (block.type === 'code_block') {
-    return <CodeBlock lang={block.lang} code={block.code} />;
-  }
-  if (block.type === 'list') {
-    if (block.ordered) {
-      return (
-        <ol className="list-decimal space-y-1 pl-5">
-          {block.items.map((item, i) => (
-            <li key={i}>
-              <Inlines tokens={item} />
-            </li>
-          ))}
-        </ol>
-      );
+// ─── Component overrides ──────────────────────────────────────────
+
+const MARKDOWN_COMPONENTS: Components = {
+  // Headings — visual hierarchy without going huge. Chat bubbles
+  // shouldn't have giant h1s; we cap below the page chrome.
+  h1: ({ children }) => (
+    <FadeBlock>
+      <h1 className="mt-5 mb-3 text-[17px] font-semibold tracking-tight text-foreground first:mt-0">
+        {children}
+      </h1>
+    </FadeBlock>
+  ),
+  h2: ({ children }) => (
+    <FadeBlock>
+      <h2 className="mt-5 mb-2.5 text-[15.5px] font-semibold tracking-tight text-foreground first:mt-0">
+        {children}
+      </h2>
+    </FadeBlock>
+  ),
+  h3: ({ children }) => (
+    <FadeBlock>
+      <h3 className="mt-4 mb-2 text-[14.5px] font-semibold tracking-tight text-foreground first:mt-0">
+        {children}
+      </h3>
+    </FadeBlock>
+  ),
+  h4: ({ children }) => (
+    <FadeBlock>
+      <h4 className="mt-3.5 mb-1.5 text-[13.5px] font-semibold tracking-tight text-foreground first:mt-0">
+        {children}
+      </h4>
+    </FadeBlock>
+  ),
+  h5: ({ children }) => (
+    <FadeBlock>
+      <h5 className="mt-3 mb-1 text-[13px] font-semibold tracking-tight text-foreground/90 first:mt-0">
+        {children}
+      </h5>
+    </FadeBlock>
+  ),
+  h6: ({ children }) => (
+    <FadeBlock>
+      <h6 className="mt-3 mb-1 text-[12.5px] font-semibold uppercase tracking-wider text-muted-foreground first:mt-0">
+        {children}
+      </h6>
+    </FadeBlock>
+  ),
+  p: ({ children }) => (
+    <FadeBlock>
+      <p className="text-[14px] leading-[1.65] text-foreground/90 [&:not(:first-child)]:mt-3">
+        {children}
+      </p>
+    </FadeBlock>
+  ),
+  ul: ({ children }) => (
+    <FadeBlock>
+      <ul className="my-2 list-none space-y-1.5 pl-1 marker:text-foreground/40">
+        {children}
+      </ul>
+    </FadeBlock>
+  ),
+  ol: ({ children }) => (
+    <FadeBlock>
+      <ol className="my-2 list-decimal space-y-1.5 pl-5 text-foreground/90 marker:font-mono marker:text-[12px] marker:text-foreground/50">
+        {children}
+      </ol>
+    </FadeBlock>
+  ),
+  li: ({ children, ...props }) => {
+    // Task lists use a `[ ]`/`[x]` checkbox node injected by remark-gfm;
+    // detect via the className react-markdown adds.
+    const className = (props as { className?: string }).className;
+    if (className === 'task-list-item') {
+      return <li className="flex items-start gap-2 text-[14px] leading-[1.65] text-foreground/90 [&_input]:mt-1 [&_input]:flex-shrink-0">{children}</li>;
     }
     return (
-      <ul className="list-disc space-y-1 pl-5">
-        {block.items.map((item, i) => (
-          <li key={i}>
-            <Inlines tokens={item} />
-          </li>
-        ))}
-      </ul>
+      <li className="relative pl-5 text-[14px] leading-[1.6] text-foreground/90 before:absolute before:left-1 before:top-[0.6em] before:h-[3px] before:w-[3px] before:rounded-full before:bg-foreground/40">
+        {children}
+      </li>
     );
-  }
-  return (
-    <p className="leading-relaxed">
-      <Inlines tokens={block.tokens} />
-    </p>
-  );
-}
-
-function Inlines({ tokens }: { tokens: Inline[] }) {
-  return (
-    <>
-      {tokens.map((t, i) => (
-        <InlineNode key={i} node={t} />
-      ))}
-    </>
-  );
-}
-
-function InlineNode({ node }: { node: Inline }) {
-  if (node.type === 'text') return <>{node.text}</>;
-  if (node.type === 'code') {
-    return (
-      <code className="rounded border border-border/60 bg-muted/60 px-1 py-px font-mono text-[12.5px] text-foreground">
-        {node.text}
-      </code>
-    );
-  }
-  if (node.type === 'bold') {
-    return (
-      <strong className="font-semibold">
-        <Inlines tokens={node.tokens} />
-      </strong>
-    );
-  }
-  if (node.type === 'italic') {
-    return (
-      <em className="italic">
-        <Inlines tokens={node.tokens} />
-      </em>
-    );
-  }
-  if (node.type === 'link') {
+  },
+  blockquote: ({ children }) => (
+    <FadeBlock>
+      <blockquote className="my-3 rounded-r-md border-l-2 border-primary/60 bg-muted/40 px-4 py-2 italic text-foreground/85">
+        {children}
+      </blockquote>
+    </FadeBlock>
+  ),
+  hr: () => (
+    <FadeBlock>
+      <hr className="my-5 border-0 border-t border-border/60" />
+    </FadeBlock>
+  ),
+  strong: ({ children }) => (
+    <strong className="font-semibold text-foreground">{children}</strong>
+  ),
+  em: ({ children }) => <em className="italic text-foreground/95">{children}</em>,
+  del: ({ children }) => (
+    <del className="text-muted-foreground decoration-foreground/30">{children}</del>
+  ),
+  a: ({ href, children }) => {
+    if (href?.startsWith('qcode-file:')) {
+      return <FileLink href={href} label={String(children)} />;
+    }
     return (
       <a
-        href={node.href}
+        href={href}
         target="_blank"
         rel="noopener noreferrer"
-        className="text-primary underline-offset-2 hover:underline"
+        className="inline-flex items-baseline gap-0.5 text-primary underline decoration-primary/40 underline-offset-[3px] transition-colors hover:decoration-primary"
+        onClick={(e) => {
+          // In Tauri context, route external links through the OS
+          // shell so they don't open inside the qcode webview.
+          if (href && /^https?:\/\//.test(href)) {
+            e.preventDefault();
+            void openExternal(href);
+          }
+        }}
       >
-        <Inlines tokens={node.tokens} />
+        {children}
+        <ExternalLink className="h-2.5 w-2.5 self-center opacity-50" />
       </a>
     );
-  }
-  return <FileLink path={node.path} line={node.line} />;
+  },
+  // Code rendering — react-markdown 10 dropped the `inline` prop,
+  // so we detect inline by looking at the className: fenced blocks
+  // get `language-<lang>` from remark, inline code does not.
+  code: (props) => {
+    const { className, children } = props as { className?: string; children: React.ReactNode };
+    const langMatch = /language-([\w-]+)/.exec(className ?? '');
+    if (!langMatch) {
+      return (
+        <code className="rounded-[5px] border border-border/50 bg-muted/70 px-[5px] py-px font-mono text-[12.5px] tracking-tight text-foreground/95">
+          {children}
+        </code>
+      );
+    }
+    return <CodeBlock lang={langMatch[1]} code={String(children).replace(/\n$/, '')} />;
+  },
+  // react-markdown wraps code in <pre>; we render our own pre via
+  // CodeBlock so suppress the default wrapper.
+  pre: ({ children }) => <>{children}</>,
+  // Tables — sticky header, hover row, soft borders.
+  table: ({ children }) => (
+    <FadeBlock>
+      <div className="my-3 overflow-x-auto rounded-md border border-border/60">
+        <table className="w-full border-collapse text-[13px]">
+          {children}
+        </table>
+      </div>
+    </FadeBlock>
+  ),
+  thead: ({ children }) => (
+    <thead className="bg-muted/60 text-[12px] uppercase tracking-wider text-foreground/70">
+      {children}
+    </thead>
+  ),
+  tbody: ({ children }) => <tbody className="divide-y divide-border/40">{children}</tbody>,
+  tr: ({ children }) => (
+    <tr className="transition-colors hover:bg-muted/30">{children}</tr>
+  ),
+  th: ({ children, style }) => (
+    <th
+      className="px-3 py-2 text-left font-semibold"
+      style={style}
+    >
+      {children}
+    </th>
+  ),
+  td: ({ children, style }) => (
+    <td className="px-3 py-2 align-top text-foreground/90" style={style}>
+      {children}
+    </td>
+  ),
+  img: ({ src, alt }) => (
+    <img
+      src={src}
+      alt={alt ?? ''}
+      className="my-3 max-w-full rounded-md border border-border/60"
+      loading="lazy"
+    />
+  ),
+};
+
+// ─── Animated block wrapper ───────────────────────────────────────
+//
+// motion's `initial` only fires on first mount, so streaming
+// re-renders don't re-animate. Each block fades in once when the
+// markdown reducer first emits it.
+function FadeBlock({ children }: { children: React.ReactNode }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 2 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.16, ease: 'easeOut' }}
+    >
+      {children}
+    </motion.div>
+  );
 }
 
-// ─── Inline file link ──────────────────────────────────────────────
+// ─── File link chip ──────────────────────────────────────────────
 //
-// Rendered when the markdown parser detects a workspace-relative
-// path in assistant text. Clicking opens the file in the user's
-// default editor via Tauri's shell.open() — VS Code, Cursor,
-// JetBrains, whatever is registered for that file extension.
-//
-// In browser-mode (no Tauri host), we degrade to a non-action mono
-// span so the path is still visible but doesn't pretend to work.
+// Triggered by our pre-processor when the assistant emits a path.
+// Hands off to openExternal so the user's default editor opens the
+// file. In browser-mode (no Tauri), gracefully degrades to a span.
 
-function FileLink({ path, line }: { path: string; line: number | null }) {
-  const display = line ? `${path}:${line}` : path;
-  function open() {
+function FileLink({ href, label }: { href: string; label: string }) {
+  // qcode-file:src/foo.ts:42  →  { path: 'src/foo.ts', line: 42 }
+  const target = href.replace(/^qcode-file:/, '');
+  const lineMatch = /^(.+?):(\d+)$/.exec(target);
+  const path = lineMatch ? lineMatch[1] : target;
+  const line = lineMatch ? Number(lineMatch[2]) : null;
+
+  function open(e: React.MouseEvent) {
+    e.preventDefault();
     const ws = getCurrentWorkspace();
     if (!ws) return;
     const abs = path.startsWith('/') ? path : `${ws.path}/${path}`;
-    // VS Code / Cursor accept this URL form to open at a specific
-    // line (`vscode://file/<abs>:<line>`). For safety + portability
-    // we hand the raw path to the OS — the registered editor opens
-    // the file; jumping to the line is a future enhancement.
     void openExternal(abs);
   }
+
   return (
     <button
       onClick={open}
-      title={`Open ${display}`}
-      className="inline-flex items-center gap-1 rounded border border-border/60 bg-muted/60 px-1.5 py-px font-mono text-[12px] text-foreground transition-colors hover:border-foreground/30 hover:bg-muted"
+      title={`Open ${label}`}
+      className="group inline-flex items-baseline gap-1 rounded border border-border/50 bg-muted/50 px-1.5 py-px font-mono text-[12px] tracking-tight text-foreground/90 transition-all hover:border-primary/60 hover:bg-primary/5 hover:text-foreground"
     >
-      <FileText className="h-3 w-3 text-muted-foreground" />
-      {display}
+      <FileText className="h-3 w-3 self-center text-muted-foreground transition-colors group-hover:text-primary" />
+      {path}
+      {line !== null && <span className="text-muted-foreground/70">:{line}</span>}
     </button>
   );
 }
 
-// ─── Code block ─────────────────────────────────────────────────────
+// ─── Code block with shiki ───────────────────────────────────────
+
+const SHIKI_THEME_DARK = 'github-dark-default';
+const SHIKI_THEME_LIGHT = 'github-light-default';
+// Languages we explicitly preload; everything else falls back to
+// 'text' (no highlighting). Tradeoff: smaller bundle, snappy first
+// paint, vs full universal coverage. Adjust as needs evolve.
+const SHIKI_LANGS = [
+  'ts', 'tsx', 'js', 'jsx', 'json', 'bash', 'shell', 'py', 'python',
+  'rs', 'rust', 'go', 'sql', 'yaml', 'yml', 'toml', 'html', 'css',
+  'md', 'markdown', 'diff', 'docker', 'dockerfile', 'java', 'c', 'cpp', 'rb', 'php',
+] as const;
+
+let shikiPromise: Promise<{ codeToHtml: (code: string, opts: { lang: string; theme: string }) => Promise<string> } | null> | null = null;
+
+function getShiki() {
+  if (!shikiPromise) {
+    shikiPromise = import('shiki')
+      .then(async (m) => {
+        const highlighter = await m.createHighlighter({
+          themes: [SHIKI_THEME_DARK, SHIKI_THEME_LIGHT],
+          langs: SHIKI_LANGS as unknown as string[],
+        });
+        return {
+          codeToHtml: async (code: string, opts: { lang: string; theme: string }) => {
+            const safeLang = highlighter.getLoadedLanguages().includes(opts.lang as never)
+              ? opts.lang
+              : 'text';
+            return highlighter.codeToHtml(code, { lang: safeLang as never, theme: opts.theme });
+          },
+        };
+      })
+      .catch(() => null);
+  }
+  return shikiPromise;
+}
+
+// Cache: (theme|lang|code) -> rendered HTML. Theme is part of the
+// key so a dark→light swap doesn't return stale tokens; the cache
+// holds both variants side-by-side once both have been requested.
+const HIGHLIGHT_CACHE = new Map<string, string>();
+
+/** Reactively track the dark-mode class on <html> so code blocks
+ *  re-highlight when the user flips themes. The MutationObserver
+ *  is shared across all CodeBlock instances. */
+function useIsDarkMode(): boolean {
+  const [isDark, setIsDark] = useState<boolean>(() =>
+    typeof document !== 'undefined' &&
+    document.documentElement.classList.contains('dark'),
+  );
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    const sync = () => setIsDark(root.classList.contains('dark'));
+    sync();
+    const obs = new MutationObserver(sync);
+    obs.observe(root, { attributes: true, attributeFilter: ['class'] });
+    return () => obs.disconnect();
+  }, []);
+  return isDark;
+}
 
 function CodeBlock({ lang, code }: { lang: string; code: string }) {
   const [copied, setCopied] = useState(false);
+  const isDark = useIsDarkMode();
+  const theme = isDark ? SHIKI_THEME_DARK : SHIKI_THEME_LIGHT;
+  const langLabel = lang || 'text';
+  const cacheKey = `${theme}|${langLabel}|${code}`;
+  const [highlighted, setHighlighted] = useState<string | null>(() => {
+    return HIGHLIGHT_CACHE.get(cacheKey) ?? null;
+  });
+
+  useEffect(() => {
+    const cached = HIGHLIGHT_CACHE.get(cacheKey);
+    if (cached) {
+      setHighlighted(cached);
+      return;
+    }
+    let cancelled = false;
+    void getShiki().then(async (shiki) => {
+      if (!shiki || cancelled) return;
+      try {
+        const html = await shiki.codeToHtml(code, { lang: langLabel, theme });
+        if (cancelled) return;
+        HIGHLIGHT_CACHE.set(cacheKey, html);
+        // Cap cache so a long session doesn't grow unbounded.
+        if (HIGHLIGHT_CACHE.size > 200) {
+          const firstKey = HIGHLIGHT_CACHE.keys().next().value;
+          if (firstKey) HIGHLIGHT_CACHE.delete(firstKey);
+        }
+        setHighlighted(html);
+      } catch {
+        // Highlighter unavailable for this lang — fall back to plain.
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [code, langLabel, theme, cacheKey]);
 
   function copy() {
-    navigator.clipboard.writeText(code).then(() => {
+    void navigator.clipboard.writeText(code).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     });
   }
 
   return (
-    <div className="overflow-hidden rounded-md border border-border/60 bg-[#0a0a0a] text-foreground">
-      <div className="flex items-center justify-between border-b border-white/10 px-3 py-1.5">
-        <span className="font-mono text-[10px] uppercase tracking-widest text-white/50">
-          {lang || 'text'}
-        </span>
-        <button
-          onClick={copy}
-          className={cn(
-            'flex items-center gap-1 rounded border border-transparent px-1.5 py-0.5 text-[10px] text-white/60 transition-colors hover:border-white/20 hover:text-white',
+    <FadeBlock>
+      <div className="group my-3 overflow-hidden rounded-lg border border-border/60 bg-[#0d1117] dark:bg-[#0d1117]">
+        <header className="flex items-center justify-between border-b border-white/5 bg-[#161b22] px-3.5 py-1.5">
+          <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-white/55">
+            {langLabel}
+          </span>
+          <button
+            onClick={copy}
+            className={cn(
+              'flex items-center gap-1.5 rounded-md border border-transparent px-2 py-0.5 text-[10.5px] font-medium uppercase tracking-wider transition-all',
+              copied
+                ? 'border-emerald-400/30 text-emerald-300'
+                : 'text-white/55 hover:border-white/20 hover:bg-white/5 hover:text-white',
+            )}
+            aria-label={copied ? 'Copied' : 'Copy code'}
+          >
+            {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </header>
+        <div className="qcode-shiki max-h-[420px] overflow-auto text-[12.5px] leading-[1.55]">
+          {highlighted ? (
+            <div
+              className="[&_pre]:!bg-transparent [&_pre]:m-0 [&_pre]:px-4 [&_pre]:py-3 [&_pre]:font-mono"
+              dangerouslySetInnerHTML={{ __html: highlighted }}
+            />
+          ) : (
+            <pre className="m-0 px-4 py-3 font-mono text-[#c9d1d9]">{code}</pre>
           )}
-        >
-          {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-          {copied ? 'Copied' : 'Copy'}
-        </button>
+        </div>
       </div>
-      <pre className="m-0 max-h-[400px] overflow-auto px-4 py-3 font-mono text-[12.5px] leading-snug text-[#e0e0e0]">
-        {code}
-      </pre>
-    </div>
+    </FadeBlock>
   );
 }
