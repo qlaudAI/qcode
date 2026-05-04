@@ -59,7 +59,35 @@ import { getSettings, patchSettings } from '../settings';
  *  their own hint constants once their adapters land. */
 const QCODE_ENGINE_HINT = `qcode dev-workflow hints (running you inside the qcode desktop app):
 
-Localhost / dev-server access — ports change between runs (Vite picks 5174 if 5173 is busy; Next picks 3001 if 3000 is taken). NEVER hardcode a port from package.json scripts. Before any \`curl\`, \`fetch\`, or browser_navigate to a localhost URL, verify the LIVE port two ways:
+LIVE PREVIEW PANE — qcode shows a live iframe of any localhost URL on the right side of the chat. It auto-syncs to whatever localhost URL appears in your bash output ("Local: http://localhost:5174" / "ready on http://localhost:3000" banners). The user can SEE the running app rendered live without leaving qcode. So when you boot a dev server, the user already sees it. You don't need to "tell them to open it in their browser."
+
+VERIFYING RUNNING APPS — you do NOT have a built-in browser/playwright tool here. To programmatically check that a running app actually rendered (HTTP 200 + DOM elements + no console errors + screenshot), use Playwright via Bash. Just install + run + clean up — DO NOT ask the user permission first ("Want me to do that?" is the wrong default). Pattern:
+
+  # 1. install ad-hoc into the project (or /tmp if you don't want to touch package.json)
+  npm i -D @playwright/test playwright >/dev/null 2>&1
+  npx playwright install chromium >/dev/null 2>&1   # only the first time
+
+  # 2. run a one-shot verification script via node
+  cat > /tmp/verify.mjs <<'EOF'
+  import { chromium } from 'playwright';
+  const b = await chromium.launch();
+  const p = await b.newPage();
+  const errors = [];
+  p.on('pageerror', e => errors.push('pageerror: ' + e.message));
+  p.on('console', m => { if (m.type() === 'error') errors.push('console.error: ' + m.text()); });
+  const r = await p.goto('http://localhost:5173', { waitUntil: 'networkidle' });
+  console.log('status', r.status());
+  console.log('title', await p.title());
+  console.log('h1', await p.$eval('h1', e => e.innerText).catch(() => '(none)'));
+  await p.screenshot({ path: '/tmp/preview.png' });
+  console.log('errors', errors.length ? errors : 'none');
+  await b.close();
+  EOF
+  node /tmp/verify.mjs
+
+This gives you HTTP status, page title, key DOM elements, console + page errors, and a screenshot file the user can open. Same approach works for clicking buttons, filling forms, or running e2e flows — just extend the script.
+
+Localhost / dev-server access — ports change between runs (Vite picks 5174 if 5173 is busy; Next picks 3001 if 3000 is taken). NEVER hardcode a port from package.json scripts. Before any \`curl\`, \`fetch\`, or playwright \`page.goto\` to a localhost URL, verify the LIVE port two ways:
   1. Scan recent bash output for "Local:" / "ready on" / "Listening on" / "started server" banners — Vite, Next, Astro, Storybook, Remix, Nuxt, SvelteKit, Tauri's vite, Express, Fastify, NestJS, Django, Flask, Rails all print one of those.
   2. If no recent banner, run: \`lsof -i -P -n -sTCP:LISTEN | grep LISTEN\` (or \`netstat -tnlp | grep LISTEN\` on Linux when lsof isn't available). Pick the port matching the project's dev framework (3000 for Next, 5173 for Vite, 4321 for Astro, 6006 for Storybook, etc.).
 The user is on a desktop app, so localhost is THEIR machine. Treat dev servers as state-you-can-inspect, not state-you-can-guess.`;
