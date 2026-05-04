@@ -170,13 +170,21 @@ export async function runEngineClaudeCode(
   //                    (port detection, etc.) WITHOUT overriding
   //                    Claude Code's default agent prompt. We're
   //                    nudging behavior, not replacing it.
+  //   --permission-mode / --dangerously-skip-permissions /
+  //   --disallowedTools
+  //                    Mapped from settings.autoApprove. See
+  //                    permissionFlags() for the YOLO/Smart/Strict
+  //                    rules. v1 — coarse buckets; v2 will route
+  //                    each request through qcode's ApprovalCard
+  //                    via a bundled --permission-prompt-tool MCP
+  //                    server.
   const args: string[] = [
     '--bare',
     '--print',
     '--output-format', 'stream-json',
     '--include-partial-messages',
     '--verbose',
-    '--dangerously-skip-permissions',
+    ...permissionFlags(getSettings().autoApprove),
     '--model', opts.model,
     '--append-system-prompt', QCODE_ENGINE_HINT,
   ];
@@ -250,11 +258,36 @@ export async function runEngineClaudeCode(
       return;
     }
 
-    // Tool result returned to claude (its own bash, read, write
-    // dispatch). We could mirror these as tool_done to ChatSurface
-    // but the content_block_stop on the corresponding tool_use
-    // already gives us the moment-of-completion. For v0, ignore.
-    if (ev.type === 'user') return;
+    // Tool result returned to claude after it dispatched (Read,
+    // Write, Bash, etc.). Claude wraps these as "user" events with
+    // content blocks of type tool_result, each carrying the
+    // tool_use_id back-reference. We unwrap and emit `tool_done`
+    // events so the UI's running tool cards flip to done/error
+    // with their actual output. Without this, cards stay "running"
+    // forever in Engine Mode.
+    if (ev.type === 'user' && ev.message) {
+      const msg = ev.message as {
+        content?: Array<{
+          type?: string;
+          tool_use_id?: string;
+          content?: unknown;
+          is_error?: boolean;
+        }>;
+      };
+      const blocks = Array.isArray(msg.content) ? msg.content : [];
+      for (const block of blocks) {
+        if (block?.type !== 'tool_result' || typeof block.tool_use_id !== 'string') {
+          continue;
+        }
+        opts.onEvent({
+          type: 'tool_done',
+          id: block.tool_use_id,
+          content: stringifyToolResult(block.content),
+          isError: !!block.is_error,
+        });
+      }
+      return;
+    }
 
     // Final message — emit `finished`. claude's `result` event
     // carries usage + cost so we can render the usage pill.
@@ -345,11 +378,10 @@ export async function runEngineClaudeCode(
           input,
           status: 'running',
         });
-        // We DON'T emit tool_done here — that comes when claude's
-        // own dispatch completes (next stream_event with the
-        // tool_result blocks, or via the user-message envelope).
-        // For v0 this means tool cards stay "running" until the
-        // turn ends; live with it, fix in the next iteration.
+        // tool_done fires later when claude returns the matching
+        // tool_result inside a `user` event envelope (see the
+        // `ev.type === 'user'` branch above). Mapping back to this
+        // running card uses tool_use_id as the join key.
         toolAccum.delete(av.index);
         return;
       }
@@ -452,6 +484,81 @@ export function setClaudeSessionId(threadId: string, sessionId: string): void {
   patchSettings({
     claudeSessionByThread: { ...prev, [threadId]: sessionId },
   });
+}
+
+/** Map qcode's autoApprove tri-state to Claude Code's permission
+ *  flags. v1 is coarse — three preset buckets — because Claude
+ *  Code's --print mode can't surface interactive prompts to the
+ *  qcode UI directly. Per-call ApprovalCard routing requires a
+ *  bundled MCP server invoked via --permission-prompt-tool that
+ *  forwards each request to the qcode webview over an IPC channel
+ *  and waits for the click; that's a meaningful sidecar binary +
+ *  Tauri command project. v2.
+ *
+ *  YOLO   — --dangerously-skip-permissions: bypass every check.
+ *           Same posture as the legacy "yolo" auto-approve mode.
+ *  Smart  — bypass-permissions PLUS a denylist of obviously
+ *           destructive bash patterns. The deny-list is belt-and-
+ *           suspenders; Anthropic's own model safety covers the
+ *           catastrophic stuff already, but explicit deny rules
+ *           give us a hard guarantee for the common foot-guns.
+ *  Strict — --permission-mode plan: read-only tools only. The
+ *           agent CAN investigate but can't write, edit, or run
+ *           shell. User flips to YOLO/Smart when ready to act. */
+function permissionFlags(mode: 'yolo' | 'smart' | 'strict'): string[] {
+  // Patterns claude code understands. Glob-style on the bash command
+  // itself; passes through to claude's own pattern matcher. The
+  // --disallowedTools flag is variadic per claude's argv parser
+  // (`<tools...>`), so we MUST use the `--flag=val` form with a
+  // comma-joined list — otherwise claude's parser greedily eats the
+  // prompt that follows.
+  const dangerousBashPatterns = [
+    'Bash(rm -rf *)',
+    'Bash(rm -fr *)',
+    'Bash(sudo *)',
+    'Bash(:(){ :|:& };:)',
+  ];
+  switch (mode) {
+    case 'yolo':
+      return ['--dangerously-skip-permissions'];
+    case 'smart':
+      return [
+        '--dangerously-skip-permissions',
+        `--disallowedTools=${dangerousBashPatterns.join(',')}`,
+      ];
+    case 'strict':
+      return ['--permission-mode', 'plan'];
+    default:
+      return ['--dangerously-skip-permissions'];
+  }
+}
+
+/** Anthropic tool_result blocks carry `content` as either a plain
+ *  string OR an array of content blocks (text + image). The qcode
+ *  UI's tool cards expect a string for rendering. We coerce here:
+ *  string passes through; arrays get the text fields concatenated;
+ *  unknown shapes fall back to a JSON dump so nothing's lost. */
+function stringifyToolResult(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((b) => {
+        if (b && typeof b === 'object') {
+          const block = b as { type?: string; text?: unknown };
+          if (block.type === 'text' && typeof block.text === 'string') {
+            return block.text;
+          }
+        }
+        return null;
+      })
+      .filter((s): s is string => s !== null);
+    if (parts.length > 0) return parts.join('\n');
+  }
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return String(content);
+  }
 }
 
 // ─── Wire-shape of claude's --output-format stream-json ──────────
