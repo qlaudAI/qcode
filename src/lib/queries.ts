@@ -197,7 +197,14 @@ export function useThreadMessagesQuery(threadId: string | null) {
   return useQuery({
     queryKey: threadId ? qk.threadMessages(threadId) : ['threads', '_none_'],
     enabled: !!threadId,
-    queryFn: () => getRemoteThreadMessages(threadId as string),
+    // Match the engine-rehydrate path in ChatSurface (which passes
+    // limit: 200) so the legacy fetch — what runs on qcode-web AND
+    // on desktop in qcode-legacy mode — doesn't truncate long
+    // threads to 50 messages. The "Load older" affordance backed by
+    // messagesQuery.data?.hasMore still works for threads that
+    // exceed 200; we're just bumping first-page size to match what
+    // the engine path already shows on desktop.
+    queryFn: () => getRemoteThreadMessages(threadId as string, { limit: 200 }),
     staleTime: Infinity, // server-side compaction owns freshness
     refetchInterval: (query) => {
       if (!threadId || !isInFlight(threadId)) return false;
