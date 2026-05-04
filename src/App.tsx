@@ -776,6 +776,33 @@ function Titlebar({
         )}
       </div>
 
+      {/* Explicit drag target for the empty middle space. Tauri 2's
+       *  data-tauri-drag-region heuristic is finicky on macOS when
+       *  combined with transparent: true + titleBarStyle: Overlay —
+       *  users report the window not moving even though drag-region
+       *  is wired on the header. This element calls startDragging()
+       *  directly on mousedown which bypasses the heuristic and
+       *  always works. flex-1 makes it expand to fill all middle
+       *  space between the left controls and the right controls. */}
+      <div
+        className="h-full flex-1 cursor-grab active:cursor-grabbing"
+        data-tauri-drag-region
+        onMouseDown={(e) => {
+          if (e.button !== 0) return;
+          // Lazy import — desktop-only API, web build doesn't have it.
+          void (async () => {
+            try {
+              const { getCurrentWindow } = await import(
+                '@tauri-apps/api/window'
+              );
+              await getCurrentWindow().startDragging();
+            } catch {
+              // not running in Tauri (web build) — drag is irrelevant
+            }
+          })();
+        }}
+      />
+
       <div className="no-drag flex items-center gap-1.5 sm:gap-2">
         {/* Hide mode toggle + spend bar on the smallest widths so the
          *  titlebar doesn't wrap. Both still reachable: mode via
