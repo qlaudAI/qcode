@@ -683,7 +683,18 @@ export function ChatSurface({
         handleEvent(e, setBlocks);
       };
 
-      if (settingsAtSend.engine === 'claude-code') {
+      // Engine Mode requires Tauri's shell plugin to spawn the
+      // local `claude` binary. On web (qcode-web), Tauri isn't
+      // available — force-fallback to the legacy path even if
+      // settings.engine carried over from a desktop session.
+      // (The settings drawer also hides the Claude Code option
+      // on web, but defensive at send time is cheap.)
+      const engineMode =
+        settingsAtSend.engine === 'claude-code' && isTauri()
+          ? 'claude-code'
+          : 'qcode-legacy';
+
+      if (engineMode === 'claude-code') {
         if (!workspace?.path) {
           sharedOnEvent({
             type: 'error',

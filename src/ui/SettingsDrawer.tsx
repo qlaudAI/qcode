@@ -25,7 +25,7 @@ import {
   deleteRemoteThread,
   loadCachedSummaries,
 } from '../lib/threads';
-import { openExternal } from '../lib/tauri';
+import { isTauri, openExternal } from '../lib/tauri';
 
 // Slide-in drawer from the right. macOS preferences-style: a column
 // of grouped sections, soft blur backdrop. Closing happens on Esc,
@@ -217,10 +217,24 @@ export function SettingsDrawer({
           <Section title="Engine">
             <div className="flex gap-1.5 rounded-md border border-border bg-background p-1">
               {(
-                [
-                  { value: 'qcode-legacy', label: 'qcode (legacy)' },
-                  { value: 'claude-code', label: 'Claude Code' },
-                ] as const
+                // Claude Code engine spawns the local `claude`
+                // binary via Tauri's shell plugin — only available
+                // in the desktop build. On qcode-web (no Tauri host)
+                // the option is hidden so users don't pick it and
+                // hit a confusing "Command.create not available"
+                // error on the first send. Web users get the qcode
+                // legacy path, which routes through qlaud's
+                // /v1/threads/:id/messages and supports server-side
+                // MCP tools but no local file/shell access.
+                (isTauri()
+                  ? [
+                      { value: 'qcode-legacy', label: 'qcode (legacy)' },
+                      { value: 'claude-code', label: 'Claude Code' },
+                    ]
+                  : [{ value: 'qcode-legacy', label: 'qcode (legacy)' }]) as ReadonlyArray<{
+                  value: 'qcode-legacy' | 'claude-code';
+                  label: string;
+                }>
               ).map((opt) => (
                 <button
                   key={opt.value}
@@ -240,15 +254,19 @@ export function SettingsDrawer({
               <span className="font-medium text-foreground/80">qcode (legacy)</span>{' '}
               runs qcode's own agent loop server-side via qlaud's
               tool-dispatch edge.{' '}
-              <span className="font-medium text-foreground/80">Claude Code</span>{' '}
-              spawns Anthropic's official{' '}
-              <span className="font-mono">claude</span> CLI in your
-              workspace with{' '}
-              <span className="font-mono">ANTHROPIC_BASE_URL</span> pointed
-              at qlaud — the official agent runtime, your usage still
-              shows up in the qlaud dashboard. Requires{' '}
-              <span className="font-mono">claude</span> on your PATH (Engine
-              Mode v0 — multimodal + approval cards land in v1).
+              {isTauri() && (
+                <>
+                  <span className="font-medium text-foreground/80">Claude Code</span>{' '}
+                  spawns Anthropic's official{' '}
+                  <span className="font-mono">claude</span> CLI in your
+                  workspace with{' '}
+                  <span className="font-mono">ANTHROPIC_BASE_URL</span> pointed
+                  at qlaud — the official agent runtime, your usage still
+                  shows up in the qlaud dashboard. Requires{' '}
+                  <span className="font-mono">claude</span> on your PATH (Engine
+                  Mode v0 — multimodal + approval cards land in v1).
+                </>
+              )}
             </p>
           </Section>
 
