@@ -132,6 +132,68 @@ jobs:
           Copy-Item $rgPath.FullName -Destination "src-tauri\binaries\rg-${{ matrix.target }}.exe"
           Get-ChildItem src-tauri\binaries
 
+      # Bun is the JS runtime + package manager bundled with qcode so
+      # claude-code (a node CLI) runs without the user having Node or
+      # bun installed themselves. Per-target downloads mirror the rg
+      # pattern above. ~58MB per platform — sized accordingly into the
+      # final dmg/exe/AppImage.
+      - name: Download bun sidecar (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          set -e
+          BUN_VERSION="1.3.11"
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) ZIP="bun-darwin-aarch64.zip" ;;
+            x86_64-apple-darwin)  ZIP="bun-darwin-x64.zip" ;;
+            x86_64-unknown-linux-gnu) ZIP="bun-linux-x64.zip" ;;
+            *) echo "no bun mapping for ${{ matrix.target }}"; exit 1 ;;
+          esac
+          URL="https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$ZIP"
+          mkdir -p src-tauri/binaries
+          curl -L -o /tmp/bun.zip "$URL"
+          unzip -o -j /tmp/bun.zip -d /tmp/bun-extracted
+          mv /tmp/bun-extracted/bun src-tauri/binaries/bun-${{ matrix.target }}
+          chmod +x src-tauri/binaries/bun-${{ matrix.target }}
+          ls -la src-tauri/binaries/
+
+      - name: Download bun sidecar (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $BUN_VERSION = "1.3.11"
+          $URL = "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/bun-windows-x64.zip"
+          New-Item -ItemType Directory -Force -Path src-tauri\binaries | Out-Null
+          Invoke-WebRequest -Uri $URL -OutFile $env:TEMP\bun.zip
+          Expand-Archive -Path $env:TEMP\bun.zip -DestinationPath $env:TEMP\bun-extracted -Force
+          $bunPath = Get-ChildItem -Path $env:TEMP\bun-extracted -Recurse -Filter bun.exe | Select-Object -First 1
+          Copy-Item $bunPath.FullName -Destination "src-tauri\binaries\bun-${{ matrix.target }}.exe"
+          Get-ChildItem src-tauri\binaries
+
+      # Pre-install @anthropic-ai/claude-code into qcode's resources
+      # dir using the bun sidecar we just downloaded. Bun picks up
+      # the right per-platform claude native binary subpackage
+      # (claude-code-darwin-arm64 / -x64 / linux-x64 / win32-x64)
+      # automatically based on the runner's OS+arch. The resulting
+      # node_modules tree gets bundled into qcode's .app/.exe by
+      # tauri.conf.json's bundle.resources entry, so end users have
+      # claude pre-installed at first launch.
+      - name: Bundle claude code runtime (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          set -e
+          ./src-tauri/binaries/bun-${{ matrix.target }} \
+            install --cwd src-tauri/resources/runtime --production
+          ls -la src-tauri/resources/runtime/node_modules/@anthropic-ai/
+
+      - name: Bundle claude code runtime (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          & .\src-tauri\binaries\bun-${{ matrix.target }}.exe install --cwd src-tauri\resources\runtime --production
+          Get-ChildItem src-tauri\resources\runtime\node_modules\@anthropic-ai\
+
       - name: Build Tauri release
         env:
           # Mac signing secrets (set in repo settings):

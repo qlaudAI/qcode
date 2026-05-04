@@ -25,3 +25,15 @@ tsconfig.tsbuildinfo
 # Tauri signing
 *.pem
 *.key
+
+# Tauri sidecar binaries (downloaded per-platform in CI)
+src-tauri/binaries/bun-*
+src-tauri/binaries/rg-*
+
+# Bundled claude code runtime — installed per-platform in CI via bun.
+# Only the package.json with deps is checked in; node_modules + lockfile
+# get recreated on every build.
+src-tauri/resources/runtime/node_modules/
+src-tauri/resources/runtime/bun.lock
+src-tauri/resources/runtime/package-lock.json
+src-tauri/resources/runtime/pnpm-lock.yaml

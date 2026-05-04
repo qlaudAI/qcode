@@ -11,6 +11,7 @@
       "identifier": "shell:allow-execute",
       "allow": [
         { "name": "binaries/rg", "sidecar": true, "args": true },
+        { "name": "binaries/bun", "sidecar": true, "args": true },
         { "name": "sh", "cmd": "sh", "args": true },
         { "name": "bash", "cmd": "bash", "args": true },
         { "name": "wsl", "cmd": "wsl", "args": true },
@@ -29,6 +30,7 @@
       "identifier": "shell:allow-spawn",
       "allow": [
         { "name": "binaries/rg", "sidecar": true, "args": true },
+        { "name": "binaries/bun", "sidecar": true, "args": true },
         { "name": "sh", "cmd": "sh", "args": true },
         { "name": "bash", "cmd": "bash", "args": true },
         { "name": "wsl", "cmd": "wsl", "args": true },

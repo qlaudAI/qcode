@@ -172,126 +172,53 @@ async function getLoginPath(): Promise<string> {
   return FALLBACK_PATH;
 }
 
-/** Decide which `claude` binary to spawn — the user's, or a
- *  qcode-managed one we install on their behalf.
+/** Resolve the bundled claude CLI — bun sidecar + claude package
+ *  shipped with qcode, no user install required.
  *
- *  Strategy in order of preference:
+ *  Architecture:
  *
- *  1. **User's installed claude** (their login PATH has it). Most
- *     power users already have it; we use theirs so they get
- *     whatever version they've chosen.
+ *  - `binaries/bun` — Tauri sidecar, downloaded per-platform during
+ *    CI build. Bun is a single self-contained JS runtime + package
+ *    manager (~50-58MB per platform). Acts as the JS engine that
+ *    runs claude's CLI wrapper script.
  *
- *  2. **qcode-managed claude** at ~/.qcode/runtime/node_modules/
- *     @anthropic-ai/claude-code/cli.js. We installed it on a
- *     previous run of qcode; spawn via `node <path>` so we stay
- *     within the existing Tauri capability for `node`.
+ *  - `resources/runtime/node_modules/@anthropic-ai/claude-code/
+ *    cli-wrapper.cjs` — bundled in qcode's resources directory.
+ *    Installed once at CI build time via the bundled bun, so the
+ *    matching per-platform claude native binary
+ *    (claude-code-darwin-arm64 / -x64 / linux-x64 / win32-x64) is
+ *    fetched into node_modules during the CI install.
  *
- *  3. **Bootstrap on demand** — install @anthropic-ai/claude-code
- *     into ~/.qcode/runtime and return the path to (2). One-time
- *     30-60s install, then every subsequent run is instant.
+ *  Spawn shape:
  *
- *  This means users with no claude install at all just-work.
- *  Power users with their own claude install get to keep using
- *  it with the version they already trust. */
-type ClaudeSpawnSpec = { program: string; argsPrefix: string[] };
+ *      Command.sidecar('binaries/bun',
+ *        [<resourceDir>/runtime/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs,
+ *         ...claude-args])
+ *
+ *  Tauri's resourceDir() resolves to wherever the OS unpacks the
+ *  bundled resources (Contents/Resources on macOS, AppDir/usr/lib
+ *  on Linux AppImage, etc) — same path on every platform from JS's
+ *  perspective even though it differs on disk.
+ *
+ *  Why this beats the previous "find user's claude or bootstrap"
+ *  strategy: zero prereqs. Users with no Node, no Bun, no npm at
+ *  all on their machine still get a working claude. The bundled
+ *  binary is self-contained. Updates ride along with qcode releases. */
+type ClaudeSpawnSpec = { argsPrefix: string[] };
 let cachedClaudeSpec: ClaudeSpawnSpec | null = null;
 
-async function resolveClaude(
-  onProgress?: (msg: string) => void,
-): Promise<ClaudeSpawnSpec> {
+async function resolveClaude(): Promise<ClaudeSpawnSpec> {
   if (cachedClaudeSpec) return cachedClaudeSpec;
 
-  // (1) Does the user have claude on their login PATH?
-  const loginPath = await getLoginPath();
-  try {
-    const probe = await Command.create('bash', [
-      '-lc',
-      // -lc loads PATH, then -v `claude` succeeds iff it resolves.
-      'command -v claude',
-    ]).execute();
-    if (probe.code === 0 && (probe.stdout || '').trim()) {
-      cachedClaudeSpec = { program: 'claude', argsPrefix: [] };
-      return cachedClaudeSpec;
-    }
-  } catch {
-    // fall through to managed
-  }
-
-  const home = await getHome();
-  const managedDir = `${home}/.qcode/runtime`;
-  const managedEntry = `${managedDir}/node_modules/@anthropic-ai/claude-code/cli.js`;
-
-  // (2) Did a previous qcode run already install it?
-  try {
-    const { stat } = await import('@tauri-apps/plugin-fs');
-    await stat(managedEntry);
-    cachedClaudeSpec = { program: 'node', argsPrefix: [managedEntry] };
-    return cachedClaudeSpec;
-  } catch {
-    // not installed yet
-  }
-
-  // (3) Bootstrap. Pick the fastest available package manager —
-  // bun (~3-5s install) > pnpm (~8s) > npm (~25s). Same script
-  // pattern as the Playwright bootstrap, kept identical for
-  // consistency.
-  //
-  // If the user has NONE of bun/pnpm/npm, we can't bootstrap
-  // (claude is a node-based CLI; without a JS runtime there's
-  // nothing to install or to run it with). The script exits
-  // with a specific marker that JS picks up to show actionable
-  // install instructions. Long-term fix: bundle bun as a Tauri
-  // sidecar (~50MB to dmg) so qcode is self-contained — see
-  // docs/runtime-bundling.md.
-  onProgress?.(
-    'Setting up Claude Code (one-time, ~30s — only happens the first time you use qcode)',
+  // Resolve bundled cli-wrapper path. Tauri's resourceDir() returns
+  // the OS-specific resources dir; the same relative subpath works
+  // on every platform because we control how the runtime/ directory
+  // is laid out at build time.
+  const { resolveResource } = await import('@tauri-apps/api/path');
+  const wrapperPath = await resolveResource(
+    'resources/runtime/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs',
   );
-
-  // We pass loginPath via env so the user's bun/pnpm/npm bin
-  // dirs are reachable even though we're running through bash.
-  const bootstrap = `
-    set -e
-    if ! command -v bun >/dev/null 2>&1 \\
-       && ! command -v pnpm >/dev/null 2>&1 \\
-       && ! command -v npm >/dev/null 2>&1; then
-      echo "QCODE_NO_JS_RUNTIME"
-      exit 1
-    fi
-    mkdir -p "${managedDir}"
-    cd "${managedDir}"
-    if command -v bun >/dev/null 2>&1; then
-      [ -f package.json ] || bun init -y >/dev/null 2>&1 || true
-      bun add @anthropic-ai/claude-code >/dev/null
-    elif command -v pnpm >/dev/null 2>&1; then
-      [ -f package.json ] || pnpm init >/dev/null 2>&1 || true
-      pnpm add @anthropic-ai/claude-code >/dev/null
-    else
-      [ -f package.json ] || npm init -y >/dev/null
-      npm i @anthropic-ai/claude-code >/dev/null
-    fi
-    echo "ok"
-  `;
-  const out = await Command.create('bash', ['-lc', bootstrap], {
-    env: { PATH: loginPath },
-  }).execute();
-  if (out.code !== 0) {
-    const stdout = (out.stdout || '').trim();
-    if (stdout.includes('QCODE_NO_JS_RUNTIME')) {
-      // No Node/Bun installed at all. Three install one-liners
-      // that don't require a package manager themselves (bun has
-      // a curl-installer; node has nvm or homebrew). After the
-      // user runs any of these and restarts qcode, the bootstrap
-      // re-attempts and they're set forever.
-      throw new Error(
-        `qcode needs Node.js or Bun installed to run Claude Code. Pick one and install:\n  • Bun  (recommended, fastest):  curl -fsSL https://bun.sh/install | bash\n  • Node:                          brew install node\n  • Or via nvm:                    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash\nThen restart qcode.`,
-      );
-    }
-    throw new Error(
-      `claude bootstrap failed: ${(out.stderr || stdout || 'unknown error').slice(0, 400)}`,
-    );
-  }
-
-  cachedClaudeSpec = { program: 'node', argsPrefix: [managedEntry] };
+  cachedClaudeSpec = { argsPrefix: [wrapperPath] };
   return cachedClaudeSpec;
 }
 
@@ -445,31 +372,24 @@ export async function runEngineClaudeCode(
   // necessary on macOS apps launched from Finder.
   const loginPath = await getLoginPath();
 
-  // Resolve which `claude` to spawn — user's installed one if they
-  // have it, otherwise a qcode-managed one bootstrapped into
-  // ~/.qcode/runtime on first run. Means users with no global
-  // claude install just-work without ever seeing setup steps. See
-  // resolveClaude() for the strategy.
+  // Resolve the bundled claude wrapper path. No user install needed —
+  // qcode ships its own bun sidecar + claude code package.
   let claudeSpec: ClaudeSpawnSpec;
   try {
-    claudeSpec = await resolveClaude((msg) => {
-      // Surface the bootstrap progress through the same error
-      // event channel — gives the user a "Setting up Claude Code…"
-      // chip instead of the chat looking frozen for 30 seconds.
-      // (This is shown via the existing error-block path; we want
-      // a proper status surface eventually but this is good enough
-      // for a one-time 30s wait.)
-      opts.onEvent({ type: 'error', message: msg });
-    });
+    claudeSpec = await resolveClaude();
   } catch (e) {
     opts.onEvent({
       type: 'error',
-      message: `Couldn't set up Claude Code: ${e instanceof Error ? e.message : String(e)}. Please check your network and try again.`,
+      message: `Couldn't locate the bundled Claude Code (${e instanceof Error ? e.message : String(e)}). Try reinstalling qcode.`,
     });
     return;
   }
 
-  const cmd = Command.create(claudeSpec.program, [...claudeSpec.argsPrefix, ...args], {
+  // Spawn via the Tauri-bundled `bun` sidecar, passing the bundled
+  // claude wrapper script as the first arg. Bun runs the .cjs
+  // wrapper which in turn execs the platform-specific claude
+  // native binary that came in the same install.
+  const cmd = Command.sidecar('binaries/bun', [...claudeSpec.argsPrefix, ...args], {
     cwd: opts.workspace,
     env: {
       ANTHROPIC_BASE_URL: QLAUD_BASE_URL,
