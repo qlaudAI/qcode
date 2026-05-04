@@ -70,6 +70,30 @@ function newId(): string {
   return crypto.randomUUID();
 }
 
+/** Derive a display name from an absolute path. Splits on both
+ *  POSIX and Windows separators, drops empty segments (handles
+ *  trailing slashes), and uses the last non-empty segment.
+ *
+ *  Edge cases this handles intentionally:
+ *   - Folders literally named `0`, `42`, `1.0` → preserved as
+ *     strings. Truthy in JS, render as themselves.
+ *   - Trailing slashes (`/foo/`) → `'foo'`, not `''`. (`??` would
+ *     leave the empty string in place because it's not nullish.)
+ *   - Root path (`/` alone) → falls back to the full path so the
+ *     user at least sees something instead of a blank pill.
+ *   - Windows backslashes (`C:\Users\bob\proj`) → splits cleanly.
+ *   - Unicode / emoji names → preserved.
+ *
+ *  Use this everywhere a name is derived from a path. The callsites
+ *  that pre-dated this helper had subtle differences (split('/')
+ *  only, no filter for empty segments) that bit us on numbered
+ *  folders and trailing slashes. */
+export function deriveWorkspaceName(path: string): string {
+  const segments = path.split(/[/\\]/).filter((s) => s.length > 0);
+  const last = segments[segments.length - 1];
+  return last && last.length > 0 ? last : path;
+}
+
 export type FileNode = {
   name: string;
   path: string;
@@ -323,7 +347,7 @@ export function getMru(): Workspace[] {
 export async function openFolderPicker(): Promise<Workspace | null> {
   const path = await pickFolder('Open folder');
   if (!path) return null;
-  const name = path.split(/[/\\]/).filter(Boolean).pop() ?? path;
+  const name = deriveWorkspaceName(path);
   // Register-then-activate so the returned Workspace carries its
   // stable id. Existing entries at the same path are reused (no
   // duplicate registry rows).

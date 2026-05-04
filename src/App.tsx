@@ -58,6 +58,7 @@ import { useGitBranch } from './lib/git-branch';
 import { useWorkspaces } from './lib/use-workspaces';
 import { generateThreadTitle } from './lib/title-gen';
 import {
+  deriveWorkspaceName,
   getCurrentWorkspace,
   getWorkspaceById,
   getWorkspaceByPath,
@@ -309,8 +310,12 @@ export function App() {
       if (getWorkspaceByPath(t.workspacePath)) continue;
       registerWorkspace({
         path: t.workspacePath,
-        name:
-          t.workspaceName ?? t.workspacePath.split('/').pop() ?? 'project',
+        // workspaceName from metadata is preferred (it's what the
+        // originating client cached); fall back to deriving from
+        // the path. Empty-string workspaceName (rare, but possible
+        // from corrupted metadata) skips through to the path
+        // derivation rather than rendering blank.
+        name: t.workspaceName || deriveWorkspaceName(t.workspacePath),
       });
     }
     // dataUpdatedAt rather than data because threadsQuery may
@@ -426,8 +431,7 @@ export function App() {
       if (!resolved && t?.workspacePath) {
         resolved = registerWorkspace({
           path: t.workspacePath,
-          name:
-            t.workspaceName ?? t.workspacePath.split('/').pop() ?? 'project',
+          name: t.workspaceName || deriveWorkspaceName(t.workspacePath),
         });
       }
       if (resolved && resolved.path !== workspace?.path) {
