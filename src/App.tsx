@@ -99,12 +99,45 @@ export function App() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  // Mobile sidebar visibility. On md+ breakpoints the sidebar is
-  // always visible (the layout uses flex). On narrow widths it
-  // becomes an off-canvas drawer the user toggles via the hamburger
-  // in the titlebar; auto-closes on thread pick so the chat surface
-  // takes full width after navigation.
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  // Sidebar visibility — works for both mobile and desktop now.
+  //   Mobile (< md): off-canvas drawer that slides in over the chat.
+  //                  Auto-closes on thread pick so the chat surface
+  //                  takes full width after navigation.
+  //   Desktop (md+): in-flow column that animates width to 0 when
+  //                  closed (collapses, doesn't overlay). User
+  //                  toggles via a chevron button in the titlebar
+  //                  matching the right-rail close X pattern.
+  // Default open on desktop, closed on mobile. Persisted across
+  // reloads so people who collapse it stay collapsed.
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try {
+      const saved = localStorage.getItem('qcode:sidebarOpen');
+      if (saved !== null) return saved === '1';
+    } catch {
+      /* localStorage unavailable */
+    }
+    return true; // default open
+  });
+  // Persist on every change.
+  useEffect(() => {
+    try {
+      localStorage.setItem('qcode:sidebarOpen', sidebarOpen ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }, [sidebarOpen]);
+  // Mobile: close drawer after sidebar action (folder pick, thread
+  // pick, new chat) so the chat surface takes full width. Desktop:
+  // leave the sidebar open — collapsing on every click would feel
+  // janky for someone navigating between chats.
+  const closeSidebarIfMobile = useCallback(() => {
+    if (
+      typeof window !== 'undefined' &&
+      window.matchMedia('(max-width: 767px)').matches
+    ) {
+      setSidebarOpen(false);
+    }
+  }, []);
   // Right rail — single side panel that hosts multiple workbench
   // views (Tasks, Plan, Files, Terminal, Preview, Diff). All views
   // share the same panel width so the chat surface always has the
@@ -358,6 +391,10 @@ export function App() {
 
   // Optimistic delete via Query mutation — sidebar updates the
   // moment the user clicks; cache rolls back if the network errors.
+  // Server-side is already a soft-delete (sets deletedAt; row stays
+  // for audit + accidental-undo until a retention cron hard-deletes).
+  // Subsequent GET /v1/threads filters by isNull(deletedAt), so the
+  // refetch on settle never resurrects the row.
   const deleteMutation = useDeleteThreadMutation({
     onSuccess: (id) => {
       if (currentId === id) {
@@ -368,6 +405,22 @@ export function App() {
   });
   const removeThread = useCallback(
     (id: string) => {
+      // Clear the engine-mode sessionId mapping for this thread so
+      // (a) settings storage doesn't leak entries forever, and
+      // (b) if a stale UI somehow reopens the deleted threadId we
+      // don't keep trying to rehydrate via its old session_id.
+      // Best-effort, fire-and-forget — the import is async because
+      // the engine module is desktop-only (Tauri shell).
+      void (async () => {
+        try {
+          const { clearClaudeSessionId } = await import(
+            './lib/engines/claude-code'
+          );
+          clearClaudeSessionId(id);
+        } catch {
+          // legacy / web — module not loaded, nothing to clear
+        }
+      })();
       deleteMutation.mutate(id);
     },
     [deleteMutation],
@@ -437,9 +490,22 @@ export function App() {
         const cached = queryClient.getQueryData<RemoteThreadHistory>(
           qk.threadMessages(info.threadId),
         );
-        const messages = cached?.messages.length
-          ? cached.messages
-          : (await getRemoteThreadMessages(info.threadId)).messages;
+        let messages = cached?.messages ?? [];
+        if (!messages.length) {
+          // Engine-mode threads (claude-code) persist server-side
+          // under claude's session_id, NOT the qcode threadId. The
+          // legacy fetch by threadId returns empty for those, so
+          // title-gen silently never fires for engine threads.
+          // Mirror the rehydrate fallback used in ChatSurface:
+          // try the session_id first if we have one mapped, fall
+          // back to threadId.
+          const { getClaudeSessionId } = await import(
+            './lib/engines/claude-code'
+          );
+          const sessionId = getClaudeSessionId(info.threadId);
+          const fetchKey = sessionId || info.threadId;
+          messages = (await getRemoteThreadMessages(fetchKey)).messages;
+        }
         if (!messages.length) return;
         const generated = await generateThreadTitle(messages);
         if (!generated) return;
@@ -531,7 +597,7 @@ export function App() {
         workspaceName={workspace?.name}
         onRefreshBalance={refreshBalance}
         onOpenSettings={() => setSettingsOpen(true)}
-        onToggleSidebar={() => setMobileSidebarOpen((v) => !v)}
+        onToggleSidebar={() => setSidebarOpen((v) => !v)}
         rightRailView={rightRailView}
         onPickRightRailView={(v) =>
           setRightRailView((prev) => (prev === v ? null : v))
@@ -541,36 +607,42 @@ export function App() {
       <div className="relative flex flex-1 overflow-hidden">
         {/* Scrim — only renders + intercepts taps when the drawer is
          *  open on narrow widths. md+ never sees it. */}
-        {mobileSidebarOpen && (
+        {sidebarOpen && (
           <button
             aria-label="Close sidebar"
-            onClick={() => setMobileSidebarOpen(false)}
+            onClick={() => setSidebarOpen(false)}
             className="absolute inset-0 z-30 bg-black/30 backdrop-blur-sm md:hidden"
           />
         )}
+        {/* Mobile: off-canvas drawer that overlays content (z-40 +
+         *  absolute). Desktop md+: in-flow column that animates its
+         *  WIDTH to 0 when collapsed, so chat surface gets the
+         *  reclaimed space. translate-x and width animate together
+         *  for a clean slide-out feel. */}
         <div
           className={cn(
-            // Mobile: off-canvas drawer that slides in over the chat
-            // surface. md+: in-flow column (transform reset to 0).
-            'absolute inset-y-0 left-0 z-40 w-72 max-w-[85vw] transform transition-transform duration-200 md:static md:w-64 md:max-w-none md:translate-x-0 md:transition-none',
-            mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full',
+            'absolute inset-y-0 left-0 z-40 w-72 max-w-[85vw] transform transition-transform duration-200 md:static md:max-w-none md:transition-[width,transform] md:duration-200',
+            sidebarOpen
+              ? 'translate-x-0 md:w-64'
+              : '-translate-x-full md:w-0 md:overflow-hidden md:-translate-x-full',
           )}
         >
           <Sidebar
             workspace={workspace}
             threads={threads}
             currentThreadId={currentId}
+            onClose={() => setSidebarOpen(false)}
             onOpenFolder={async () => {
-              setMobileSidebarOpen(false);
+              closeSidebarIfMobile();
               const w = await tryOpenFolder();
               if (w) setWorkspace(w);
             }}
             onNewChat={() => {
-              setMobileSidebarOpen(false);
+              closeSidebarIfMobile();
               void newThread();
             }}
             onPickThread={(id) => {
-              setMobileSidebarOpen(false);
+              closeSidebarIfMobile();
               switchThread(id);
             }}
             onDeleteThread={removeThread}
@@ -673,11 +745,14 @@ function Titlebar({
         className="flex items-center gap-2 md:pl-16"
       >
         {onToggleSidebar && (
+          // Visible on every breakpoint now — desktop users get the
+          // same toggle the mobile drawer uses to re-open a
+          // collapsed sidebar. Mirrors the right-rail toggle pattern.
           <button
             type="button"
             aria-label="Toggle sidebar"
             onClick={onToggleSidebar}
-            className="no-drag grid h-8 w-8 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:hidden"
+            className="no-drag grid h-8 w-8 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
             <Menu className="h-4 w-4" />
           </button>
@@ -842,6 +917,7 @@ function Sidebar({
   onNewChat,
   onPickThread,
   onDeleteThread,
+  onClose,
 }: {
   workspace: Workspace | null;
   threads: ThreadSummary[];
@@ -850,6 +926,10 @@ function Sidebar({
   onNewChat: () => void;
   onPickThread: (id: string) => void;
   onDeleteThread: (id: string) => void;
+  /** Optional close-button handler — when provided renders an X
+   *  in the top-right of the sidebar that hides the panel. Mirrors
+   *  the right-rail's close affordance. */
+  onClose?: () => void;
 }) {
   // Two-tier filter:
   //   1. Instant: title-substring match runs on every keystroke for
@@ -917,7 +997,22 @@ function Sidebar({
 
   return (
     <aside className="flex h-full w-full flex-col border-r border-border/40 bg-muted/30 backdrop-blur-sm">
-      <div className="space-y-2 px-3 pt-3">
+      {/* Close button mirrors the right-rail's X. Sits at the very
+       *  top-right of the sidebar; hidden when no onClose handler
+       *  is wired (e.g. an embedded use). */}
+      {onClose && (
+        <div className="flex justify-end px-2 pt-2">
+          <button
+            type="button"
+            aria-label="Close sidebar"
+            onClick={onClose}
+            className="grid h-6 w-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <XIcon className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+      <div className={cn('space-y-2 px-3', onClose ? 'pt-1' : 'pt-3')}>
         <button
           onClick={onNewChat}
           className="flex w-full items-center justify-between rounded-md border border-border bg-background/80 px-3 py-2 text-sm font-medium transition-colors hover:border-foreground/30 hover:bg-background"

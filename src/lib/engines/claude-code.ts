@@ -701,6 +701,19 @@ export function setClaudeSessionId(threadId: string, sessionId: string): void {
   });
 }
 
+/** Drop the threadId → session_id mapping. Called when the user
+ *  deletes a thread so we don't leak settings entries forever AND
+ *  any future rehydrate attempt for this id falls back to the
+ *  threadId-keyed lookup (which won't find anything either, since
+ *  the thread is server-side soft-deleted). */
+export function clearClaudeSessionId(threadId: string): void {
+  const prev = getSettings().claudeSessionByThread ?? {};
+  if (!(threadId in prev)) return;
+  const next = { ...prev };
+  delete next[threadId];
+  patchSettings({ claudeSessionByThread: next });
+}
+
 /** Map qcode's autoApprove tri-state to Claude Code's permission
  *  flags. v1 is coarse — three preset buckets — because Claude
  *  Code's --print mode can't surface interactive prompts to the
