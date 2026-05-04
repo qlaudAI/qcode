@@ -27,7 +27,9 @@ claude --print --dangerously-skip-permissions --model $SLUG \
 
 After re-testing with non-credential-flavored prompts (the original
 "TONIGHT_QCODE_SECRET" wording false-positive'd OpenAI's safety RLHF),
-8 of 12 catalog models work end-to-end via claude-code TODAY.
+8 of 12 catalog models worked end-to-end via claude-code on 2026-05-04.
+**As of 2026-05-04 evening, after qlaud edge translation upgrades,
+all 12/12 work end-to-end.** See "Resolution" section below.
 
 | Model                  | /v1/messages | Claude CLI chat | Tool use   |
 | ---------------------- | ------------ | --------------- | ---------- |
@@ -74,7 +76,87 @@ After re-testing with non-credential-flavored prompts (the original
   /v1/messages rejects it. Either accept case-insensitive, or
   document the canonical lowercase slug.
 
-## Recommended product shape — DUAL ENGINE
+## Resolution — SINGLE ENGINE (claude-code) handles all 12
+
+Update 2026-05-04 evening: all four Tier 3 gaps were closed in
+qlaud edge in two commits, and an end-to-end agentic re-test now
+shows 12/12 catalog models work via the bundled claude-code engine.
+The dual-engine plan below is preserved for context but is **no
+longer needed**.
+
+### Fixes shipped
+
+- **MiniMax slug case** — qlaud commit `46b3152`. `resolveModel`
+  in `packages/catalog/src/index.ts` now does a case-insensitive
+  fallback so `minimax-m2` resolves to `MiniMax-M2`.
+
+- **Kimi `reasoning_content`** — qlaud commit `46b3152`. The
+  Anthropic→OpenAI request translator (`packages/translate/src/
+  request.ts`) now encodes `thinking` blocks as
+  `reasoning_content` on assistant messages with `tool_calls`,
+  instead of discarding them per Anthropic spec. Other
+  OpenAI-compat providers ignore the unknown field; Kimi +
+  DeepSeek-Reasoner require it.
+
+- **Gemini `thought_signature`** — qlaud commit `7f6a992`.
+  `packages/translate/src/stream.ts` now captures
+  `extra_content.google.thought_signature` from Gemini's
+  streaming `tool_calls` deltas and surfaces them in the
+  stream's `onFinish` payload. `apps/edge/src/routes/messages.ts`
+  persists them to KV (`gemini-sig:{tool_use_id}`, 1h TTL) on
+  stream finish via `waitUntil`, then on the next request reads
+  them back and re-attaches to the corresponding assistant
+  `tool_calls` before forwarding to Gemini. Anthropic's wire
+  shape has no slot for opaque per-tool-call metadata, so
+  client-passthrough wasn't an option — server-side state is
+  the path.
+
+- **Qwen `✿TASK✿/✿ARGS✿`** — qlaud commits `7f6a992` + `274674b`.
+  `packages/translate/src/stream.ts` now buffers text deltas
+  when the upstream is Qwen-family, scans the buffer for both
+  the `✿VERB✿: { ... }` and `✿TASK✿: VERB, ✿ARGS✿: { ... }`
+  patterns Qwen emits under heavy system contexts, and rewrites
+  matches into proper OpenAI `tool_calls` (which the existing
+  pipeline then translates to Anthropic `tool_use` blocks).
+  Verb names are title-cased (`READ` → `Read`) to match
+  claude-code's PascalCase tool registry.
+
+### Final agentic re-test — 2026-05-04
+
+Spawn pattern unchanged from the original test. Workspace
+`/tmp/qcode-final-test/` containing one file `README.md` with
+contents `Hello there`. Pass condition: model returns the file
+contents via the Read tool.
+
+| Model                  | Result |
+| ---------------------- | ------ |
+| claude-opus-4-7        | ✅ |
+| claude-sonnet-4-6      | ✅ |
+| claude-haiku-4-5       | ✅ |
+| gpt-5.4                | ✅ |
+| gpt-5.4-mini           | ✅ |
+| grok-4.20-0309-reasoning | ✅ |
+| deepseek-chat          | ✅ |
+| deepseek-reasoner      | ✅ |
+| **gemini-3-pro-preview** | ✅ (KV round-trip working) |
+| **qwen-coder-plus**    | ✅ (text-tool rewrite working; absolute paths required because Qwen resolves relatives against an unexpected cwd, but that's a model quirk, not a translation bug) |
+| **kimi-k2.6**          | ✅ |
+| **MiniMax-M2** / minimax-m2 | ✅ (both forms resolve) |
+
+**12 / 12 catalog models work end-to-end via the bundled
+claude-code engine. No second engine required.**
+
+### Implication for engine bundling
+
+The Codex sidecar bundling work (preserved below as the original
+Phase 2) is **deferred indefinitely**. With single-engine
+claude-code we keep the install footprint smaller (~206MB
+claude-code native vs another ~Xmb codex), and the engine
+routing logic collapses to "use claude-code for everything."
+
+---
+
+## Original recommended product shape — DUAL ENGINE (superseded)
 
 **Headline: Codex CLI as a second engine unblocks all 4 Tier 3
 providers TODAY, no qlaud edge work required.** This is the
