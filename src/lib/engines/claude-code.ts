@@ -41,6 +41,29 @@ import type { ContentBlock } from '../qlaud-client';
 import { getKey } from '../auth';
 import { getSettings, patchSettings } from '../settings';
 
+/** Tight, surgical addendum we hand to Claude Code via
+ *  `--append-system-prompt`. Doesn't replace Claude's default
+ *  agent persona — adds qcode-specific dev-workflow guidance the
+ *  default prompt doesn't cover. Keep this LEAN; every token here
+ *  is in every turn's input.
+ *
+ *  Why ports and not other things: dev-server ports change every
+ *  run (Vite tries 5173 → falls back to 5174 if busy; Next does
+ *  the same on 3000 → 3001). Claude code without this hint will
+ *  hardcode 3000/5173 from package.json scripts and break
+ *  intermittently. Telling it to verify via `lsof` or recent
+ *  bash output costs ~40 tokens per turn and saves the user
+ *  every "why didn't it work?" debugging round.
+ *
+ *  Other CLIs (codex, qwen, aider) get equivalent appendages via
+ *  their own hint constants once their adapters land. */
+const QCODE_ENGINE_HINT = `qcode dev-workflow hints (running you inside the qcode desktop app):
+
+Localhost / dev-server access — ports change between runs (Vite picks 5174 if 5173 is busy; Next picks 3001 if 3000 is taken). NEVER hardcode a port from package.json scripts. Before any \`curl\`, \`fetch\`, or browser_navigate to a localhost URL, verify the LIVE port two ways:
+  1. Scan recent bash output for "Local:" / "ready on" / "Listening on" / "started server" banners — Vite, Next, Astro, Storybook, Remix, Nuxt, SvelteKit, Tauri's vite, Express, Fastify, NestJS, Django, Flask, Rails all print one of those.
+  2. If no recent banner, run: \`lsof -i -P -n -sTCP:LISTEN | grep LISTEN\` (or \`netstat -tnlp | grep LISTEN\` on Linux when lsof isn't available). Pick the port matching the project's dev framework (3000 for Next, 5173 for Vite, 4321 for Astro, 6006 for Storybook, etc.).
+The user is on a desktop app, so localhost is THEIR machine. Treat dev servers as state-you-can-inspect, not state-you-can-guess.`;
+
 /** Where the gateway lives. Claude Code reads ANTHROPIC_BASE_URL and
  *  appends /v1/messages. We use the standard URL — no path prefix,
  *  no custom headers, nothing that breaks api.qlaud.ai's "drop-in
@@ -142,6 +165,11 @@ export async function runEngineClaudeCode(
   //   --resume <id>    Multi-turn continuity. Claude restores its
   //                    entire conversation state from disk; qcode never
   //                    sees or stores it.
+  //   --append-system-prompt
+  //                    Carries qcode-specific dev-workflow hints
+  //                    (port detection, etc.) WITHOUT overriding
+  //                    Claude Code's default agent prompt. We're
+  //                    nudging behavior, not replacing it.
   const args: string[] = [
     '--bare',
     '--print',
@@ -150,6 +178,7 @@ export async function runEngineClaudeCode(
     '--verbose',
     '--dangerously-skip-permissions',
     '--model', opts.model,
+    '--append-system-prompt', QCODE_ENGINE_HINT,
   ];
   if (opts.sessionId) {
     args.push('--resume', opts.sessionId);
