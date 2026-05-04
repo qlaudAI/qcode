@@ -66,12 +66,24 @@ VERIFYING RUNNING APPS — you do NOT have a built-in browser tool here. Use Pla
 DO NOT ask the user permission first ("Want me to do that?" is the wrong default). Just do it.
 
   # ─── ONE-TIME bootstrap (only if ~/.qcode/runtime/node_modules/playwright doesn't exist yet)
+  # Prefer bun (~3-5s install) → pnpm (~8s) → npm (~25s) for the install
+  # step. They all produce a node_modules/playwright that imports the
+  # same way, so the verify script below is package-manager agnostic.
   if [ ! -d "$HOME/.qcode/runtime/node_modules/playwright" ]; then
     mkdir -p "$HOME/.qcode/runtime" && cd "$HOME/.qcode/runtime"
-    npm init -y >/dev/null
-    # playwright-core is enough — we don't need the full @playwright/test runner.
-    # chrome-headless-shell is the slim ~80MB build (vs full Chromium ~150MB).
-    npm i playwright >/dev/null
+    if command -v bun >/dev/null 2>&1; then
+      bun init -y >/dev/null 2>&1 || true
+      bun add playwright >/dev/null
+    elif command -v pnpm >/dev/null 2>&1; then
+      pnpm init >/dev/null 2>&1 || true
+      pnpm add playwright >/dev/null
+    else
+      npm init -y >/dev/null
+      npm i playwright >/dev/null
+    fi
+    # chrome-headless-shell is Playwright's slim ~80MB build (vs full
+    # Chromium ~150MB) — enough for navigate/screenshot/eval/click,
+    # which is all we use it for.
     npx playwright install chrome-headless-shell >/dev/null
     cd - >/dev/null
   fi
