@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- WebKit's JavaScript engine needs JIT to run well; without this -->
+    <!-- entitlement, hardened-runtime falls back to interpreter mode    -->
+    <!-- and async stream reading (SSE chunks from /v1/messages) gets    -->
+    <!-- eaten before reaching JS land. fetch's POST works, response     -->
+    <!-- ReadableStream consumption silently doesn't.                    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- WebKit allocates W^X exec pages that aren't from our signed     -->
+    <!-- binary. Required alongside allow-jit. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Tauri loads WebKit + system frameworks not signed by our team.  -->
+    <!-- Without this, dyld refuses to load them under hardened runtime. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- DYLD env vars need to flow through for some Tauri sidecars      -->
+    <!-- (the spawned `claude` CLI in particular). -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- Outbound network access. The signed bundle was getting this     -->
+    <!-- by default (POST to api.qlaud.ai works on the broken alpha.90). -->
+    <!-- Declared explicitly here for completeness. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>
