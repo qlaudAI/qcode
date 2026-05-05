@@ -10,6 +10,7 @@ import {
   Plus,
   Search as SearchIcon,
   Settings,
+  Sparkles,
   Wallet,
   X as XIcon,
 } from 'lucide-react';
@@ -39,6 +40,7 @@ import {
   togglePinThread,
   useAccountQuery,
   useBalanceQuery,
+  useQcodeMeQuery,
   useCreateThreadMutation,
   useDeleteThreadMutation,
   useThreadsQuery,
@@ -236,6 +238,11 @@ export function App() {
 
   const accountQuery = useAccountQuery(authed);
   const balanceQuery = useBalanceQuery(authed);
+  // Plan tier + today's per-tier usage. Drives the SpendBar's plan
+  // badge so users see at a glance whether they're on Free / Pro /
+  // Power. Returns null on legacy gateways → SpendBar gracefully
+  // falls back to wallet-only display.
+  const qcodeMeQuery = useQcodeMeQuery(authed);
 
   // Single derived profile — what every consumer that used to read
   // from useState(profile) now reads. No persisted middle layer:
@@ -690,6 +697,7 @@ export function App() {
         mode={mode}
         onModeChange={onModeChange}
         profile={profile}
+        qcodeMe={qcodeMeQuery.data ?? null}
         workspaceName={workspace?.name}
         onRefreshBalance={refreshBalance}
         onOpenSettings={() => setSettingsOpen(true)}
@@ -820,6 +828,7 @@ function Titlebar({
   mode,
   onModeChange,
   profile,
+  qcodeMe,
   workspaceName,
   onRefreshBalance,
   onOpenSettings,
@@ -833,6 +842,7 @@ function Titlebar({
   onModeChange: (m: AgentMode) => void;
   onRefreshBalance: () => void;
   profile: { email: string; user_id: string; balance_usd?: number } | null;
+  qcodeMe: import('./lib/qcode-me').QcodeMe | null;
   workspaceName?: string;
   onOpenSettings: () => void;
   onToggleSidebar?: () => void;
@@ -924,7 +934,7 @@ function Titlebar({
         </div>
         <ModelPicker value={model} onChange={onModelChange} />
         <div className="hidden sm:block">
-          <SpendBar profile={profile} onRefresh={onRefreshBalance} />
+          <SpendBar profile={profile} qcodeMe={qcodeMe} onRefresh={onRefreshBalance} />
         </div>
         {onPickRightRailView && (
           <RightRailMenu
@@ -945,16 +955,71 @@ function Titlebar({
   );
 }
 
+// Title-bar status bar. Plan-tier-aware:
+//   - On a qpk_ key with a known plan tier: show plan badge.
+//     Pro/Power additionally show wallet (overflow buffer).
+//     Free hides wallet (no overflow path; wallet display would be
+//     cosmetic and misleading).
+//   - On a qlk_ legacy/PAYG key, OR when /v1/qcode/me 404s on an
+//     older gateway: fall back to the original wallet-only display
+//     so existing PAYG users see no regression.
+//
+// One click anywhere on the bar refreshes both balance + plan-me
+// queries via onRefresh, which the parent invalidates.
 function SpendBar({
   profile,
+  qcodeMe,
   onRefresh,
 }: {
   profile: { email: string; user_id: string; balance_usd?: number } | null;
+  qcodeMe: import('./lib/qcode-me').QcodeMe | null;
   onRefresh: () => void;
 }) {
   if (!profile) return null;
   const balance = profile.balance_usd ?? 0;
   const low = balance < 0.5;
+
+  // Product-key path — plan tier known. Render plan badge first.
+  if (qcodeMe) {
+    const tier = qcodeMe.plan.tier;
+    const tierLabel = qcodeMe.plan.benefits.displayName;
+    const accent =
+      tier === 'free'
+        ? 'border-border/60 text-foreground/80'
+        : tier === 'pro'
+          ? 'border-primary/40 bg-primary/5 text-primary'
+          : 'border-amber-500/40 bg-amber-500/5 text-amber-700';
+    return (
+      <button
+        onClick={onRefresh}
+        className={
+          'flex items-center gap-1.5 rounded border bg-background/70 px-2 py-1 text-[11px] tabular-nums transition-colors hover:border-foreground/30 ' +
+          accent
+        }
+        title={
+          tier === 'free'
+            ? 'Free plan — daily caps. Click to refresh.'
+            : tier === 'pro'
+              ? `Pro plan${balance > 0 ? ` · $${balance.toFixed(2)} overflow` : ''}. Click to refresh.`
+              : `Power plan${balance > 0 ? ` · $${balance.toFixed(2)} overflow` : ''}. Click to refresh.`
+        }
+      >
+        <Sparkles className="h-3 w-3" />
+        <span className="font-medium">{tierLabel}</span>
+        {/* Wallet overflow indicator — only when there's a buffer
+         *  AND the plan can actually use it. Free has no overflow,
+         *  so wallet is hidden there to avoid implying PAYG. */}
+        {tier !== 'free' && balance > 0 && (
+          <>
+            <span className="text-foreground/30" aria-hidden>·</span>
+            <span className="text-foreground/70">${balance.toFixed(2)}</span>
+          </>
+        )}
+      </button>
+    );
+  }
+
+  // Legacy / PAYG path — original wallet display.
   return (
     <button
       onClick={onRefresh}

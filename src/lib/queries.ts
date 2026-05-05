@@ -21,6 +21,7 @@ import {
 
 import { fetchAccount, type AccountInfo } from './account';
 import { fetchBalance, type BalanceInfo } from './billing';
+import { fetchQcodeMe, type QcodeMe } from './qcode-me';
 import {
   fetchCatalog,
   loadCachedCatalog,
@@ -82,6 +83,7 @@ export const qk = {
   threadMessages: (id: string) => ['threads', id, 'messages'] as const,
   account: ['account'] as const,
   balance: ['balance'] as const,
+  qcodeMe: ['qcode-me'] as const,
   catalog: ['catalog'] as const,
   mcpServers: ['mcp-servers'] as const,
 };
@@ -453,6 +455,26 @@ export function useBalanceQuery(authed: boolean) {
     // turn-completion. 30s staleTime covers manual refresh clicks.
     staleTime: 30_000,
   });
+}
+
+// ─── qcode plan + today's usage ────────────────────────────────────
+//
+// Same lifecycle as balance — invalidate on turn completion so the
+// SpendBar's tier badge + per-tier counters tick alongside the
+// wallet. Returns null on legacy gateways (route 404s) so the
+// SpendBar falls back to wallet-only rendering.
+
+export function useQcodeMeQuery(authed: boolean) {
+  return useQuery<QcodeMe | null>({
+    queryKey: qk.qcodeMe,
+    enabled: authed,
+    queryFn: () => fetchQcodeMe(),
+    staleTime: 30_000,
+  });
+}
+
+export function refreshQcodeMe(): void {
+  void queryClient.invalidateQueries({ queryKey: qk.qcodeMe });
 }
 
 /** Trigger a balance refetch — call from onTurnLanded so the
