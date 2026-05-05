@@ -224,27 +224,35 @@ export function useThreadsQuery(opts: {
           (typeof meta.workspace_id === 'string'
             ? meta.workspace_id
             : undefined);
-        // Title resolution. Prefer canonical sources first (anything
-        // with titleSource set — that's a value the user or our
-        // title-gen actually wrote). Server's title column comes
-        // before legacy meta.title (which was the pre-migration
-        // stash). Final fallback is the placeholder.
+        // Title resolution — server-first.
         //
-        // The titleSource gate is the bug fix for "title changes,
-        // then 'New chat' overrides it": without it, the placeholder
-        // string from createMutation ('New chat' with no source) was
-        // short-circuiting the ?? chain and overwriting the real
-        // server-side title every refetch.
+        // Server.title is the cross-device truth. Local cache is a
+        // mirror that may go stale (renamed on a different device,
+        // server updated, this device hasn't refetched yet). Letting
+        // local win means stale wins; letting server win means a
+        // brief flicker during PATCH-in-flight is the only cost,
+        // and it self-corrects on the next refetch.
+        //
+        // Local canonical entries (with titleSource set) ride below
+        // server as the optimistic-update fallback for the moment
+        // BETWEEN patchThread firing and the PATCH /v1/threads/:id
+        // landing on the server (~100-500ms typically). Without that
+        // fallback, every fresh first-send would briefly show
+        // 'New chat' before the server caught up.
+        //
+        // Legacy metaTitle stays the final-but-one fallback for
+        // pre-migration-0022 threads.
         const title =
+          serverTitle ??
           liveCanonicalTitle ??
           cachedCanonicalTitle ??
-          serverTitle ??
           metaTitle ??
           'New chat';
         const titleSource =
+          (serverTitle ? 'auto' : undefined) ??
           liveRow?.titleSource ??
           cached?.titleSource ??
-          (serverTitle || metaTitle ? 'auto' : undefined);
+          (metaTitle ? 'auto' : undefined);
         return {
           id: r.id,
           title,

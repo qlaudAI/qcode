@@ -589,18 +589,18 @@ export function App() {
       const patch: Partial<ThreadSummary> = { updatedAt: Date.now() };
       const hadDefaultTitle = existing?.title === 'New chat' || !existing?.title;
       if (hadDefaultTitle && info.userText) {
+        // Prompt-derived title for INSTANT sidebar feedback. Local-
+        // only — we deliberately do NOT PATCH the server with this
+        // string. The LLM-regen kicks off below (turn 1 always
+        // triggers it), produces a content-aware title (~3-5s
+        // later), and that's what gets persisted server-side.
+        //
+        // Earlier alpha.135 was PATCHing the prompt-derived title
+        // immediately, which raced with the regen PATCH and often
+        // overwrote the LLM title with the worse "first two words"
+        // version. Reverted by stripping that PATCH here.
         patch.title = titleFromPrompt(info.userText);
         patch.titleSource = 'auto';
-        // Persist the immediate first-send title server-side too so
-        // a sign-out + sign-in (or different device) doesn't lose
-        // it. Fire-and-forget — local cache already has it; the
-        // server is the cross-device backup.
-        void updateThreadTitle(info.threadId, patch.title).catch((e) => {
-          console.warn(
-            `[title] PATCH /v1/threads/${info.threadId} failed:`,
-            e,
-          );
-        });
       }
       patchThread(info.threadId, patch);
       void invalidateBalance();
