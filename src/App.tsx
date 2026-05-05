@@ -11,7 +11,6 @@ import {
   Search as SearchIcon,
   Settings,
   Sparkles,
-  Wallet,
   X as XIcon,
 } from 'lucide-react';
 import { cn } from './lib/cn';
@@ -22,7 +21,7 @@ import {
   getKey,
   startSignIn,
 } from './lib/auth';
-import { handleTitleBarMouseDown, isTauri, WebNotSupportedError } from './lib/tauri';
+import { handleTitleBarMouseDown, isTauri, openExternal, WebNotSupportedError } from './lib/tauri';
 import { posthog } from './lib/analytics';
 import { startDeepLinkListener } from './lib/deep-link';
 import {
@@ -955,84 +954,63 @@ function Titlebar({
   );
 }
 
-// Title-bar status bar. Plan-tier-aware:
-//   - On a qpk_ key with a known plan tier: show plan badge.
-//     Pro/Power additionally show wallet (overflow buffer).
-//     Free hides wallet (no overflow path; wallet display would be
-//     cosmetic and misleading).
-//   - On a qlk_ legacy/PAYG key, OR when /v1/qcode/me 404s on an
-//     older gateway: fall back to the original wallet-only display
-//     so existing PAYG users see no regression.
+// Title-bar plan/billing pill. No dollar amount — the wallet number
+// confuses qpk_ users into thinking they're on PAYG when they're
+// actually on a plan. We hide it entirely and use this purely as a
+// nav affordance: click → opens qlaud.ai/billing in a new tab/external
+// browser, where the user sees the real picture (plan tier, today's
+// per-tier usage, wallet balance, upgrade buttons).
 //
-// One click anywhere on the bar refreshes both balance + plan-me
-// queries via onRefresh, which the parent invalidates.
+// Three rendered states:
+//   - qpk_ with plan tier known     → tier badge ('Free' / 'Pro' / 'Power')
+//   - qlk_ legacy/PAYG (no qcodeMe) → 'Billing' label
+//   - older gateway 404s on /qcode/me → 'Billing' label (same fallback)
+//
+// onRefresh kept as a prop for compat with existing call sites but
+// is no longer fired here — the wallet-balance refresh-on-click was
+// the user-facing action of the old design and has been replaced
+// with the billing redirect. Parent's existing balance polling
+// (turn-completion invalidation) keeps the plan tier fresh.
 function SpendBar({
   profile,
   qcodeMe,
-  onRefresh,
 }: {
   profile: { email: string; user_id: string; balance_usd?: number } | null;
   qcodeMe: import('./lib/qcode-me').QcodeMe | null;
   onRefresh: () => void;
 }) {
   if (!profile) return null;
-  const balance = profile.balance_usd ?? 0;
-  const low = balance < 0.5;
 
-  // Product-key path — plan tier known. Render plan badge first.
-  if (qcodeMe) {
-    const tier = qcodeMe.plan.tier;
-    const tierLabel = qcodeMe.plan.benefits.displayName;
-    const accent =
-      tier === 'free'
-        ? 'border-border/60 text-foreground/80'
-        : tier === 'pro'
-          ? 'border-primary/40 bg-primary/5 text-primary'
-          : 'border-amber-500/40 bg-amber-500/5 text-amber-700';
-    return (
-      <button
-        onClick={onRefresh}
-        className={
-          'flex items-center gap-1.5 rounded border bg-background/70 px-2 py-1 text-[11px] tabular-nums transition-colors hover:border-foreground/30 ' +
-          accent
-        }
-        title={
-          tier === 'free'
-            ? 'Free plan — daily caps. Click to refresh.'
-            : tier === 'pro'
-              ? `Pro plan${balance > 0 ? ` · $${balance.toFixed(2)} overflow` : ''}. Click to refresh.`
-              : `Power plan${balance > 0 ? ` · $${balance.toFixed(2)} overflow` : ''}. Click to refresh.`
-        }
-      >
-        <Sparkles className="h-3 w-3" />
-        <span className="font-medium">{tierLabel}</span>
-        {/* Wallet overflow indicator — only when there's a buffer
-         *  AND the plan can actually use it. Free has no overflow,
-         *  so wallet is hidden there to avoid implying PAYG. */}
-        {tier !== 'free' && balance > 0 && (
-          <>
-            <span className="text-foreground/30" aria-hidden>·</span>
-            <span className="text-foreground/70">${balance.toFixed(2)}</span>
-          </>
-        )}
-      </button>
-    );
+  // Compute label + accent from tier when available, else fall back
+  // to the generic Billing affordance.
+  const tier = qcodeMe?.plan.tier;
+  const label = qcodeMe?.plan.benefits.displayName ?? 'Billing';
+  const accent =
+    tier === 'pro'
+      ? 'border-primary/40 bg-primary/5 text-primary hover:border-primary/60'
+      : tier === 'power'
+        ? 'border-amber-500/40 bg-amber-500/5 text-amber-700 hover:border-amber-500/60'
+        : 'border-border/60 text-foreground/80 hover:border-foreground/30';
+
+  function openBilling() {
+    void openExternal('https://qlaud.ai/billing');
   }
 
-  // Legacy / PAYG path — original wallet display.
   return (
     <button
-      onClick={onRefresh}
+      onClick={openBilling}
       className={
-        'flex items-center gap-1.5 rounded border bg-background/70 px-2 py-1 text-[11px] tabular-nums transition-colors ' +
-        (low
-          ? 'border-primary/30 text-primary hover:border-primary/50'
-          : 'border-border/60 text-muted-foreground hover:border-foreground/30 hover:text-foreground')
+        'flex items-center gap-1.5 rounded border bg-background/70 px-2 py-1 text-[11px] font-medium transition-colors ' +
+        accent
       }
-      title={low ? 'Low balance — click to refresh, then top up at qlaud.ai' : 'Click to refresh'}
+      title={
+        tier
+          ? `${label} plan — open billing`
+          : 'Open billing'
+      }
     >
-      <Wallet className="h-3 w-3" />
-      ${balance.toFixed(2)}
+      <Sparkles className="h-3 w-3" />
+      <span>{label}</span>
     </button>
   );
 }
