@@ -83,7 +83,45 @@ export async function clearAuth(): Promise<void> {
   } else {
     localStorage.removeItem(FALLBACK_STORAGE);
   }
-  localStorage.removeItem(PROFILE_STORAGE);
+
+  // Wipe ALL user-scoped state so the next account doesn't see the
+  // previous one's workspaces, thread history, mode preferences, etc.
+  // The qcode.catalog.v1 cache and qcode.settings are deliberately
+  // preserved — catalog is not user-scoped (same model list for
+  // everyone), and settings carry device-level prefs (theme, default
+  // model picker behavior) the user reasonably wants to keep.
+  //
+  // Strategy: explicit list for the well-known keys + a prefix sweep
+  // for the dynamic ones (per-thread mode tracking writes
+  // qcode.thread.<id>.lastMode, can't be enumerated without reading
+  // localStorage's keys).
+  const EXACT_KEYS = [
+    PROFILE_STORAGE,
+    'qcode.workspace.current',
+    'qcode.workspace.mru',
+    'qcode.workspaces.v1',
+    'qcode.threads.summaries.v2',
+  ];
+  for (const k of EXACT_KEYS) {
+    localStorage.removeItem(k);
+  }
+  // Sweep dynamic per-thread keys. Iterate by index from the end so
+  // removeItem during iteration doesn't skip entries.
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const k = localStorage.key(i);
+    if (!k) continue;
+    if (k.startsWith('qcode.thread.')) {
+      localStorage.removeItem(k);
+    }
+  }
+
+  // Notify any still-mounted workspace subscribers (e.g. the
+  // sidebar visible briefly during the auth transition) that the
+  // registry has been cleared. Avoids a stale-render flash before
+  // the sign-in gate replaces the chrome.
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('qcode:workspaces-changed'));
+  }
 }
 
 export function getProfile(): Profile | null {
