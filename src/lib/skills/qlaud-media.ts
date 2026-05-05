@@ -114,11 +114,67 @@ The four endpoints, OpenAI-compat shape:
 
 ────────────────────────────────────────────────────────────────────
 
-Provider variants — pass a different \`model\` to route to other providers in qlaud's catalog:
-- TTS: model=elevenlabs-v3 for ElevenLabs (voice id required, see https://api.qlaud.ai/v1/catalog).
-- STT: model=deepgram-nova-3 for Deepgram (faster, also accepts URL via "url" field instead of file upload).
-- Image: gpt-image-1 is the only listed image model today; check the catalog if more land.
+Provider variants — qlaud's catalog has more than the OpenAI-shape defaults. Two ways to reach them:
 
-When in doubt about prices, sizes, or model availability, hit GET https://api.qlaud.ai/v1/catalog (no auth) and filter by task. The catalog is the source of truth for what's routable.
+  • OpenAI-shape \`/v1/audio/speech\` always routes to OpenAI's gpt-4o-mini-tts. The \`model\` field there isn't honored for cross-provider routing.
+  • Native passthrough URLs accept each provider's NATIVE request body verbatim:
+      ElevenLabs (premium voices): POST https://api.qlaud.ai/elevenlabs/v1/text-to-speech/{voice_id}
+        Body: {"text":"...","model_id":"eleven_multilingual_v2","voice_settings":{"stability":0.5,"similarity_boost":0.75}}
+        Response: binary mp3.
+      Deepgram (fast STT, also accepts URL): POST https://api.qlaud.ai/deepgram/v1/listen
+        Body: binary audio file or {"url":"https://..."}.
+      Cartesia: POST https://api.qlaud.ai/cartesia/v1/tts (their native shape).
 
-Save filenames descriptively (\`hero-banner.png\`, not \`image1.png\`) — they end up in the user's workspace.`;
+When in doubt about prices, sizes, voices, or model availability, hit GET https://api.qlaud.ai/v1/catalog (no auth) and filter by task. The catalog is the source of truth for what's routable. ElevenLabs voice IDs come from their own /v1/voices endpoint — proxy via /elevenlabs/v1/voices on qlaud.
+
+Save filenames descriptively (\`hero-banner.png\`, not \`image1.png\`) — they end up in the user's workspace.
+
+────────────────────────────────────────────────────────────────────
+OPTIONAL CLOUD SYNC — only when \$QCODE_MEDIA_CLOUD_SYNC=1 is set.
+
+When the user opted in to cross-device media sync (Settings →
+"Sync generated media to qlaud cloud"), qcode passes that env var.
+After saving locally, also upload the artifact to qlaud's R2-backed
+storage so it's accessible from the user's other devices and from
+qcode-web. Skip this entire section when the env var isn't '1'.
+
+Three-step flow per artifact:
+
+  # 1. Init — declare what you're uploading; get back an artifact_id
+  # and an upload URL. The current thread is auto-scoped via
+  # \$QCODE_THREAD_ID so the artifact is filed under this conversation.
+  INIT=\$(curl -s https://api.qlaud.ai/v1/artifacts/init \\
+    -H "x-api-key: \$ANTHROPIC_API_KEY" \\
+    -H "content-type: application/json" \\
+    -d '{
+      "thread_id": "'"\$QCODE_THREAD_ID"'",
+      "mime": "image/png",
+      "byte_size": '"\$(wc -c < .qcode/media/\$(date +%Y-%m-%d)/hero.png)"',
+      "original_name": "hero.png",
+      "prompt_excerpt": "<truncate the user prompt to ~200 chars>"
+    }')
+  ARTIFACT_ID=\$(echo "\$INIT" | jq -r '.artifact_id')
+  UPLOAD_URL=\$(echo "\$INIT" | jq -r '.upload_url')
+
+  # 2. Upload the bytes. The route is /v1/artifacts/<id>/upload —
+  # qlaud relays it into R2 with the correct content-type. PUT, not
+  # POST. 50 MB hard cap.
+  curl -s -X PUT "https://api.qlaud.ai\$UPLOAD_URL" \\
+    -H "x-api-key: \$ANTHROPIC_API_KEY" \\
+    -H "content-type: image/png" \\
+    --data-binary @.qcode/media/\$(date +%Y-%m-%d)/hero.png
+
+  # 3. (Optional) Confirm — for v0 the upload route already flips
+  # the row to ready, so /finalize is idempotent. Skip unless you
+  # changed the upload pattern.
+
+After step 2, reply with BOTH paths:
+  • Local: \`.qcode/media/<date>/hero.png\` (always — the user's
+    canonical copy)
+  • Cloud: \`https://api.qlaud.ai/v1/artifacts/\$ARTIFACT_ID/download\`
+    (multi-device + shareable)
+
+Do NOT upload local files the user attached themselves to chat —
+those are already in the workspace and not in scope for this sync.
+Only sync artifacts YOU generated this turn via the qlaud media
+endpoints above.`;

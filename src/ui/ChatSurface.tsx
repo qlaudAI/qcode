@@ -721,6 +721,7 @@ export function ChatSurface({
             sessionId: getClaudeSessionId(id),
             onSessionId: (sid) => setClaudeSessionId(id, sid),
             model,
+            qcodeThreadId: id,
             workspace: workspace.path,
             content: userContent,
             signal: abortRef.current.signal,

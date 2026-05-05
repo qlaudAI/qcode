@@ -218,6 +218,24 @@ export function SettingsDrawer({
             </p>
           </Section>
 
+          <Section title="Media">
+            <Toggle
+              label="Sync generated media to qlaud cloud"
+              checked={settings.mediaCloudSync}
+              onChange={(v) => update('mediaCloudSync', v)}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              When on, images / audio / video the agent generates are
+              also uploaded to qlaud&rsquo;s cross-device storage
+              (R2-backed, tenant-locked to your account). Local copies
+              under{' '}
+              <span className="font-mono">.qcode/media/</span> stay
+              unchanged. Off by default — local-only is the
+              privacy-preserving default. Pricing: $0.015/GB-month
+              deducted from your wallet.
+            </p>
+          </Section>
+
           <Section title="Appearance">
             <FieldLabel>Theme</FieldLabel>
             <div className="flex gap-1.5 rounded-md border border-border bg-background p-1">

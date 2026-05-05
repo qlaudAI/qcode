@@ -248,6 +248,14 @@ export type RunEngineClaudeCodeOpts = {
   /** User picked model (e.g. "claude-sonnet-4-5", "claude-haiku-4-5").
    *  We pass via --model; claude resolves to its current upstream slug. */
   model: string;
+  /** Qcode thread id (the qlaud-side UUID, not claude-code's session
+   *  id which lives in opts.sessionId). When set + the user has
+   *  media cloud sync on, the spawn passes this via QCODE_THREAD_ID
+   *  so the qlaud-media skill can tag uploaded artifacts with the
+   *  current conversation. Decoupled from sessionId because they
+   *  refer to different things — sessionId resumes claude-code's
+   *  local state, threadId scopes qlaud-side artifact metadata. */
+  qcodeThreadId?: string | null;
   /** Workspace dir. Claude runs with cwd=this — its file tools see
    *  this as the project root. */
   workspace: string;
@@ -415,6 +423,11 @@ export async function runEngineClaudeCode(
   // default (currently haiku-4-5) — safe choice for new users.
   const settings = getSettings();
   const backgroundModel = settings.subagentModel;
+  // Media cloud sync — when the user opted in, pass the flag and
+  // current thread id to the spawn so the skill's optional cloud
+  // section knows to fire. Off by default; the skill no-ops the
+  // sync section when QCODE_MEDIA_CLOUD_SYNC isn't '1'.
+  const cloudSync = settings.mediaCloudSync;
   const cmd = Command.sidecar('binaries/bun', [...claudeSpec.argsPrefix, ...args], {
     cwd: opts.workspace,
     env: {
@@ -431,6 +444,19 @@ export async function runEngineClaudeCode(
       // default rather than us pinning a value the user didn't
       // explicitly opt into.
       ...(backgroundModel ? { ANTHROPIC_SMALL_FAST_MODEL: backgroundModel } : {}),
+      // Media cloud sync — turns on the optional "upload to qlaud
+      // cloud after local save" path in the qlaud-media skill. The
+      // thread id is needed so artifacts get tagged with the
+      // current conversation; the skill curls /v1/artifacts/init
+      // with this value.
+      ...(cloudSync
+        ? {
+            QCODE_MEDIA_CLOUD_SYNC: '1',
+            ...(opts.qcodeThreadId
+              ? { QCODE_THREAD_ID: opts.qcodeThreadId }
+              : {}),
+          }
+        : {}),
       // PATH is the headline reason this env block exists at all.
       // Without it, Tauri's spawn inherits macOS launchd's minimal
       // PATH and `claude` (Homebrew / npm-global / bun-global) isn't

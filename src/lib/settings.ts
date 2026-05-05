@@ -135,6 +135,17 @@ export type Settings = {
    *  the conversation state on disk (`~/.claude/projects/...`); qcode
    *  just remembers the handle. Keyed by qcode threadId. */
   claudeSessionByThread?: Record<string, string>;
+  /** Sync agent-generated media (images, audio, video, documents)
+   *  to qlaud's cross-device storage. Off by default — local-only
+   *  is the privacy-preserving default; only flip on if you want
+   *  generations accessible from other devices / web qcode.
+   *
+   *  When on, the qlaud-media skill instructs the agent to ALSO
+   *  upload to qlaud cloud after saving locally to .qcode/media/.
+   *  Backed by the qlaud /v1/artifacts/* routes (R2 + D1 ledger,
+   *  per-tenant prefix). Pricing: $0.015/GB-mo deducted from your
+   *  qlaud wallet. Local copy stays unchanged regardless. */
+  mediaCloudSync: boolean;
 };
 
 const DEFAULT_SUBAGENT_MODEL = 'claude-haiku-4-5';
@@ -154,6 +165,10 @@ const DEFAULTS: Settings = {
   // very first read on a fresh install before localStorage has
   // anything stored.
   engine: 'qcode-legacy',
+  // Media cloud sync — opt-in. Local-only is the default for
+  // privacy + offline + speed. Users explicitly flip this on in
+  // Settings when they want cross-device access.
+  mediaCloudSync: false,
 };
 
 /** Coerce stored engine value to the platform's canonical choice.
