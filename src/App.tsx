@@ -21,7 +21,7 @@ import {
   getKey,
   startSignIn,
 } from './lib/auth';
-import { isTauri, WebNotSupportedError } from './lib/tauri';
+import { handleTitleBarMouseDown, isTauri, WebNotSupportedError } from './lib/tauri';
 import { posthog } from './lib/analytics';
 import { startDeepLinkListener } from './lib/deep-link';
 import {
@@ -841,25 +841,39 @@ function Titlebar({
 }) {
   return (
     <header
+      data-tauri-drag-region
+      onMouseDown={handleTitleBarMouseDown}
       className="titlebar relative z-50 flex h-11 items-center justify-between border-b border-border/40 bg-background/40 px-3 backdrop-blur-md"
     >
-      {/* Window-drag region. The .titlebar utility class sets
-       *  -webkit-app-region: drag, which macOS WKWebView handles
-       *  natively — no JS handler needed. Inheritance carries to
-       *  every child unless the child opts out via .no-drag.
+      {/* Window-drag region. Two mechanisms, both needed:
        *
-       *  Why no `data-tauri-drag-region` attribute: that's Tauri's
-       *  legacy approach (Tauri 1) implemented via a JS mousedown
-       *  hook. Combined with the CSS approach below, two mechanisms
-       *  raced — and the JS path required `await import()` to load
-       *  Tauri's window API, which breaks macOS's user-gesture
-       *  requirement for startDragging(). Removing the attribute +
-       *  handler makes the CSS the single source of truth.
+       *  1. `.titlebar` CSS sets `-webkit-app-region: drag`. This is
+       *     the native path that WKWebView (macOS) and WebView2
+       *     (Windows) understand. It does nothing on Linux's
+       *     webkit2gtk because that engine doesn't ship Chromium's
+       *     app-region extension.
        *
-       *  Why no `transparent: false` workaround: the window IS
-       *  transparent (see tauri.conf.json) for the macOS-style
-       *  blurred background. Native CSS drag works fine in that
-       *  configuration as long as nothing fights it.
+       *  2. `data-tauri-drag-region` on the header tells Tauri's
+       *     Rust runtime to listen for mousedown on this subtree
+       *     and call window.startDragging() directly. This is the
+       *     fallback for Linux, AND the canonical path on macOS
+       *     when `transparent: true` + `titleBarStyle: Overlay`
+       *     are in effect — that combo intercepts events at the
+       *     native chrome level before WKWebView sees them, so the
+       *     CSS path silently no-ops. Tauri's path bypasses chrome.
+       *
+       *  No race: Tauri 2's handler reads the attribute at
+       *  mousedown time (no `await import()`), so it stays inside
+       *  the user-gesture window that startDragging() requires.
+       *
+       *  Children opt out via `data-tauri-drag-region="false"` (for
+       *  the Tauri path) AND the `.no-drag` class (for the CSS
+       *  path). The right-cluster div uses `.no-drag` and inherits
+       *  the false attribute via the React tree being explicit on
+       *  each interactive button below. We don't put the attribute
+       *  on every button individually — Tauri's handler also
+       *  respects the natural mousedown.preventDefault() that
+       *  buttons emit, so clicks on real <button>s already work.
        *
        *  pl-16 leaves clearance for macOS traffic-light buttons. */}
       <div className="flex items-center gap-2 md:pl-16">
@@ -871,6 +885,7 @@ function Titlebar({
             type="button"
             aria-label="Toggle sidebar"
             onClick={onToggleSidebar}
+            data-tauri-drag-region="false"
             className="no-drag grid h-8 w-8 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
             <Menu className="h-4 w-4" />
@@ -900,7 +915,7 @@ function Titlebar({
        *  drag from .titlebar, so it's the primary draggable area. */}
       <div className="h-full flex-1" aria-hidden />
 
-      <div className="no-drag flex items-center gap-1.5 sm:gap-2">
+      <div data-tauri-drag-region="false" className="no-drag flex items-center gap-1.5 sm:gap-2">
         {/* Hide mode toggle + spend bar on the smallest widths so the
          *  titlebar doesn't wrap. Both still reachable: mode via
          *  composer pill, balance via Settings. */}
@@ -969,6 +984,22 @@ function ModeToggle({
   value: AgentMode;
   onChange: (next: AgentMode) => void;
 }) {
+  // Web only does chat-style streaming via /v1/threads — there's no
+  // workspace, no read-only tool gating, no exit_plan_mode tool. The
+  // Agent/Plan toggle was carrying a desktop concept onto the web
+  // surface where neither mode means anything different. Show a
+  // static "Chat" badge instead so users aren't picking between two
+  // identical modes. Desktop keeps the real toggle.
+  if (!isTauri()) {
+    return (
+      <div
+        className="flex items-center rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10.5px] font-medium text-foreground/80"
+        title="Chat — qcode on the web. Open the desktop app for the full coding agent."
+      >
+        Chat
+      </div>
+    );
+  }
   const isPlan = value === 'plan';
   return (
     <div

@@ -7,7 +7,7 @@ import { initAnalytics, posthog } from './lib/analytics';
 import { consumeAuthCallback, hydrateAuth } from './lib/auth';
 import { hydrateThreadsFromCache, queryClient } from './lib/queries';
 import { applyTheme, getSettings } from './lib/settings';
-import { isTauri } from './lib/tauri';
+import { isTauri, preloadWindowDrag } from './lib/tauri';
 import './styles.css';
 
 // Mark the Tauri-host vs vite-dev distinction on <html> so CSS can
@@ -15,6 +15,12 @@ import './styles.css';
 // translucent and a plain opaque white in browser-mode).
 if (isTauri()) {
   document.documentElement.dataset.tauri = '1';
+  // Eagerly load the Tauri window API so handleTitleBarMouseDown()
+  // can call startDragging() synchronously inside the user gesture.
+  // Without this, the `await import('@tauri-apps/api/window')` in
+  // the click handler breaks macOS's user-gesture requirement and
+  // drag silently no-ops.
+  preloadWindowDrag();
 }
 
 // Boot sequence:

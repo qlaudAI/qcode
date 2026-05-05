@@ -3289,23 +3289,34 @@ function Composer({
                         <span className="truncate font-mono">{branch}</span>
                       </span>
                     )}
-                    {mode && (
-                      <span
-                        className={cn(
-                          'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-medium',
-                          mode === 'plan'
-                            ? 'border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'
-                            : 'border border-border/60 bg-background/60 text-foreground/80',
-                        )}
-                        title={
-                          mode === 'plan'
-                            ? 'Plan mode — read-only, proposes changes'
-                            : 'Agent mode — full toolkit'
-                        }
-                      >
-                        {mode === 'plan' ? 'Plan' : 'Agent'}
-                      </span>
-                    )}
+                    {mode &&
+                      (isTauri() ? (
+                        <span
+                          className={cn(
+                            'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-medium',
+                            mode === 'plan'
+                              ? 'border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                              : 'border border-border/60 bg-background/60 text-foreground/80',
+                          )}
+                          title={
+                            mode === 'plan'
+                              ? 'Plan mode — read-only, proposes changes'
+                              : 'Agent mode — full toolkit'
+                          }
+                        >
+                          {mode === 'plan' ? 'Plan' : 'Agent'}
+                        </span>
+                      ) : (
+                        // Web has no plan/agent distinction — the
+                        // composer pill mirrors the title-bar's "Chat"
+                        // label so the surface reads consistently.
+                        <span
+                          className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-[10.5px] font-medium text-foreground/80"
+                          title="Chat — qcode on the web"
+                        >
+                          Chat
+                        </span>
+                      ))}
                     <span
                       className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-[10.5px] font-medium text-foreground/80"
                       title="Active model — switch in the title bar"

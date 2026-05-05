@@ -65,6 +65,66 @@ export async function openExternal(url: string): Promise<void> {
   await open(url);
 }
 
+// ─── Window dragging ─────────────────────────────────────────────
+//
+// macOS WKWebView with `transparent: true` + `titleBarStyle: Overlay`
+// silently no-ops the CSS `-webkit-app-region: drag` path because
+// the OS title bar's hit-test region collides with the transparent
+// window's chrome. Tauri's own `data-tauri-drag-region` attribute
+// is an internal handler that reads the attribute at mousedown — but
+// in some Tauri 2 + Vite combos the IPC bootstrap script doesn't
+// install the listener before the first user click, so the attribute
+// silently does nothing in dev.
+//
+// Belt-and-suspenders: eager-load the window API at boot, expose a
+// sync `startWindowDrag()` that callers wire to `onMouseDown`. The
+// preload finishes long before the user can click anything, so the
+// startDragging() call happens inside the user-gesture window
+// (the dynamic-import-on-click path that the React tree used to take
+// failed exactly because the await broke that gesture chain).
+
+type TauriAppWindow = { startDragging: () => Promise<void> };
+let cachedAppWindow: TauriAppWindow | null = null;
+
+/** Idempotent. Call once near app boot when isTauri() is true. */
+export function preloadWindowDrag(): void {
+  if (!isTauri() || cachedAppWindow) return;
+  // Fire-and-forget. Failures are non-fatal — the worst case is the
+  // CSS path (which works on most platforms) is still in play.
+  void import('@tauri-apps/api/window').then((mod) => {
+    try {
+      cachedAppWindow = mod.getCurrentWindow() as TauriAppWindow;
+    } catch {
+      cachedAppWindow = null;
+    }
+  });
+}
+
+/** mousedown handler factory for the title bar. Skips the call when
+ *  the click landed on (or inside) an element opted out via the
+ *  `.no-drag` class or `data-tauri-drag-region="false"`. Returns
+ *  void synchronously — the actual startDragging() promise is
+ *  fire-and-forget so the caller doesn't have to await. */
+export function handleTitleBarMouseDown(e: React.MouseEvent): void {
+  if (!cachedAppWindow) return;
+  // Only react to primary button. Right-click + middle-click should
+  // surface their normal menus.
+  if (e.button !== 0) return;
+  const target = e.target as HTMLElement | null;
+  if (!target) return;
+  // Climb up to header looking for an opt-out marker. Also bail if
+  // we land on a real interactive element — buttons, inputs, links
+  // need their click to fire normally, and startDragging() steals
+  // the mouseup that would otherwise complete the click.
+  const optOut = target.closest(
+    '[data-tauri-drag-region="false"], .no-drag, button, a, input, textarea, select, [role="button"], [contenteditable="true"]',
+  );
+  if (optOut) return;
+  // No await — the user gesture is preserved by calling startDragging
+  // synchronously on the cached handle.
+  void cachedAppWindow.startDragging();
+}
+
 /** OS family for branching install hints / env probes. Cached for
  *  the session because it doesn't change. Returns 'unknown' outside
  *  Tauri so the UI just hides platform-specific hints. */

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Sparkles, ArrowRight, ShieldCheck } from 'lucide-react';
 
+import { handleTitleBarMouseDown } from '../lib/tauri';
 import { QlaudMark } from './QlaudMark';
 
 export function SignInGate({ onSignIn }: { onSignIn: () => Promise<void> | void }) {
@@ -21,7 +22,11 @@ export function SignInGate({ onSignIn }: { onSignIn: () => Promise<void> | void 
 
   return (
     <div className="flex h-dvh flex-col">
-      <div className="titlebar h-11 border-b border-border/60" />
+      <div
+        data-tauri-drag-region
+        onMouseDown={handleTitleBarMouseDown}
+        className="titlebar h-11 border-b border-border/60"
+      />
 
       <div className="flex flex-1 items-center justify-center px-6">
         <div className="w-full max-w-md text-center">
