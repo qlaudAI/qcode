@@ -183,6 +183,15 @@ export function useThreadsQuery(opts: {
         const liveRow = liveById.get(r.id);
         const cached = cacheById.get(r.id);
         const meta = (r.metadata ?? {}) as Record<string, unknown>;
+        // Two server sources for title, in priority order:
+        //   1. r.title — the canonical column added in migration 0022.
+        //      Set by PATCH /v1/threads/:id with {title:...}.
+        //   2. meta.title — the legacy stash from before the column
+        //      existed. Old threads still have it; preserve as fallback.
+        // metaTitle is also used to seed titleSource='auto' for those
+        // legacy rows (we can't tell if they were user-edited or
+        // auto-derived, so 'auto' is the safe-rerun default).
+        const serverTitle = r.title ?? null;
         const metaTitle =
           typeof meta.title === 'string' ? meta.title : undefined;
         const wsPath =
@@ -204,12 +213,22 @@ export function useThreadsQuery(opts: {
           (typeof meta.workspace_id === 'string'
             ? meta.workspace_id
             : undefined);
+        // Title resolution: prefer in-memory live row (most recent
+        // patches win), then localStorage cache, THEN server's
+        // canonical title column, then legacy metadata.title, then
+        // placeholder. Server-side title kicks in when the local
+        // cache has been wiped (sign-out, different device) — that's
+        // the cross-device durability we just added.
         const title =
-          liveRow?.title ?? cached?.title ?? metaTitle ?? 'New chat';
+          liveRow?.title ??
+          cached?.title ??
+          serverTitle ??
+          metaTitle ??
+          'New chat';
         const titleSource =
           liveRow?.titleSource ??
           cached?.titleSource ??
-          (metaTitle ? 'auto' : undefined);
+          (serverTitle || metaTitle ? 'auto' : undefined);
         return {
           id: r.id,
           title,

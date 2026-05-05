@@ -62,6 +62,10 @@ export type ThreadSummary = {
 export type RemoteThread = {
   id: string;
   end_user_id: string | null;
+  /** Server-side title. Populated post-create by PATCH after the
+   *  first user message; null until then (clients render
+   *  placeholder). Survives sign-out + cross-device. */
+  title: string | null;
   metadata: unknown;
   created_at: number;
   last_active_at: number;
@@ -123,8 +127,8 @@ export async function listRemoteThreads(
 }
 
 /** Shallow-merge fields into a thread's server-side metadata.
- *  Used to persist things like the auto-generated title so the
- *  sidebar shows the same name on a second device, after a cache
+ *  Used to persist things like workspace_path / pinned_at so the
+ *  sidebar shows the same shape on a second device, after a cache
  *  wipe, on the qcode-web tab — without relying on localStorage
  *  for any of those paths. Fire-and-forget at the callsite: a
  *  failed PATCH leaves the thread's prior metadata intact + the
@@ -136,6 +140,25 @@ export async function updateThreadMetadata(
   return api<RemoteThread>(`/v1/threads/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify({ metadata: patch }),
+  });
+}
+
+/** Set the canonical thread title (server-side `title` column). Use
+ *  this for the auto-derived title that fires on first send and for
+ *  the LLM-regenerated title that lands a few turns in. Title flows
+ *  through the dedicated column (added in migration 0022) so list
+ *  responses serialize it as a top-level field — no metadata
+ *  unboxing on the read side, and survives sign-out + cross-device.
+ *
+ *  Pass null to clear (uncommon — clients typically replace, not
+ *  delete). Fire-and-forget pattern same as updateThreadMetadata. */
+export async function updateThreadTitle(
+  id: string,
+  title: string | null,
+): Promise<RemoteThread> {
+  return api<RemoteThread>(`/v1/threads/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title }),
   });
 }
 

@@ -47,7 +47,7 @@ import {
 import {
   getRemoteThreadMessages,
   titleFromPrompt,
-  updateThreadMetadata,
+  updateThreadTitle,
   type RemoteThreadHistory,
   type ThreadSummary,
 } from './lib/threads';
@@ -565,6 +565,16 @@ export function App() {
       if (hadDefaultTitle && info.userText) {
         patch.title = titleFromPrompt(info.userText);
         patch.titleSource = 'auto';
+        // Persist the immediate first-send title server-side too so
+        // a sign-out + sign-in (or different device) doesn't lose
+        // it. Fire-and-forget — local cache already has it; the
+        // server is the cross-device backup.
+        void updateThreadTitle(info.threadId, patch.title).catch((e) => {
+          console.warn(
+            `[title] PATCH /v1/threads/${info.threadId} failed:`,
+            e,
+          );
+        });
       }
       patchThread(info.threadId, patch);
       void invalidateBalance();
@@ -621,18 +631,16 @@ export function App() {
           titleSource: 'auto',
         });
         // Persist server-side fire-and-forget. Failure is harmless
-        // (local cache still has the new title); next attempt
-        // will retry. The PATCH only updates metadata.title; the
-        // workspace_path/name fields server-side are preserved
-        // by the merge in handlePatchThread.
-        void updateThreadMetadata(info.threadId, { title: generated }).catch(
-          (e) => {
-            console.warn(
-              `[title-gen] PATCH /v1/threads/${info.threadId} failed:`,
-              e,
-            );
-          },
-        );
+        // (local cache still has the new title); next regen
+        // attempt will retry. Uses the dedicated `title` column
+        // (added in migration 0022) instead of the legacy
+        // metadata.title stash.
+        void updateThreadTitle(info.threadId, generated).catch((e) => {
+          console.warn(
+            `[title-gen] PATCH /v1/threads/${info.threadId} failed:`,
+            e,
+          );
+        });
       })();
     },
     [],
