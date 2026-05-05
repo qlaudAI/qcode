@@ -6,6 +6,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   Download,
   FileText,
   FolderOpen,
@@ -1849,12 +1850,54 @@ function BlockRow({
   }
   if (!block.text) return null;
   return (
-    <div className="flex gap-3">
+    <div className="group flex gap-3">
       <Avatar />
       <div className="flex-1 pt-0.5">
         {block.skill && <SkillAttribution skill={block.skill} model={block.resolvedModel} />}
         <Markdown source={block.text} streaming={busy} />
+        {/* Hover-revealed message actions. Lives at the bottom of
+         *  each assistant turn so it's adjacent to the content
+         *  it'll act on. opacity-0 → group-hover:opacity-100 keeps
+         *  the chat surface clean by default; users only see the
+         *  controls when they're reaching for them. Skipped while
+         *  the message is still streaming — copying mid-stream
+         *  would yield partial content. */}
+        {!busy && <MessageActions text={block.text} />}
       </div>
+    </div>
+  );
+}
+
+// Hover-revealed action bar on assistant messages. Today: copy.
+// Tomorrow: regenerate with different model, fork into new thread,
+// share read-only link. Pattern lifted from ChatGPT / Claude.ai —
+// having the actions adjacent to the message they target reduces
+// the cognitive load of "where do I click to copy this".
+function MessageActions({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    });
+  }
+  return (
+    <div className="mt-2 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
+      <button
+        type="button"
+        onClick={copy}
+        className={cn(
+          'flex items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-[11px] font-medium transition-all',
+          copied
+            ? 'border-emerald-500/40 text-emerald-600 dark:text-emerald-400'
+            : 'text-muted-foreground hover:border-border hover:bg-muted/60 hover:text-foreground',
+        )}
+        aria-label={copied ? 'Copied' : 'Copy message'}
+        title={copied ? 'Copied' : 'Copy message'}
+      >
+        {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+        {copied ? 'Copied' : 'Copy'}
+      </button>
     </div>
   );
 }

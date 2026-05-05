@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { MessageSquare, Trash2 } from 'lucide-react';
+import { MessageSquare, Pin, PinOff, Trash2 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 
 import { cn } from '../lib/cn';
@@ -11,12 +11,17 @@ export function ThreadList({
   currentId,
   onPick,
   onDelete,
+  onTogglePin,
   snippetByThread,
 }: {
   threads: ThreadSummary[];
   currentId: string | null;
   onPick: (id: string) => void;
   onDelete: (id: string) => void;
+  /** Toggle pin state. Optional — sections that don't want pins
+   *  (semantic-search results, anything non-canonical) leave it
+   *  unwired and the row hides the pin affordance. */
+  onTogglePin?: (id: string) => void;
   /** Per-thread excerpt from semantic search, rendered under the
    *  title so the user gets a content preview without opening the
    *  thread. Null/undefined entries fall back to title-only. */
@@ -50,6 +55,7 @@ export function ThreadList({
             active={t.id === currentId}
             onPick={() => onPick(t.id)}
             onDelete={() => onDelete(t.id)}
+            onTogglePin={onTogglePin ? () => onTogglePin(t.id) : undefined}
             onHover={() => {
               // Hover prefetch: warms the message-history query so
               // the click-to-render is ≤1 frame from cache. Idempotent
@@ -70,6 +76,7 @@ function Row({
   active,
   onPick,
   onDelete,
+  onTogglePin,
   onHover,
 }: {
   thread: ThreadSummary;
@@ -77,10 +84,12 @@ function Row({
   active: boolean;
   onPick: () => void;
   onDelete: () => void;
+  onTogglePin?: () => void;
   onHover?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const stamp = relativeTime(thread.updatedAt);
+  const pinned = !!thread.pinnedAt;
   return (
     <motion.li
       // layout="position" only: animate the row's vertical position
@@ -121,12 +130,22 @@ function Row({
         className="flex min-w-0 flex-1 flex-col gap-0.5"
       >
         <div className="flex min-w-0 items-center gap-2">
-          <MessageSquare
-            className={cn(
-              'h-3 w-3 shrink-0',
-              active ? 'text-foreground' : 'text-muted-foreground',
-            )}
-          />
+          {pinned ? (
+            <Pin
+              className={cn(
+                'h-3 w-3 shrink-0 fill-current',
+                active ? 'text-primary' : 'text-primary/80',
+              )}
+              aria-label="Pinned"
+            />
+          ) : (
+            <MessageSquare
+              className={cn(
+                'h-3 w-3 shrink-0',
+                active ? 'text-foreground' : 'text-muted-foreground',
+              )}
+            />
+          )}
           <span
             className={cn(
               'truncate text-xs',
@@ -142,11 +161,11 @@ function Row({
           </span>
         )}
       </button>
-      {/* Right-side rail: timestamp by default, swaps for the trash
-       *  affordance on hover. Two micro-states (idle / confirming)
-       *  animate via transition-opacity on top of the timestamp so
-       *  the user sees motion when they engage, nothing otherwise. */}
-      <div className="relative shrink-0">
+      {/* Right-side rail: timestamp by default; on hover (or when
+       *  the row is pinned), reveal pin + trash actions. The
+       *  timestamp fades out under the actions so the row width
+       *  doesn't jitter as state changes. */}
+      <div className="relative flex shrink-0 items-center">
         <span
           className={cn(
             'pointer-events-none block text-[10px] tabular-nums text-muted-foreground/70 transition-opacity',
@@ -157,28 +176,59 @@ function Row({
         >
           {stamp}
         </span>
-        <button
-          aria-label="Delete conversation"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (confirming) {
-              onDelete();
-              setConfirming(false);
-            } else {
-              setConfirming(true);
-              setTimeout(() => setConfirming(false), 2500);
-            }
-          }}
+        <div
           className={cn(
-            'absolute inset-y-0 right-0 grid place-items-center rounded p-1 transition-all',
-            confirming
-              ? 'text-primary opacity-100 scale-110'
-              : 'text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-100',
+            'absolute inset-y-0 right-0 flex items-center gap-0.5 transition-opacity',
+            confirming ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
           )}
-          title={confirming ? 'Click again to confirm' : 'Delete'}
         >
-          <Trash2 className="h-3 w-3" />
-        </button>
+          {onTogglePin && (
+            <button
+              type="button"
+              aria-label={pinned ? 'Unpin conversation' : 'Pin conversation'}
+              onClick={(e) => {
+                e.stopPropagation();
+                onTogglePin();
+              }}
+              className={cn(
+                'grid place-items-center rounded p-1 transition-colors',
+                pinned
+                  ? 'text-primary hover:text-primary/80'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+              title={pinned ? 'Unpin' : 'Pin to top'}
+            >
+              {pinned ? (
+                <PinOff className="h-3 w-3" />
+              ) : (
+                <Pin className="h-3 w-3" />
+              )}
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label="Delete conversation"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (confirming) {
+                onDelete();
+                setConfirming(false);
+              } else {
+                setConfirming(true);
+                setTimeout(() => setConfirming(false), 2500);
+              }
+            }}
+            className={cn(
+              'grid place-items-center rounded p-1 transition-all',
+              confirming
+                ? 'scale-110 text-primary'
+                : 'text-muted-foreground hover:text-foreground',
+            )}
+            title={confirming ? 'Click again to confirm' : 'Delete'}
+          >
+            <Trash2 className="h-3 w-3" />
+          </button>
+        </div>
       </div>
     </motion.li>
   );

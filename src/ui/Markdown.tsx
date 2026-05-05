@@ -1,5 +1,16 @@
 import { memo, useEffect, useMemo, useState } from 'react';
-import { Check, Copy, FileText, ExternalLink } from 'lucide-react';
+import {
+  AlertTriangle,
+  Check,
+  Copy,
+  ExternalLink,
+  FileText,
+  Info,
+  Lightbulb,
+  ShieldAlert,
+  Sparkles,
+  WrapText,
+} from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { motion } from 'motion/react';
@@ -172,13 +183,29 @@ const MARKDOWN_COMPONENTS: Components = {
       </li>
     );
   },
-  blockquote: ({ children }) => (
-    <FadeBlock>
-      <blockquote className="my-3 rounded-r-md border-l-2 border-primary/60 bg-muted/40 px-4 py-2 italic text-foreground/85">
-        {children}
-      </blockquote>
-    </FadeBlock>
-  ),
+  blockquote: ({ children, node }) => {
+    // GitHub-style admonitions — `> [!NOTE]\n> body` etc. The marker
+    // is parsed as a regular paragraph by remark-gfm, which means the
+    // first child of the blockquote is a <p> whose first text node
+    // starts with "[!KIND]". Detect that, render as a Callout.
+    // Fall through to the default styled blockquote when nothing
+    // matches so non-admonition quotes look the same as before.
+    const kind = detectAdmonitionKind(node);
+    if (kind) {
+      return (
+        <FadeBlock>
+          <Callout kind={kind}>{stripAdmonitionMarker(children)}</Callout>
+        </FadeBlock>
+      );
+    }
+    return (
+      <FadeBlock>
+        <blockquote className="my-3 rounded-r-md border-l-2 border-primary/60 bg-muted/40 px-4 py-2 italic text-foreground/85">
+          {children}
+        </blockquote>
+      </FadeBlock>
+    );
+  },
   hr: () => (
     <FadeBlock>
       <hr className="my-5 border-0 border-t border-border/60" />
@@ -326,6 +353,177 @@ function FileLink({ href, label }: { href: string; label: string }) {
   );
 }
 
+// ─── Admonitions (GitHub-style callouts) ──────────────────────────
+//
+// Recognized markers:
+//   > [!NOTE]       informational
+//   > [!TIP]        helpful aside
+//   > [!IMPORTANT]  emphasized — yellow
+//   > [!WARNING]    caution — amber
+//   > [!CAUTION]    danger — red
+//
+// remark-gfm parses `> [!NOTE]\n> body` as a blockquote whose first
+// child is a paragraph containing text "[!NOTE]" followed by the
+// body. We sniff the AST for the marker and re-render as a Callout
+// component with kind-appropriate color + icon. Keeps the original
+// children tree (just minus the marker text node) so links, code,
+// and other inline formatting inside the callout still render.
+
+type AdmonitionKind = 'note' | 'tip' | 'important' | 'warning' | 'caution';
+
+const ADMONITION_RE = /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/;
+
+function detectAdmonitionKind(node: unknown): AdmonitionKind | null {
+  // Walk the AST: blockquote → first child <p> → first text node.
+  const n = node as
+    | {
+        children?: Array<{
+          tagName?: string;
+          children?: Array<{ type?: string; value?: string }>;
+        }>;
+      }
+    | undefined;
+  const firstChild = n?.children?.find((c) => c?.tagName === 'p');
+  const firstText = firstChild?.children?.[0];
+  if (firstText?.type !== 'text' || typeof firstText.value !== 'string') {
+    return null;
+  }
+  const m = ADMONITION_RE.exec(firstText.value);
+  if (!m) return null;
+  return m[1]!.toLowerCase() as AdmonitionKind;
+}
+
+// Remove the marker text node (and any leading whitespace) from the
+// rendered children. The marker is always alone on its own line in
+// GitHub's spec, which means after parsing it's the entirety of the
+// first <p>'s first text node — but the first <p> may also contain
+// the body text on subsequent lines. Easier than trying to surgically
+// edit React elements: we just hide the first paragraph entirely
+// when it contains ONLY the marker (which is the spec form), and
+// pass the rest through. If a user did `> [!NOTE] body on same line`
+// (out-of-spec), we strip just the marker prefix.
+function stripAdmonitionMarker(children: React.ReactNode): React.ReactNode {
+  const arr = Array.isArray(children) ? children : [children];
+  return arr.map((child, i) => {
+    if (typeof child !== 'object' || child === null) return child;
+    // ReactMarkdown wraps text in <p>. The first <p> holds the
+    // marker. If that <p>'s text is exactly the marker, drop the
+    // whole <p>. Otherwise keep the rest of the children but
+    // strip the marker prefix.
+    const el = child as React.ReactElement<{ children?: React.ReactNode }>;
+    if (i === 0 && el.props && Array.isArray(el.props.children)) {
+      const inner = el.props.children;
+      const first = inner[0];
+      if (typeof first === 'string' && ADMONITION_RE.test(first)) {
+        // Spec form: marker alone in the first paragraph, body
+        // starts at children[1+]. Drop this paragraph.
+        return null;
+      }
+      if (typeof first === 'string') {
+        // Out-of-spec: marker followed by body on same line. Strip
+        // marker prefix only.
+        const stripped = first.replace(ADMONITION_RE, '').trimStart();
+        if (stripped !== first) {
+          return { ...el, props: { ...el.props, children: [stripped, ...inner.slice(1)] } };
+        }
+      }
+    }
+    return child;
+  });
+}
+
+const ADMONITION_STYLES: Record<
+  AdmonitionKind,
+  {
+    icon: typeof Info;
+    label: string;
+    /** Tailwind classes — left-bar color, soft tint background, label
+     *  color, icon color. Picked to read clearly in both themes
+     *  without screaming for attention; tuned to the existing
+     *  qcode-prose palette. */
+    border: string;
+    bg: string;
+    text: string;
+    iconColor: string;
+  }
+> = {
+  note: {
+    icon: Info,
+    label: 'Note',
+    border: 'border-sky-500/60',
+    bg: 'bg-sky-500/[0.06]',
+    text: 'text-sky-600 dark:text-sky-300',
+    iconColor: 'text-sky-500 dark:text-sky-400',
+  },
+  tip: {
+    icon: Lightbulb,
+    label: 'Tip',
+    border: 'border-emerald-500/60',
+    bg: 'bg-emerald-500/[0.06]',
+    text: 'text-emerald-600 dark:text-emerald-300',
+    iconColor: 'text-emerald-500 dark:text-emerald-400',
+  },
+  important: {
+    icon: Sparkles,
+    label: 'Important',
+    border: 'border-violet-500/60',
+    bg: 'bg-violet-500/[0.06]',
+    text: 'text-violet-600 dark:text-violet-300',
+    iconColor: 'text-violet-500 dark:text-violet-400',
+  },
+  warning: {
+    icon: AlertTriangle,
+    label: 'Warning',
+    border: 'border-amber-500/60',
+    bg: 'bg-amber-500/[0.07]',
+    text: 'text-amber-600 dark:text-amber-300',
+    iconColor: 'text-amber-500 dark:text-amber-400',
+  },
+  caution: {
+    icon: ShieldAlert,
+    label: 'Caution',
+    border: 'border-rose-500/60',
+    bg: 'bg-rose-500/[0.06]',
+    text: 'text-rose-600 dark:text-rose-300',
+    iconColor: 'text-rose-500 dark:text-rose-400',
+  },
+};
+
+function Callout({
+  kind,
+  children,
+}: {
+  kind: AdmonitionKind;
+  children: React.ReactNode;
+}) {
+  const style = ADMONITION_STYLES[kind];
+  const Icon = style.icon;
+  return (
+    <div
+      className={cn(
+        'my-3 rounded-r-md border-l-[3px] py-2.5 pl-3.5 pr-4',
+        style.border,
+        style.bg,
+      )}
+      role="note"
+      aria-label={style.label}
+    >
+      <div
+        className={cn(
+          'mb-1 flex items-center gap-1.5 text-[12px] font-semibold uppercase tracking-wider',
+          style.text,
+        )}
+      >
+        <Icon className={cn('h-3.5 w-3.5', style.iconColor)} />
+        {style.label}
+      </div>
+      <div className="text-[14px] leading-[1.6] text-foreground/90 [&_p]:my-1.5 [&_p:last-child]:mb-0 [&_p:first-child]:mt-0">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 // ─── Code block with shiki ───────────────────────────────────────
 
 const SHIKI_THEME_DARK = 'github-dark-default';
@@ -390,9 +588,18 @@ function useIsDarkMode(): boolean {
 
 function CodeBlock({ lang, code }: { lang: string; code: string }) {
   const [copied, setCopied] = useState(false);
+  const [wrap, setWrap] = useState(false);
   const isDark = useIsDarkMode();
   const theme = isDark ? SHIKI_THEME_DARK : SHIKI_THEME_LIGHT;
   const langLabel = lang || 'text';
+  // Filename detection — agent code blocks routinely lead with a
+  // path comment (`// src/foo.ts`, `# foo.py`, `<!-- foo.html -->`,
+  // `-- foo.sql`). Promote the path into the header so the user
+  // doesn't need to read the first line to know what file they're
+  // looking at. Anthropic Console + GitHub Gist do this and it makes
+  // every snippet self-locating. The original line stays in the code
+  // body — stripping would surprise users who copy the block.
+  const filename = useMemo(() => detectFilename(langLabel, code), [langLabel, code]);
   const cacheKey = `${theme}|${langLabel}|${code}`;
   const [highlighted, setHighlighted] = useState<string | null>(() => {
     return HIGHLIGHT_CACHE.get(cacheKey) ?? null;
@@ -436,25 +643,67 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
   return (
     <FadeBlock>
       <div className="group my-3 overflow-hidden rounded-lg border border-border/60 bg-[#0d1117] dark:bg-[#0d1117]">
-        <header className="flex items-center justify-between border-b border-white/5 bg-[#161b22] px-3.5 py-1.5">
-          <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-white/55">
-            {langLabel}
-          </span>
-          <button
-            onClick={copy}
-            className={cn(
-              'flex items-center gap-1.5 rounded-md border border-transparent px-2 py-0.5 text-[10.5px] font-medium uppercase tracking-wider transition-all',
-              copied
-                ? 'border-emerald-400/30 text-emerald-300'
-                : 'text-white/55 hover:border-white/20 hover:bg-white/5 hover:text-white',
+        <header className="flex items-center justify-between gap-2 border-b border-white/5 bg-[#161b22] px-3.5 py-1.5">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className="shrink-0 font-mono text-[10.5px] uppercase tracking-[0.14em] text-white/55">
+              {langLabel}
+            </span>
+            {filename && (
+              <>
+                <span className="shrink-0 text-white/20" aria-hidden>·</span>
+                <span
+                  className="truncate font-mono text-[11.5px] text-white/75"
+                  title={filename}
+                >
+                  {filename}
+                </span>
+              </>
             )}
-            aria-label={copied ? 'Copied' : 'Copy code'}
-          >
-            {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-            {copied ? 'Copied' : 'Copy'}
-          </button>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              onClick={() => setWrap((v) => !v)}
+              className={cn(
+                'flex items-center gap-1 rounded-md border border-transparent px-2 py-0.5 text-[10.5px] font-medium uppercase tracking-wider transition-all',
+                wrap
+                  ? 'border-white/20 bg-white/10 text-white'
+                  : 'text-white/55 hover:border-white/20 hover:bg-white/5 hover:text-white',
+              )}
+              aria-label={wrap ? 'Disable soft wrap' : 'Enable soft wrap'}
+              aria-pressed={wrap}
+              title={wrap ? 'Disable soft wrap' : 'Enable soft wrap'}
+            >
+              <WrapText className="h-3 w-3" />
+              <span className="hidden sm:inline">{wrap ? 'Wrap' : 'Wrap'}</span>
+            </button>
+            <button
+              onClick={copy}
+              className={cn(
+                'flex items-center gap-1.5 rounded-md border border-transparent px-2 py-0.5 text-[10.5px] font-medium uppercase tracking-wider transition-all',
+                copied
+                  ? 'border-emerald-400/30 text-emerald-300'
+                  : 'text-white/55 hover:border-white/20 hover:bg-white/5 hover:text-white',
+              )}
+              aria-label={copied ? 'Copied' : 'Copy code'}
+            >
+              {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
         </header>
-        <div className="qcode-shiki max-h-[420px] overflow-auto text-[12.5px] leading-[1.55]">
+        <div
+          className={cn(
+            'qcode-shiki max-h-[420px] overflow-auto text-[12.5px] leading-[1.55]',
+            // Soft wrap mode: pre wraps at the container's edge with
+            // a hanging indent so wrapped continuations align under
+            // the start of the line. Default keeps long lines on a
+            // single horizontal-scroll line — matches every IDE's
+            // off-state.
+            wrap
+              ? '[&_pre]:!whitespace-pre-wrap [&_pre]:!break-words'
+              : '[&_pre]:!whitespace-pre',
+          )}
+        >
           {highlighted ? (
             <div
               className="[&_pre]:!bg-transparent [&_pre]:m-0 [&_pre]:px-4 [&_pre]:py-3 [&_pre]:font-mono"
@@ -467,4 +716,92 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
       </div>
     </FadeBlock>
   );
+}
+
+// First-line filename detection. Coding agents almost always lead a
+// code block with a path comment so the user knows where the snippet
+// goes. Recognize the common shapes per language family.
+//
+//   //  src/foo.ts                 (C-family: ts/js/rs/go/java/cpp/...)
+//   #   foo.py                     (script: py/sh/rb/yaml/toml/...)
+//   --  foo.sql                    (SQL)
+//   <!-- foo.html -->              (HTML/XML)
+//   /* foo.css */                  (CSS — covered by C-family below too)
+//
+// Returns null when nothing on the first line resembles a path. The
+// path is plucked out (no leading comment marker) and rendered in the
+// header. The line stays in the code body to preserve copy fidelity.
+function detectFilename(lang: string, code: string): string | null {
+  const firstLine = code.split('\n', 1)[0]?.trim();
+  if (!firstLine) return null;
+  // C-family double slash: "// path/to/foo.ts" possibly with trailing
+  // comment text. Take the first token that looks like a path.
+  // Hash-comment family: "# path/to/foo.py".
+  // SQL: "-- path/to/foo.sql".
+  // HTML: "<!-- path/to/foo.html -->".
+  // CSS block comment: "/* path/to/foo.css */".
+  const patterns: RegExp[] = [
+    /^\/\/\s*([\w./@-]+\.[a-zA-Z0-9]{1,8})\b/,
+    /^#\s*([\w./@-]+\.[a-zA-Z0-9]{1,8})\b/,
+    /^--\s*([\w./@-]+\.[a-zA-Z0-9]{1,8})\b/,
+    /^<!--\s*([\w./@-]+\.[a-zA-Z0-9]{1,8})\s*-->/,
+    /^\/\*\s*([\w./@-]+\.[a-zA-Z0-9]{1,8})\s*\*\//,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(firstLine);
+    if (m && m[1]) {
+      // Sanity check: the path's extension should plausibly match
+      // the language hint when both are present. Prevents false
+      // positives like a python block whose first line happens to
+      // mention ".tsx" in prose.
+      const ext = m[1].split('.').pop()?.toLowerCase();
+      if (ext && lang && lang !== 'text') {
+        if (!extMatchesLang(ext, lang)) continue;
+      }
+      return m[1];
+    }
+  }
+  return null;
+}
+
+// Loose extension/language compatibility. Returns true on a clear
+// match, true on unknown languages (don't false-reject obscure langs),
+// false on a clear mismatch. Used only as a tiebreaker in
+// detectFilename so a few false negatives are fine.
+function extMatchesLang(ext: string, lang: string): boolean {
+  const l = lang.toLowerCase();
+  const groups: Record<string, string[]> = {
+    ts: ['ts', 'tsx', 'typescript'],
+    tsx: ['ts', 'tsx', 'typescript'],
+    js: ['js', 'jsx', 'javascript', 'mjs', 'cjs'],
+    jsx: ['js', 'jsx', 'javascript'],
+    mjs: ['js', 'mjs', 'javascript'],
+    cjs: ['js', 'cjs', 'javascript'],
+    py: ['py', 'python'],
+    rs: ['rs', 'rust'],
+    go: ['go'],
+    java: ['java'],
+    rb: ['rb', 'ruby'],
+    php: ['php'],
+    c: ['c'],
+    cpp: ['cpp', 'cxx', 'cc', 'c++', 'h', 'hpp'],
+    hpp: ['cpp', 'cxx', 'hpp', 'h'],
+    h: ['c', 'cpp', 'h', 'hpp'],
+    sql: ['sql'],
+    yaml: ['yaml', 'yml'],
+    yml: ['yaml', 'yml'],
+    toml: ['toml'],
+    json: ['json'],
+    md: ['md', 'markdown'],
+    sh: ['sh', 'bash', 'shell', 'zsh'],
+    bash: ['sh', 'bash', 'shell'],
+    css: ['css'],
+    html: ['html', 'htm'],
+    xml: ['xml', 'html'],
+    docker: ['docker', 'dockerfile'],
+    dockerfile: ['docker', 'dockerfile'],
+  };
+  const accepts = groups[ext];
+  if (!accepts) return true; // unknown ext — let it through
+  return accepts.includes(l);
 }

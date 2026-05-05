@@ -48,6 +48,13 @@ export type ThreadSummary = {
    *  hasn't shipped yet but the field is here so the contract
    *  is correct from day one. */
   titleSource?: 'auto' | 'user';
+  /** Wall-clock ms when the user pinned this thread, or undefined
+   *  when not pinned. Pinned threads float above the time-bucketed
+   *  groups in the sidebar and never age out into "Earlier". The
+   *  user toggles via the row's hover-revealed pin icon or the
+   *  ⌘D shortcut. Persisted both locally and in qlaud thread
+   *  metadata so it survives reinstalls + cross-device sync. */
+  pinnedAt?: number;
 };
 
 // ─── Remote API ────────────────────────────────────────────────────

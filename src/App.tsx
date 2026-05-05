@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ChevronRight,
   Download,
@@ -36,6 +36,7 @@ import {
   patchThread,
   qk,
   queryClient,
+  togglePinThread,
   useAccountQuery,
   useBalanceQuery,
   useCreateThreadMutation,
@@ -75,7 +76,14 @@ import { FileTree } from './ui/FileTree';
 import { ModelPicker } from './ui/ModelPicker';
 import { SettingsDrawer } from './ui/SettingsDrawer';
 import { SignInGate } from './ui/SignInGate';
+import { StatusBar } from './ui/StatusBar';
 import { ThreadList } from './ui/ThreadList';
+// Vite resolves JSON imports at build time. Inlines just the
+// version string at the call site; the rest of package.json is
+// tree-shaken away. Status bar renders this; click opens the
+// GitHub releases page.
+import pkg from '../package.json';
+const APP_VERSION = pkg.version;
 
 // Extract a thread id from the URL path. qlaud thread ids are
 // UUIDs (8-4-4-4-12 hex), so we accept either a bare segment that
@@ -734,6 +742,7 @@ export function App() {
               switchThread(id);
             }}
             onDeleteThread={removeThread}
+            onTogglePin={togglePinThread}
             onActivateWorkspace={(id) => {
               closeSidebarIfMobile();
               onActivateWorkspace(id);
@@ -762,6 +771,17 @@ export function App() {
           />
         </main>
       </div>
+
+      {/* Status bar — persistent bottom strip showing workspace,
+       *  branch, model, mode, connection, version. VS Code / Cursor
+       *  pattern. Sits BELOW the sidebar+chat row, so it spans the
+       *  full app width. */}
+      <StatusBar
+        workspace={workspace}
+        model={model}
+        mode={mode}
+        appVersion={APP_VERSION}
+      />
 
       <SettingsDrawer
         open={settingsOpen}
@@ -1036,6 +1056,7 @@ function Sidebar({
   onNewChat,
   onPickThread,
   onDeleteThread,
+  onTogglePin,
   onActivateWorkspace,
   onClose,
 }: {
@@ -1046,6 +1067,10 @@ function Sidebar({
   onNewChat: () => void;
   onPickThread: (id: string) => void;
   onDeleteThread: (id: string) => void;
+  /** Toggle pin state on a thread. Pinned threads float above the
+   *  time-grouped sections in each workspace and never age out into
+   *  "Earlier". */
+  onTogglePin: (id: string) => void;
   /** Activate a workspace from the registry (sidebar header click).
    *  Replaces the current workspace + auto-picks its most recent
    *  thread. */
@@ -1182,6 +1207,7 @@ function Sidebar({
           activeWorkspaceId={workspace?.id ?? null}
           onPick={onPickThread}
           onDelete={onDeleteThread}
+          onTogglePin={onTogglePin}
           onActivateWorkspace={onActivateWorkspace}
           snippetByThread={snippetByThread}
         />
@@ -1197,11 +1223,12 @@ function Sidebar({
               </span>
             )}
           </div>
-          <ThreadList
+          <TimeBucketedThreads
             threads={chatsOnly(visibleThreads, workspaces)}
-            currentId={currentThreadId}
+            currentThreadId={currentThreadId}
             onPick={onPickThread}
             onDelete={onDeleteThread}
+            onTogglePin={onTogglePin}
             snippetByThread={snippetByThread}
           />
           {filterLc && !searching && visibleThreads.length === 0 && (
@@ -1336,6 +1363,7 @@ function WorkspacesSection({
   activeWorkspaceId,
   onPick,
   onDelete,
+  onTogglePin,
   onActivateWorkspace,
   snippetByThread,
 }: {
@@ -1345,6 +1373,7 @@ function WorkspacesSection({
   activeWorkspaceId: string | null;
   onPick: (id: string) => void;
   onDelete: (id: string) => void;
+  onTogglePin: (id: string) => void;
   onActivateWorkspace: (id: string) => void;
   snippetByThread?: Map<string, string> | null;
 }) {
@@ -1413,6 +1442,7 @@ function WorkspacesSection({
             currentThreadId={currentThreadId}
             onPick={onPick}
             onDelete={onDelete}
+            onTogglePin={onTogglePin}
             onActivate={onActivateWorkspace}
             snippetByThread={snippetByThread}
           />
@@ -1431,6 +1461,7 @@ function WorkspaceGroup({
   currentThreadId,
   onPick,
   onDelete,
+  onTogglePin,
   onActivate,
   snippetByThread,
 }: {
@@ -1448,6 +1479,7 @@ function WorkspaceGroup({
   currentThreadId: string | null;
   onPick: (id: string) => void;
   onDelete: (id: string) => void;
+  onTogglePin: (id: string) => void;
   /** Activate this workspace from the registry. */
   onActivate: (id: string) => void;
   snippetByThread?: Map<string, string> | null;
@@ -1568,17 +1600,140 @@ function WorkspaceGroup({
         )}
       >
         <div className="overflow-hidden pl-3">
-          <ThreadList
+          <TimeBucketedThreads
             threads={sorted}
-            currentId={currentThreadId}
+            currentThreadId={currentThreadId}
             onPick={onPick}
             onDelete={onDelete}
+            onTogglePin={onTogglePin}
             snippetByThread={snippetByThread}
           />
         </div>
       </div>
     </li>
   );
+}
+
+// Time-bucketed thread list under each workspace. Pinned threads
+// float to the top under a "Pinned" header; the remaining rows fall
+// into Today / Yesterday / This Week / Earlier sections. Pattern
+// borrowed from Linear, Things 3, and Cursor — flat newest-first
+// lists become unreadable past ~30 entries, but date-bucketed lists
+// scan well even at 200+.
+//
+// Buckets render as small uppercase muted labels; empty buckets are
+// hidden so a sparse workspace doesn't show empty section headers.
+function TimeBucketedThreads({
+  threads,
+  currentThreadId,
+  onPick,
+  onDelete,
+  onTogglePin,
+  snippetByThread,
+}: {
+  threads: ThreadSummary[];
+  currentThreadId: string | null;
+  onPick: (id: string) => void;
+  onDelete: (id: string) => void;
+  onTogglePin: (id: string) => void;
+  snippetByThread?: Map<string, string> | null;
+}) {
+  const buckets = useMemo(() => bucketThreadsByTime(threads), [threads]);
+  if (buckets.length === 0) {
+    return (
+      <p className="px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+        No conversations yet. Press ⌘N to start one.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {buckets.map((b) => (
+        <div key={b.label}>
+          <div className="mb-0.5 flex items-center gap-2 px-2">
+            <span className="text-[9.5px] font-semibold uppercase tracking-[0.13em] text-muted-foreground/70">
+              {b.label}
+            </span>
+            {b.label === 'Pinned' && (
+              <span aria-hidden className="text-muted-foreground/40">·</span>
+            )}
+            <span className="text-[9.5px] tabular-nums text-muted-foreground/50">
+              {b.threads.length}
+            </span>
+          </div>
+          <ThreadList
+            threads={b.threads}
+            currentId={currentThreadId}
+            onPick={onPick}
+            onDelete={onDelete}
+            onTogglePin={onTogglePin}
+            snippetByThread={snippetByThread}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Date-bucketing logic. Splits the input into:
+//
+//   Pinned       — pinnedAt set; intra-bucket order = pinnedAt desc
+//                  (most recently pinned at top).
+//   Today        — updatedAt within current local-time day.
+//   Yesterday    — updatedAt within previous local-time day.
+//   This Week    — updatedAt within last 7 days from start-of-today,
+//                  excluding today/yesterday already bucketed.
+//   This Month   — updatedAt within last 30 days, excluding above.
+//   Earlier      — everything older.
+//
+// Each non-pinned bucket sorts internally by updatedAt desc.
+// Empty buckets are filtered out.
+function bucketThreadsByTime(
+  threads: ThreadSummary[],
+): Array<{ label: string; threads: ThreadSummary[] }> {
+  const now = new Date();
+  const startOfToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+  ).getTime();
+  const startOfYesterday = startOfToday - 24 * 60 * 60 * 1000;
+  const startOfWeek = startOfToday - 7 * 24 * 60 * 60 * 1000;
+  const startOfMonth = startOfToday - 30 * 24 * 60 * 60 * 1000;
+
+  const pinned: ThreadSummary[] = [];
+  const today: ThreadSummary[] = [];
+  const yesterday: ThreadSummary[] = [];
+  const thisWeek: ThreadSummary[] = [];
+  const thisMonth: ThreadSummary[] = [];
+  const earlier: ThreadSummary[] = [];
+
+  for (const t of threads) {
+    if (t.pinnedAt) {
+      pinned.push(t);
+      continue;
+    }
+    const ts = t.updatedAt;
+    if (ts >= startOfToday) today.push(t);
+    else if (ts >= startOfYesterday) yesterday.push(t);
+    else if (ts >= startOfWeek) thisWeek.push(t);
+    else if (ts >= startOfMonth) thisMonth.push(t);
+    else earlier.push(t);
+  }
+
+  pinned.sort((a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0));
+  for (const arr of [today, yesterday, thisWeek, thisMonth, earlier]) {
+    arr.sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  const out: Array<{ label: string; threads: ThreadSummary[] }> = [];
+  if (pinned.length) out.push({ label: 'Pinned', threads: pinned });
+  if (today.length) out.push({ label: 'Today', threads: today });
+  if (yesterday.length) out.push({ label: 'Yesterday', threads: yesterday });
+  if (thisWeek.length) out.push({ label: 'This Week', threads: thisWeek });
+  if (thisMonth.length) out.push({ label: 'This Month', threads: thisMonth });
+  if (earlier.length) out.push({ label: 'Earlier', threads: earlier });
+  return out;
 }
 
 // Titlebar dropdown that picks which view the right rail shows.

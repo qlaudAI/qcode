@@ -218,6 +218,17 @@ export function useThreadsQuery(opts: {
           ...(wsId ? { workspaceId: wsId } : {}),
           ...(wsPath ? { workspacePath: wsPath } : {}),
           ...(wsName ? { workspaceName: wsName } : {}),
+          // pinnedAt is local-first (live/cached prefer); server
+          // metadata is the cross-device fallback, set via PATCH
+          // when the user pins. Same priority shape as titleSource —
+          // user intent wins over whatever the server happens to have.
+          ...(liveRow?.pinnedAt
+            ? { pinnedAt: liveRow.pinnedAt }
+            : cached?.pinnedAt
+              ? { pinnedAt: cached.pinnedAt }
+              : typeof meta.pinned_at === 'number'
+                ? { pinnedAt: meta.pinned_at }
+                : {}),
         };
       });
       // Local-only rows ride at the top so they remain visible (the
@@ -546,6 +557,30 @@ export function patchThread(id: string, patch: Partial<ThreadSummary>): void {
   const next = [updated, ...prev.filter((t) => t.id !== id)];
   queryClient.setQueryData<ThreadSummary[]>(qk.threads, next);
   saveCachedSummaries(next);
+}
+
+/** Toggle pin state on a thread. Updates cache immediately for
+ *  instant feedback, then fire-and-forget PATCHes server-side
+ *  metadata so the pin survives across devices and reinstalls. A
+ *  failed PATCH leaves the local pin intact — worst case the user
+ *  has to re-pin on a different device, which is still better than
+ *  blocking the UI on a network round-trip. */
+export function togglePinThread(id: string): void {
+  const prev = queryClient.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
+  const row = prev.find((t) => t.id === id);
+  if (!row) return;
+  const nextPinnedAt = row.pinnedAt ? undefined : Date.now();
+  patchThread(id, { pinnedAt: nextPinnedAt });
+  // Mirror to qlaud metadata so other devices see the same pin
+  // state. Use null (not undefined) on un-pin so the server-side
+  // shallow-merge actually clears the field.
+  void import('./threads').then(({ updateThreadMetadata }) =>
+    updateThreadMetadata(id, {
+      pinned_at: nextPinnedAt ?? null,
+    }).catch(() => {
+      /* best-effort — local cache already updated */
+    }),
+  );
 }
 
 /** Wipe all server-state on sign-out. Clears the in-memory cache so
