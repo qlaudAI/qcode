@@ -15,6 +15,7 @@ import {
 import { cn } from '../lib/cn';
 import { useMcpServersQuery, useTextModels } from '../lib/queries';
 import { ripgrepInstallHint, ripgrepSource } from '../lib/ripgrep';
+import { Select, type SelectOption } from './Select';
 import {
   getSettings,
   patchSettings,
@@ -135,32 +136,39 @@ export function SettingsDrawer({
 
           <Section title="Defaults">
             <FieldLabel>Default model for new chats</FieldLabel>
-            <select
+            <Select
               value={settings.defaultModel}
-              onChange={(e) => update('defaultModel', e.target.value)}
-              className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/30"
-            >
-              {models.map((m) => (
-                <option key={m.slug} value={m.slug}>
-                  {m.label} · {m.provider}
-                </option>
-              ))}
-            </select>
+              onChange={(slug) => update('defaultModel', slug)}
+              ariaLabel="Default model for new chats"
+              options={models.map<SelectOption>((m) => ({
+                value: m.slug,
+                label: m.label,
+                badge: m.provider,
+                description: m.blurb,
+              }))}
+            />
             <p className="text-[11px] text-muted-foreground">
               You can still switch the model per-conversation from the title bar.
             </p>
 
             <FieldLabel>Default mode for new chats</FieldLabel>
-            <select
+            <Select
               value={settings.mode}
-              onChange={(e) =>
-                update('mode', e.target.value as 'agent' | 'plan')
-              }
-              className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/30"
-            >
-              <option value="agent">Agent — full toolkit (write, edit, bash)</option>
-              <option value="plan">Plan — read-only, propose changes in prose</option>
-            </select>
+              onChange={(v) => update('mode', v as 'agent' | 'plan')}
+              ariaLabel="Default mode for new chats"
+              options={[
+                {
+                  value: 'agent',
+                  label: 'Agent',
+                  description: 'Full toolkit — write, edit, bash',
+                },
+                {
+                  value: 'plan',
+                  label: 'Plan',
+                  description: 'Read-only, propose changes in prose',
+                },
+              ]}
+            />
             <p className="text-[11px] text-muted-foreground">
               The title-bar Agent / Plan toggle overrides this for the
               current session.
@@ -169,23 +177,26 @@ export function SettingsDrawer({
             <FieldLabel>
               {isTauri() ? 'Background model' : 'Subagent model'}
             </FieldLabel>
-            <select
+            <Select
               value={settings.subagentModel ?? '__parent__'}
-              onChange={(e) =>
-                update(
-                  'subagentModel',
-                  e.target.value === '__parent__' ? null : e.target.value,
-                )
+              onChange={(v) =>
+                update('subagentModel', v === '__parent__' ? null : v)
               }
-              className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/30"
-            >
-              <option value="__parent__">Same as default (no override)</option>
-              {models.map((m) => (
-                <option key={m.slug} value={m.slug}>
-                  {m.label} · {m.provider} · {m.tier}
-                </option>
-              ))}
-            </select>
+              ariaLabel="Background / subagent model"
+              options={[
+                {
+                  value: '__parent__',
+                  label: 'Same as default',
+                  description: 'No override — background calls reuse the main model',
+                },
+                ...models.map<SelectOption>((m) => ({
+                  value: m.slug,
+                  label: m.label,
+                  badge: `${m.provider} · ${m.tier}`,
+                  description: m.blurb,
+                })),
+              ]}
+            />
             <p className="text-[11px] text-muted-foreground">
               {isTauri() ? (
                 <>

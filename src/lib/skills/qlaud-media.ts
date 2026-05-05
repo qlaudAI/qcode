@@ -25,13 +25,31 @@ export const QLAUD_MEDIA_SKILL = `qlaud media tools — image/audio/video genera
 
 When the user asks you to generate an image, narrate text as audio, transcribe an audio file, or render a video — DO IT. Don't ask "should I generate this for you?" — that's a worse default than just acting. The qlaud endpoints below are pre-configured with the user's API key (already in your ANTHROPIC_API_KEY env var) and are billed per-call to their qlaud wallet.
 
-Use Bash + curl (you have it). Save artifacts to the workspace so the user keeps the file. After saving, reply with the workspace-relative path on its own line — qcode auto-renders \`path:line\` style references as click-to-open chips, so \`Saved to assets/hero.png\` becomes a clickable link in chat. (Inline image rendering via markdown ![]() is not supported in this build — Tauri's asset protocol isn't enabled. Don't try data: URIs either; the chat history bloats. File path is the right pattern.)
+Use Bash + curl (you have it). After saving, reply with the workspace-relative path on its own line — qcode auto-renders \`path:line\` style references as click-to-open chips, so \`Saved to .qcode/media/2026-05-04/hero.png\` becomes a clickable link in chat. (Inline image rendering via markdown ![]() is not supported in this build — Tauri's asset protocol isn't enabled. Don't try data: URIs either; the chat history bloats. File path is the right pattern.)
+
+CANONICAL OUTPUT PATH — qcode standardizes generated media under a single folder per workspace so users always know where their AI-generated artifacts went:
+
+  <workspace>/.qcode/media/<YYYY-MM-DD>/<descriptive-name>.<ext>
+
+Rules:
+  • Create the directory tree with \`mkdir -p\` before saving.
+  • Use today's date for the folder. Get it via \`date +%Y-%m-%d\`.
+  • Pick a descriptive filename (\`hero-banner.png\`, not \`output.png\`).
+    The user will see this name in the file tree and the agent's
+    reply, so make it self-explanatory.
+  • The \`.qcode/\` prefix means qcode-generated artifacts live in
+    one place, easy to gitignore (\`.qcode/\` is auto-suggested) or
+    delete in bulk.
+
+If there is no workspace (rare; pure-chat mode), fall back to \`/tmp/qcode-media/\` and warn the user that the artifact won't persist past a reboot.
 
 The four endpoints, OpenAI-compat shape:
 
 ────────────────────────────────────────────────────────────────────
 1. IMAGE generation — POST https://api.qlaud.ai/v1/images/generations
 
+   DEST=".qcode/media/$(date +%Y-%m-%d)"
+   mkdir -p "$DEST"
    curl https://api.qlaud.ai/v1/images/generations \\
      -H "x-api-key: $ANTHROPIC_API_KEY" \\
      -H "content-type: application/json" \\
@@ -40,7 +58,7 @@ The four endpoints, OpenAI-compat shape:
        "prompt": "<user's description>",
        "size": "1024x1024",
        "n": 1
-     }' | jq -r '.data[0].b64_json' | base64 -d > <workspace-relative-path>.png
+     }' | jq -r '.data[0].b64_json' | base64 -d > "$DEST/hero-banner.png"
 
    Default size: 1024x1024. Other valid: 1792x1024, 1024x1792.
    Response shape: { data: [{ b64_json: "..." }] } — decode + save.
@@ -48,6 +66,8 @@ The four endpoints, OpenAI-compat shape:
 ────────────────────────────────────────────────────────────────────
 2. TEXT-TO-SPEECH — POST https://api.qlaud.ai/v1/audio/speech
 
+   DEST=".qcode/media/$(date +%Y-%m-%d)"
+   mkdir -p "$DEST"
    curl https://api.qlaud.ai/v1/audio/speech \\
      -H "x-api-key: $ANTHROPIC_API_KEY" \\
      -H "content-type: application/json" \\
@@ -55,7 +75,7 @@ The four endpoints, OpenAI-compat shape:
        "model": "gpt-4o-mini-tts",
        "input": "<text to narrate>",
        "voice": "alloy"
-     }' --output <workspace-relative-path>.mp3
+     }' --output "$DEST/intro-narration.mp3"
 
    Voices (gpt-4o-mini-tts): alloy, echo, fable, onyx, nova, shimmer.
    Response is binary mp3 — pipe straight to a file.
@@ -69,11 +89,15 @@ The four endpoints, OpenAI-compat shape:
      -F "file=@<path/to/audio.mp3>"
 
    Multipart upload (notice -F not -d). Response: { text: "..." }.
-   Supports mp3, mp4, mpeg, mpga, m4a, wav, webm.
+   Transcripts go inline in your reply — no file output needed
+   unless the user explicitly asks for one. Supports mp3, mp4,
+   mpeg, mpga, m4a, wav, webm.
 
 ────────────────────────────────────────────────────────────────────
 4. VIDEO generation — POST https://api.qlaud.ai/v1/videos/generations
 
+   DEST=".qcode/media/$(date +%Y-%m-%d)"
+   mkdir -p "$DEST"
    curl https://api.qlaud.ai/v1/videos/generations \\
      -H "x-api-key: $ANTHROPIC_API_KEY" \\
      -H "content-type: application/json" \\
@@ -86,7 +110,7 @@ The four endpoints, OpenAI-compat shape:
 
    Returns a polling job id. Video gen is slow (30-90s). Poll
    GET https://api.qlaud.ai/v1/videos/generations/{id} until status
-   is "succeeded", then GET the video_url and curl it to a file.
+   is "succeeded", then GET the video_url and curl it to "$DEST/<name>.mp4".
 
 ────────────────────────────────────────────────────────────────────
 
