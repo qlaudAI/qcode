@@ -146,6 +146,20 @@ export type Settings = {
    *  per-tenant prefix). Pricing: $0.015/GB-mo deducted from your
    *  qlaud wallet. Local copy stays unchanged regardless. */
   mediaCloudSync: boolean;
+  /** Enable the "video creator" skill — turns the agent into a
+   *  professional faceless / explainer / ad / reel video editor.
+   *  Off by default because the skill markdown adds ~7-8k tokens
+   *  to every claude-code spawn's system prompt; users who never
+   *  make video shouldn't pay that token tax.
+   *
+   *  When on, the agent gains the workflow + Remotion patterns +
+   *  ffmpeg recipes + asset sourcing (Pexels, Pixabay, AI gen,
+   *  ElevenLabs) needed to ship full videos from a brief. Wallet
+   *  usage scales with the assets the agent reaches for during
+   *  any given render — typically $0.30-0.50/min for explainers,
+   *  $4-10/min if Sora-2 b-roll is in the mix. Tell users when
+   *  about to spend > $1. */
+  videoCreatorSkill: boolean;
 };
 
 const DEFAULT_SUBAGENT_MODEL = 'claude-haiku-4-5';
@@ -169,6 +183,9 @@ const DEFAULTS: Settings = {
   // privacy + offline + speed. Users explicitly flip this on in
   // Settings when they want cross-device access.
   mediaCloudSync: false,
+  // Video creator skill — opt-in. Adds ~7-8k tokens to system
+  // prompt; users who never make video shouldn't pay it.
+  videoCreatorSkill: false,
 };
 
 /** Coerce stored engine value to the platform's canonical choice.

@@ -234,6 +234,25 @@ export function SettingsDrawer({
               privacy-preserving default. Pricing: $0.015/GB-month
               deducted from your wallet.
             </p>
+            {isTauri() && (
+              <>
+                <Toggle
+                  label="Enable video creator skill"
+                  checked={settings.videoCreatorSkill}
+                  onChange={(v) => update('videoCreatorSkill', v)}
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Turns the agent into a professional faceless /
+                  explainer / ad / reel video editor — script →
+                  voiceover (ElevenLabs) → stock footage (Pexels,
+                  Pixabay, included) + AI imagery → Remotion + ffmpeg
+                  composition → polished MP4. Off by default; the
+                  skill adds ~7-8k tokens to every spawn so you only
+                  pay when you actually want it. Render budget
+                  typically $0.30–0.50 per minute (more with Sora b-roll).
+                </p>
+              </>
+            )}
           </Section>
 
           <Section title="Appearance">

@@ -41,6 +41,7 @@ import type { ContentBlock } from '../qlaud-client';
 import { getKey } from '../auth';
 import { getSettings, patchSettings } from '../settings';
 import { QLAUD_MEDIA_SKILL } from '../skills/qlaud-media';
+import { QLAUD_VIDEO_CREATOR_SKILL } from '../skills/video-creator';
 
 /** Tight, surgical addendum we hand to Claude Code via
  *  `--append-system-prompt`. Doesn't replace Claude's default
@@ -342,20 +343,30 @@ export async function runEngineClaudeCode(
   //                    each request through qcode's ApprovalCard
   //                    via a bundled --permission-prompt-tool MCP
   //                    server.
-  // System-prompt addition: qcode dev hints + qlaud media skill.
-  // Joined with a section break so each is independently legible
-  // when claude-code logs the resolved prompt. The skill ships
-  // unconditionally — it only documents endpoints, doesn't trigger
-  // calls. The agent picks up the documented endpoints when the
-  // user asks for media work; otherwise the tokens are inert.
-  const appendedSystemPrompt = `${QCODE_ENGINE_HINT}\n\n────────────────────────────────────────\n\n${QLAUD_MEDIA_SKILL}`;
+  // Hoist settings to the top of the spawn block — used by both
+  // the system-prompt skill assembly below AND the env block
+  // further down (two-model config + cloud sync flag). Reads from
+  // localStorage, cheap.
+  const settings = getSettings();
+  // System-prompt addition: qcode dev hints + qlaud media skill +
+  // optionally qlaud-video-creator skill (gated behind Settings to
+  // avoid the ~7-8k token cost when not needed). Joined with section
+  // breaks so each is independently legible when claude-code logs
+  // the resolved prompt. The agent picks up the documented endpoints
+  // when the user asks for matching work; otherwise the tokens are
+  // inert.
+  const sections = [QCODE_ENGINE_HINT, QLAUD_MEDIA_SKILL];
+  if (settings.videoCreatorSkill) sections.push(QLAUD_VIDEO_CREATOR_SKILL);
+  const appendedSystemPrompt = sections.join(
+    '\n\n────────────────────────────────────────\n\n',
+  );
   const args: string[] = [
     '--bare',
     '--print',
     '--output-format', 'stream-json',
     '--include-partial-messages',
     '--verbose',
-    ...permissionFlags(getSettings().autoApprove),
+    ...permissionFlags(settings.autoApprove),
     '--model', opts.model,
     '--append-system-prompt', appendedSystemPrompt,
   ];
@@ -421,7 +432,7 @@ export async function runEngineClaudeCode(
   // here saves ~3-5x on those background tokens with no quality
   // hit on the main agent. Null = let claude-code use its built-in
   // default (currently haiku-4-5) — safe choice for new users.
-  const settings = getSettings();
+  // (settings already hoisted above the system-prompt assembly.)
   const backgroundModel = settings.subagentModel;
   // Media cloud sync — when the user opted in, pass the flag and
   // current thread id to the spawn so the skill's optional cloud
