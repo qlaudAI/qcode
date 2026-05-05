@@ -194,6 +194,17 @@ export function useThreadsQuery(opts: {
         const serverTitle = r.title ?? null;
         const metaTitle =
           typeof meta.title === 'string' ? meta.title : undefined;
+        // Helper: a row's title is "canonical" only when titleSource
+        // is set (auto = derived/regenerated; user = manually edited).
+        // The createMutation seeds title='New chat' with NO titleSource
+        // — that's a placeholder we should fall through, not a real
+        // value. Without this guard the ?? chain would lock-in 'New
+        // chat' the first time it's seen and never check server-side
+        // even after PATCH lands.
+        const liveCanonicalTitle =
+          liveRow?.titleSource ? liveRow.title : undefined;
+        const cachedCanonicalTitle =
+          cached?.titleSource ? cached.title : undefined;
         const wsPath =
           typeof meta.workspace_path === 'string'
             ? meta.workspace_path
@@ -213,15 +224,20 @@ export function useThreadsQuery(opts: {
           (typeof meta.workspace_id === 'string'
             ? meta.workspace_id
             : undefined);
-        // Title resolution: prefer in-memory live row (most recent
-        // patches win), then localStorage cache, THEN server's
-        // canonical title column, then legacy metadata.title, then
-        // placeholder. Server-side title kicks in when the local
-        // cache has been wiped (sign-out, different device) — that's
-        // the cross-device durability we just added.
+        // Title resolution. Prefer canonical sources first (anything
+        // with titleSource set — that's a value the user or our
+        // title-gen actually wrote). Server's title column comes
+        // before legacy meta.title (which was the pre-migration
+        // stash). Final fallback is the placeholder.
+        //
+        // The titleSource gate is the bug fix for "title changes,
+        // then 'New chat' overrides it": without it, the placeholder
+        // string from createMutation ('New chat' with no source) was
+        // short-circuiting the ?? chain and overwriting the real
+        // server-side title every refetch.
         const title =
-          liveRow?.title ??
-          cached?.title ??
+          liveCanonicalTitle ??
+          cachedCanonicalTitle ??
           serverTitle ??
           metaTitle ??
           'New chat';
