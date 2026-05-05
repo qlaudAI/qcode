@@ -190,25 +190,26 @@ export function useThreadsQuery(opts: {
         const serverTitle = r.title ?? null;
         const metaTitle =
           typeof meta.title === 'string' ? meta.title : undefined;
+        // Workspace path + name are SERVER-ONLY. Both are stamped
+        // into thread metadata at create time and survive in D1
+        // forever; no need to fall back to local cache (which can
+        // go stale or be wiped). If the server doesn't have it,
+        // the thread genuinely has no workspace association and
+        // the sidebar groups it under CHATS.
         const wsPath =
-          typeof meta.workspace_path === 'string'
-            ? meta.workspace_path
-            : (liveRow?.workspacePath ?? cached?.workspacePath);
+          typeof meta.workspace_path === 'string' ? meta.workspace_path : undefined;
         const wsName =
-          typeof meta.workspace_name === 'string'
-            ? meta.workspace_name
-            : (liveRow?.workspaceName ?? cached?.workspaceName);
-        // workspaceId is a per-device link — server metadata only
-        // carries it as a hint (the originating client's registry
-        // id). On THIS client we prefer the live/cached id, then
-        // metadata as a tiebreaker, then nothing (the sidebar will
-        // resolve by path against the local registry).
+          typeof meta.workspace_name === 'string' ? meta.workspace_name : undefined;
+        // workspaceId is a per-device registry link — server only
+        // carries the originating client's id as a hint, and
+        // different devices have their own ids. We resolve in
+        // priority: server hint → local registry by path. Local
+        // cache is fine here (it's cosmetic per-device state, not
+        // user-visible content).
         const wsId =
-          liveRow?.workspaceId ??
-          cached?.workspaceId ??
-          (typeof meta.workspace_id === 'string'
+          typeof meta.workspace_id === 'string'
             ? meta.workspace_id
-            : undefined);
+            : (liveRow?.workspaceId ?? cached?.workspaceId);
         // Title resolution — server-only. No local cache fallback.
         // Empty string = no title yet; sidebar renders the
         // 'New chat' placeholder for empty titles.
@@ -578,13 +579,32 @@ export function useCreateThreadMutation() {
   });
 }
 
-/** Patch one thread row (title update after first send, updatedAt
- *  bump on each turn). Mirror to localStorage for boot hydration. */
+/** Patch one thread row in the in-memory query cache. Used for
+ *  optimistic mutations (pin toggle, model change, updatedAt bump
+ *  on each turn).
+ *
+ *  Title is deliberately NEVER patched here even when callers pass
+ *  one — title is server-canonical and refreshing the row from a
+ *  refetch is the only safe path to update display. Callers that
+ *  changed the title server-side must invalidate qk.threads to
+ *  trigger a refetch. patchThread strips title from the incoming
+ *  patch defensively so a forgetful caller can't put a stale title
+ *  into localStorage via saveCachedSummaries.
+ *
+ *  Why localStorage only ever sees server-derived titles: the
+ *  threads queryFn computes the merge from server data and
+ *  saveCachedSummaries(final) at the end of every refetch. So as
+ *  long as patchThread doesn't write title here, localStorage
+ *  always lags the server by at most one refetch — never holds
+ *  a "local guess" that contradicts the server. */
 export function patchThread(id: string, patch: Partial<ThreadSummary>): void {
   const prev = queryClient.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
   const idx = prev.findIndex((t) => t.id === id);
   if (idx === -1) return;
-  const updated = { ...prev[idx]!, ...patch };
+  // Strip title fields — server is the only writer for those.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { title: _t, titleSource: _ts, ...sanitizedPatch } = patch;
+  const updated = { ...prev[idx]!, ...sanitizedPatch };
   const next = [updated, ...prev.filter((t) => t.id !== id)];
   queryClient.setQueryData<ThreadSummary[]>(qk.threads, next);
   saveCachedSummaries(next);

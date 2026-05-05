@@ -652,21 +652,26 @@ export function App() {
           queryClient.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
         const row = fresh.find((s) => s.id === info.threadId);
         if (row?.titleSource === 'user') return;
-        patchThread(info.threadId, {
-          title: generated,
-          titleSource: 'auto',
-        });
-        // Persist server-side fire-and-forget. Failure is harmless
-        // (local cache still has the new title); next regen
-        // attempt will retry. Uses the dedicated `title` column
-        // (added in migration 0022) instead of the legacy
-        // metadata.title stash.
-        void updateThreadTitle(info.threadId, generated).catch((e) => {
+        // Server is the only writer for title (alpha.139). PATCH
+        // it, await the response, then invalidate the threads
+        // query so the next refetch picks up the new title from
+        // the canonical source. We deliberately don't patchThread
+        // locally — that would put a guess into qk.threads that
+        // the next refetch would have to override.
+        try {
+          await updateThreadTitle(info.threadId, generated);
+        } catch (e) {
           console.warn(
             `[title-gen] PATCH /v1/threads/${info.threadId} failed:`,
             e,
           );
-        });
+          return;
+        }
+        // Force the threads list to refetch so the new title
+        // shows in the sidebar within a second of regen
+        // completing — instead of waiting up to 45s for the
+        // next polling tick.
+        void queryClient.invalidateQueries({ queryKey: qk.threads });
       })();
     },
     [],
