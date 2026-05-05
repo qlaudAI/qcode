@@ -943,6 +943,7 @@ export function ChatSurface({
               <TodoListPanel blocks={blocks} />
               {(() => {
                 const groups = groupBlocks(blocks);
+                const toolCostShares = computeToolCostShares(blocks);
                 // Track the prior group's "side" — 'user' or
                 // 'assistant'. Anything that isn't user_text reads
                 // as the assistant's response stream (tool dispatch,
@@ -972,6 +973,7 @@ export function ChatSurface({
                         <ToolBundle
                           tools={group.tools}
                           workspace={workspacePath ?? null}
+                          toolCostShares={toolCostShares}
                         />
                       </div>
                     );
@@ -1013,6 +1015,7 @@ export function ChatSurface({
                         workspace={workspacePath ?? null}
                         busy={busy && isLast}
                         activity={activity}
+                        toolCostShares={toolCostShares}
                         onAllow={() =>
                           b.type === 'approval' ? decide(b.id, 'allow') : undefined
                         }
@@ -1563,6 +1566,39 @@ type BlockGroup =
   | { type: 'single'; block: RenderBlock; index: number }
   | { type: 'tool-bundle'; tools: Array<Extract<RenderBlock, { type: 'tool' }>> };
 
+// Phase A of cost-visibility-in-flow: distribute each completed
+// turn's total USD cost across its tool_use blocks so the chat
+// surface can render a per-tool cost pill. Equal-split is rough but
+// useful — users see "this refactor cost ~$0.04 per file edit"
+// instead of just a turn-level $0.16 receipt. Returns a Map keyed
+// by tool call id (stable across re-renders) → USD share.
+//
+// Skips:
+//   - Turns whose usage block hasn't landed yet (in-flight turn)
+//   - Turns with zero cost (free models, retries)
+//   - todo_write tool calls (rendered separately, not user-actionable)
+function computeToolCostShares(blocks: RenderBlock[]): Map<string, number> {
+  const out = new Map<string, number>();
+  let pendingToolIds: string[] = [];
+  for (const b of blocks) {
+    if (!b) continue;
+    if (b.type === 'user_text') {
+      pendingToolIds = [];
+      continue;
+    }
+    if (b.type === 'tool' && b.call.name !== 'todo_write') {
+      pendingToolIds.push(b.call.id);
+      continue;
+    }
+    if (b.type === 'usage' && b.costUsd != null && b.costUsd > 0 && pendingToolIds.length > 0) {
+      const share = b.costUsd / pendingToolIds.length;
+      for (const id of pendingToolIds) out.set(id, share);
+      pendingToolIds = [];
+    }
+  }
+  return out;
+}
+
 function groupBlocks(blocks: RenderBlock[]): BlockGroup[] {
   const out: BlockGroup[] = [];
   let bundle: Array<Extract<RenderBlock, { type: 'tool' }>> = [];
@@ -1595,9 +1631,11 @@ function groupBlocks(blocks: RenderBlock[]): BlockGroup[] {
 function ToolBundle({
   tools,
   workspace,
+  toolCostShares,
 }: {
   tools: Array<Extract<RenderBlock, { type: 'tool' }>>;
   workspace: string | null;
+  toolCostShares?: Map<string, number>;
 }) {
   const [open, setOpen] = useState(true);
   // One-tool bundles: skip the wrapper. Same look as before.
@@ -1605,7 +1643,11 @@ function ToolBundle({
     return (
       <div className="flex pl-10">
         <div className="min-w-0 flex-1">
-          <ToolCallCard call={tools[0]!.call} workspace={workspace} />
+          <ToolCallCard
+            call={tools[0]!.call}
+            workspace={workspace}
+            costUsd={toolCostShares?.get(tools[0]!.call.id) ?? null}
+          />
         </div>
       </div>
     );
@@ -1653,6 +1695,7 @@ function ToolBundle({
                     call={t.call}
                     workspace={workspace}
                     embedded
+                    costUsd={toolCostShares?.get(t.call.id) ?? null}
                   />
                 ))}
               </div>
@@ -1725,6 +1768,7 @@ function BlockRow({
   busy,
   workspace,
   activity,
+  toolCostShares,
   onAllow,
   onReject,
   onRetry,
@@ -1738,6 +1782,9 @@ function BlockRow({
    *  TypingDots component renders it in place of generic dots so
    *  the user sees what's actually happening, not just "..." */
   activity?: string | null;
+  /** Cost share map by tool id, computed at parent level. Forwarded
+   *  to ToolCallCard so each tool renders its ~$X.XX pill. */
+  toolCostShares?: Map<string, number>;
   onAllow?: () => void;
   onReject?: () => void;
   onRetry?: () => void;
@@ -1806,7 +1853,11 @@ function BlockRow({
     return (
       <div id={`tool-${block.call.id}`} className="flex scroll-mt-4 pl-10">
         <div className="min-w-0 flex-1">
-          <ToolCallCard call={block.call} workspace={workspace} />
+          <ToolCallCard
+            call={block.call}
+            workspace={workspace}
+            costUsd={toolCostShares?.get(block.call.id) ?? null}
+          />
         </div>
       </div>
     );

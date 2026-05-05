@@ -77,6 +77,7 @@ export function ToolCallCard({
   call,
   workspace,
   embedded,
+  costUsd,
 }: {
   call: ToolCallView;
   /** Workspace root path. Used to strip the prefix from tool
@@ -89,6 +90,13 @@ export function ToolCallCard({
    *  outer border + reduces padding so a stretch of bundled
    *  cards reads as a clean list, not a stack of nested boxes. */
   embedded?: boolean;
+  /** Cost share attributed to this tool from the parent turn's
+   *  total. Computed by ChatSurface as `turn.costUsd / N` where N
+   *  is the count of non-internal tool calls in the turn (rough
+   *  equal-split approximation). Renders as a small ~$X.XX pill
+   *  on the card header. Drops when the turn has no cost data
+   *  (legacy threads, errors, in-flight turns). */
+  costUsd?: number | null;
 }) {
   const [userToggled, setUserToggled] = useState(false);
   const [open, setOpenState] = useState(false);
@@ -165,6 +173,18 @@ export function ToolCallCard({
             )}
           </div>
         </div>
+        {/* Per-tool cost pill (Phase A of cost-visibility-in-flow).
+         *  Equal-split approximation of the turn's total — see
+         *  computeToolCostShares in ChatSurface. Tilde signals
+         *  approximation. Hidden when no cost data (in-flight, error). */}
+        {costUsd != null && costUsd > 0 && (
+          <span
+            className="shrink-0 rounded-full bg-muted/60 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground"
+            title={`Approx ${costUsd >= 0.01 ? '$' + costUsd.toFixed(3) : '<$0.01'} of this turn — equal split across tools`}
+          >
+            ~${costUsd >= 0.01 ? costUsd.toFixed(3) : '<0.01'}
+          </span>
+        )}
         {hasOutput && (
           <motion.span
             animate={{ rotate: effectivelyOpen ? 90 : 0 }}
