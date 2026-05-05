@@ -1755,6 +1755,7 @@ function RightRailMenu({
     { view: 'tasks', label: 'Tasks' },
     { view: 'plan', label: 'Plan' },
     { view: 'files', label: 'Files', hint: '⇧⌘F' },
+    { view: 'media', label: 'Media' },
     { view: 'terminal', label: 'Terminal', hint: '⌃`' },
     { view: 'preview', label: 'Preview', hint: '⇧⌘P' },
     { view: 'diff', label: 'Diff', hint: '⇧⌘D' },
