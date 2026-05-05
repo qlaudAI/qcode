@@ -150,9 +150,15 @@ function Row({
             className={cn(
               'truncate text-xs',
               active ? 'font-medium text-foreground' : 'text-foreground/85',
+              !thread.title && 'text-muted-foreground/70 italic',
             )}
           >
-            {thread.title}
+            {/* Empty title = thread server-side has title=NULL.
+             *  Render the placeholder at display time only — never
+             *  store 'New chat' as the actual title (the server
+             *  rejects that string at PATCH time too, so the column
+             *  stays NULL until LLM regen produces a real title). */}
+            {thread.title || 'New chat'}
           </span>
         </div>
         {snippet && (

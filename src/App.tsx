@@ -1229,7 +1229,7 @@ function Sidebar({
   //    from semantic hits attach as a per-thread "snippet" so the
   //    user gets a content preview, not just a row.
   const matches = (t: ThreadSummary) =>
-    !filterLc || t.title.toLowerCase().includes(filterLc);
+    !filterLc || (t.title ?? '').toLowerCase().includes(filterLc);
   let visibleThreads: ThreadSummary[];
   let snippetByThread: Map<string, string> | null = null;
   if (!filterLc) {
