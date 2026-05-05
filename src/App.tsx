@@ -841,21 +841,28 @@ function Titlebar({
 }) {
   return (
     <header
-      data-tauri-drag-region
       className="titlebar relative z-50 flex h-11 items-center justify-between border-b border-border/40 bg-background/40 px-3 backdrop-blur-md"
     >
-      {/* pl-16 leaves clearance for macOS traffic-light buttons.
-       *  On mobile/web we lose the traffic-lights and pick up a
-       *  hamburger that toggles the off-canvas sidebar.
+      {/* Window-drag region. The .titlebar utility class sets
+       *  -webkit-app-region: drag, which macOS WKWebView handles
+       *  natively — no JS handler needed. Inheritance carries to
+       *  every child unless the child opts out via .no-drag.
        *
-       *  data-tauri-drag-region propagates from the header so
-       *  empty space inside this div drags the window. Interactive
-       *  children that should NOT drag (buttons, links) have to
-       *  opt out explicitly via data-tauri-drag-region={false}. */}
-      <div
-        data-tauri-drag-region
-        className="flex items-center gap-2 md:pl-16"
-      >
+       *  Why no `data-tauri-drag-region` attribute: that's Tauri's
+       *  legacy approach (Tauri 1) implemented via a JS mousedown
+       *  hook. Combined with the CSS approach below, two mechanisms
+       *  raced — and the JS path required `await import()` to load
+       *  Tauri's window API, which breaks macOS's user-gesture
+       *  requirement for startDragging(). Removing the attribute +
+       *  handler makes the CSS the single source of truth.
+       *
+       *  Why no `transparent: false` workaround: the window IS
+       *  transparent (see tauri.conf.json) for the macOS-style
+       *  blurred background. Native CSS drag works fine in that
+       *  configuration as long as nothing fights it.
+       *
+       *  pl-16 leaves clearance for macOS traffic-light buttons. */}
+      <div className="flex items-center gap-2 md:pl-16">
         {onToggleSidebar && (
           // Visible on every breakpoint now — desktop users get the
           // same toggle the mobile drawer uses to re-open a
@@ -888,32 +895,10 @@ function Titlebar({
         )}
       </div>
 
-      {/* Explicit drag target for the empty middle space. Tauri 2's
-       *  data-tauri-drag-region heuristic is finicky on macOS when
-       *  combined with transparent: true + titleBarStyle: Overlay —
-       *  users report the window not moving even though drag-region
-       *  is wired on the header. This element calls startDragging()
-       *  directly on mousedown which bypasses the heuristic and
-       *  always works. flex-1 makes it expand to fill all middle
-       *  space between the left controls and the right controls. */}
-      <div
-        className="h-full flex-1 cursor-grab active:cursor-grabbing"
-        data-tauri-drag-region
-        onMouseDown={(e) => {
-          if (e.button !== 0) return;
-          // Lazy import — desktop-only API, web build doesn't have it.
-          void (async () => {
-            try {
-              const { getCurrentWindow } = await import(
-                '@tauri-apps/api/window'
-              );
-              await getCurrentWindow().startDragging();
-            } catch {
-              // not running in Tauri (web build) — drag is irrelevant
-            }
-          })();
-        }}
-      />
+      {/* Empty middle region — flex-1 expands to fill all space
+       *  between the left and right clusters. Inherits app-region:
+       *  drag from .titlebar, so it's the primary draggable area. */}
+      <div className="h-full flex-1" aria-hidden />
 
       <div className="no-drag flex items-center gap-1.5 sm:gap-2">
         {/* Hide mode toggle + spend bar on the smallest widths so the
