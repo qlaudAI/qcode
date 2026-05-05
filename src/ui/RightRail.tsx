@@ -948,7 +948,7 @@ function classifyMedia(name: string): MediaKind | null {
 
 async function scanWorkspaceMedia(root: string): Promise<MediaItem[]> {
   if (!isTauri()) return [];
-  const { readDir, stat } = await import('@tauri-apps/plugin-fs');
+  const { readDir, stat, exists } = await import('@tauri-apps/plugin-fs');
   const out: MediaItem[] = [];
   const MAX = 1000;
   async function walk(rel: string): Promise<void> {
@@ -993,6 +993,24 @@ async function scanWorkspaceMedia(root: string): Promise<MediaItem[]> {
     }
   }
   await walk('');
+  // Defensive: some Tauri/macOS combos have surfaced cases where the
+  // top-level readDir doesn't return entries beginning with '.' even
+  // though Tauri's docs say it should. The agent persists generations
+  // to .qcode/media/<date>/, so skipping that directory means the
+  // Media tab silently shows "no media" while files exist on disk.
+  // Force-walk .qcode if it exists and we haven't already collected
+  // anything from inside it via the main walk above.
+  const haveQcode = out.some((m) => m.relPath.startsWith('.qcode/'));
+  if (!haveQcode) {
+    try {
+      const qcodeExists = await exists(`${root}/.qcode`);
+      if (qcodeExists) {
+        await walk('.qcode');
+      }
+    } catch {
+      /* exists() may throw on permission or path errors — keep going */
+    }
+  }
   return out;
 }
 

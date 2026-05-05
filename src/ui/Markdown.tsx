@@ -335,18 +335,48 @@ function FadeBlock({ children }: { children: React.ReactNode }) {
 // Hands off to openExternal so the user's default editor opens the
 // file. In browser-mode (no Tauri), gracefully degrades to a span.
 
+// Media extensions that we route to the inline Media right-rail
+// view instead of (or alongside) the OS default app. The agent
+// often promises "click to preview here" for these — make the
+// click match the promise.
+const MEDIA_EXTS = new Set([
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif',
+  'mp4', 'webm', 'mov', 'm4v',
+  'mp3', 'wav', 'ogg', 'flac', 'm4a',
+]);
+
+function isMediaPath(p: string): boolean {
+  const ext = p.split('.').pop()?.toLowerCase();
+  return ext ? MEDIA_EXTS.has(ext) : false;
+}
+
 function FileLink({ href, label }: { href: string; label: string }) {
   // qcode-file:src/foo.ts:42  →  { path: 'src/foo.ts', line: 42 }
   const target = href.replace(/^qcode-file:/, '');
   const lineMatch = /^(.+?):(\d+)$/.exec(target);
   const path = lineMatch ? lineMatch[1] : target;
   const line = lineMatch ? Number(lineMatch[2]) : null;
+  const isMedia = isMediaPath(path);
 
   function open(e: React.MouseEvent) {
     e.preventDefault();
     const ws = getCurrentWorkspace();
     if (!ws) return;
     const abs = path.startsWith('/') ? path : `${ws.path}/${path}`;
+    if (isMedia) {
+      // Open the inline Media right-rail view so the user sees the
+      // image/video/audio without leaving qcode. App.tsx listens
+      // for this custom event and flips rightRailView='media'.
+      // Best-effort: dispatch + open in OS default app too, so the
+      // user gets the inline view AND a full-resolution viewer.
+      window.dispatchEvent(
+        new CustomEvent('qcode:open-media-preview', {
+          detail: { absPath: abs, relPath: path },
+        }),
+      );
+      return;
+    }
+    // Non-media files: open in OS default editor (existing behavior).
     void openExternal(abs);
   }
 

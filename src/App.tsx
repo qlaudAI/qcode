@@ -401,6 +401,21 @@ export function App() {
     });
   }, [authed]);
 
+  // Inline media preview from chat-message file links. The Markdown
+  // FileLink component dispatches qcode:open-media-preview when the
+  // user clicks a media file in agent output. Flip the right rail
+  // to the Media view so the user sees the image/video/audio
+  // without leaving qcode (matches what the agent's text promises).
+  useEffect(() => {
+    function onPreview() {
+      setRightRailView('media');
+    }
+    window.addEventListener('qcode:open-media-preview', onPreview);
+    return () => {
+      window.removeEventListener('qcode:open-media-preview', onPreview);
+    };
+  }, []);
+
   // Cross-tab storage sync (vite-dev convenience). Just flips authed —
   // queries refetch on the same render.
   useEffect(() => {
