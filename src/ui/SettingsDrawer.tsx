@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Check,
   Copy,
@@ -7,11 +7,13 @@ import {
   KeyRound,
   LogOut,
   Sparkles,
+  Sparkles as PlanSparkles,
   Trash2,
   X,
   Zap,
 } from 'lucide-react';
 
+import { getKey, startSignIn } from '../lib/auth';
 import { cn } from '../lib/cn';
 import { useMcpServersQuery, useTextModels } from '../lib/queries';
 import { ripgrepInstallHint, ripgrepSource } from '../lib/ripgrep';
@@ -58,6 +60,20 @@ export function SettingsDrawer({
   // useTextModels falls back to bundled MODELS when the catalog
   // hasn't loaded yet, so this is safe before the network lands.
   const models = useTextModels();
+
+  // Detect legacy auth: a qlk_ bearer means this user signed in
+  // before qcode plans landed (alpha.127 or earlier). Their key is
+  // PAYG-billed via wallet, no plan-tier benefits. Show the
+  // "Switch to qcode plans" affordance to opt in. The flow re-runs
+  // sign-in via cli-auth, which mints qpk_ AND auto-revokes their
+  // legacy qcode-* keys server-side (issueQcodeSession).
+  //
+  // Recompute on every drawer open so a key swap mid-session
+  // (sign out + sign in) immediately reflects the new state.
+  const isLegacyKey = useMemo(() => {
+    const k = getKey();
+    return k !== null && k.startsWith('qlk_');
+  }, [open]);
 
   // Re-hydrate when the drawer opens — covers cross-tab edits in
   // vite-dev where another tab might have saved. Also kick off an
@@ -120,6 +136,32 @@ export function SettingsDrawer({
               value={email || '—'}
               icon={<KeyRound className="h-3.5 w-3.5" />}
             />
+
+            {/* Legacy-key migration. Existing qcode users (signed in
+                before plans landed) auth via a qlk_qcode-* key that
+                bills PAYG — no plan-tier benefits, no Pro/Power
+                upgrade path. Clicking through opens the cli-auth
+                flow which mints a fresh qpk_ AND server-side
+                revokes the old qlk_, so the swap is atomic.
+                Hidden once the user is on a qpk_ (post-migration).
+
+                We do NOT auto-migrate. The user explicitly opts in
+                here so they don't get surprised by a 402 mid-task. */}
+            {isLegacyKey && (
+              <button
+                onClick={() => void startSignIn()}
+                className="group flex w-full items-center justify-between rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-sm transition-colors hover:border-primary/60 hover:bg-primary/10"
+              >
+                <span className="flex items-center gap-2">
+                  <PlanSparkles className="h-3.5 w-3.5 text-primary" />
+                  <span className="font-medium text-foreground">Switch to qcode plans</span>
+                </span>
+                <span className="text-[11px] text-muted-foreground transition-colors group-hover:text-primary">
+                  Free · Pro $17 · Power $87 →
+                </span>
+              </button>
+            )}
+
             <button
               onClick={onSignOut}
               className="flex w-full items-center justify-between rounded-md border border-border bg-background px-3 py-2 text-sm transition-colors hover:border-foreground/30"
