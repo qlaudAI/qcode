@@ -122,6 +122,70 @@ export type StreamOpts = StreamHandlers & {
   maxTokens?: number;
 };
 
+// ─── Payment-required (402) error classification ─────────────────
+//
+// Three distinct 402 reasons surface from the edge worker, each with
+// different UX:
+//   - 'cap_hit' (wallet_exhausted | key_cap_exceeded) — top-up flow,
+//     existing PAYG behavior.
+//   - 'plan_limit_exceeded' — qcode user hit their daily plan cap.
+//     UI shows the upgrade modal with current tier + limits + a
+//     "switch to <suggested model>" button to keep going.
+//   - 'plan_tier_blocked' — model isn't available on this plan at all
+//     (e.g. Free trying to use Opus). Same modal, different copy.
+//
+// The plan_context payload from the edge carries enough data to
+// render the modal precisely. We attach it via Error.cause so the
+// UI's mapError() can pull it without reparsing the response.
+
+export type PlanContext = {
+  tier: string;
+  used: number;
+  limit: number;
+  unit: 'messages' | 'tokens' | 'minutes';
+  planTier: 'free' | 'pro' | 'power';
+  suggestedAlternative?: string;
+};
+
+export class PaymentRequiredError extends Error {
+  planContext?: PlanContext;
+  constructor(code: string, planContext?: PlanContext) {
+    super(code);
+    this.name = 'PaymentRequiredError';
+    this.planContext = planContext;
+  }
+}
+
+/** Read the 402 body and throw a typed error so the UI can render
+ *  the right CTA (upgrade vs top-up) without reparsing. */
+async function classify402(res: Response): Promise<Error> {
+  let body: {
+    error?: {
+      type?: string;
+      message?: string;
+      plan_context?: PlanContext;
+    };
+  } = {};
+  try {
+    body = await res.json();
+  } catch {
+    // Fallback to legacy 'cap_hit' when we can't parse — preserves
+    // pre-plans behavior for any old gateway version.
+    return new Error('cap_hit');
+  }
+  const ctx = body.error?.plan_context;
+  // The edge encodes the reason in error.message via spendingError().
+  // We classify by inspecting message + the presence of plan_context.
+  const msg = body.error?.message ?? '';
+  if (ctx) {
+    if (msg.includes("aren't included")) {
+      return new PaymentRequiredError('plan_tier_blocked', ctx);
+    }
+    return new PaymentRequiredError('plan_limit_exceeded', ctx);
+  }
+  return new Error('cap_hit');
+}
+
 export async function streamMessage(opts: StreamOpts): Promise<void> {
   const key = getKey();
   if (!key) throw new Error('not_authed');
@@ -146,7 +210,7 @@ export async function streamMessage(opts: StreamOpts): Promise<void> {
   });
 
   if (res.status === 401) throw new Error('unauthorized');
-  if (res.status === 402) throw new Error('cap_hit');
+  if (res.status === 402) throw await classify402(res);
   if (!res.ok || !res.body) {
     const txt = await res.text().catch(() => '');
     throw new Error(`upstream_${res.status}:${txt.slice(0, 200)}`);
@@ -438,7 +502,7 @@ export async function streamThreadMessage(opts: ThreadStreamOpts): Promise<void>
   });
 
   if (res.status === 401) throw new Error('unauthorized');
-  if (res.status === 402) throw new Error('cap_hit');
+  if (res.status === 402) throw await classify402(res);
   if (res.status === 404) throw new Error('thread_not_found');
   if (!res.ok || !res.body) {
     const txt = await res.text().catch(() => '');

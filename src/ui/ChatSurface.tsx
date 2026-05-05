@@ -827,6 +827,13 @@ export function ChatSurface({
       }
     } catch (e) {
       const code = e instanceof Error ? e.message : 'unknown';
+      // PaymentRequiredError carries the qcode plan_context payload —
+      // pull it through so the upgrade card shows real numbers
+      // ("47/200 mid messages today") instead of a generic message.
+      const planCtx =
+        e instanceof Error && 'planContext' in e
+          ? (e as { planContext?: ErrorContext['plan'] }).planContext
+          : undefined;
       posthog.capture('turn_failed', { model, mode, code });
       // Inline error block with retry context. Image-error / network
       // banner state stays for transient toasts that don't make sense
@@ -835,7 +842,7 @@ export function ChatSurface({
         ...b,
         {
           type: 'error',
-          presentation: mapError(code),
+          presentation: mapError(code, planCtx ? { plan: planCtx } : undefined),
           retry: retryInputs,
         },
       ]);
@@ -1369,7 +1376,22 @@ type ErrorPresentation = {
   severity: 'warning' | 'error';
 };
 
-function mapError(code: string): ErrorPresentation {
+// Optional context for richer error rendering. Today: only used by
+// the qcode plan-tier 402 paths (plan_limit_exceeded + plan_tier_blocked)
+// to render the right limits + suggested alternative + upgrade CTA.
+// Sourced from PaymentRequiredError.planContext on the throw site.
+type ErrorContext = {
+  plan?: {
+    tier: string;
+    used: number;
+    limit: number;
+    unit: 'messages' | 'tokens' | 'minutes';
+    planTier: 'free' | 'pro' | 'power';
+    suggestedAlternative?: string;
+  };
+};
+
+function mapError(code: string, ctx?: ErrorContext): ErrorPresentation {
   // Cap reached — wallet top-up is the right action, not retry.
   if (code === 'cap_hit') {
     return {
@@ -1377,6 +1399,50 @@ function mapError(code: string): ErrorPresentation {
       title: 'You hit your spend cap',
       body: 'qlaud stopped this turn before going over your set limit. Top up your wallet or raise the cap to keep going.',
       action: { label: 'Top up wallet', href: 'https://qlaud.ai/dashboard' },
+    };
+  }
+  // qcode plan-tier limit reached. Suggest switching to a model that's
+  // included in the user's tier as the "keep going" path; upgrade is
+  // the secondary action. Copy distinguishes free vs pro.
+  if (code === 'plan_limit_exceeded') {
+    const planTier = ctx?.plan?.planTier ?? 'free';
+    const tier = ctx?.plan?.tier ?? 'this';
+    const used = ctx?.plan?.used ?? 0;
+    const limit = ctx?.plan?.limit ?? 0;
+    const unit = ctx?.plan?.unit ?? 'messages';
+    const alt = ctx?.plan?.suggestedAlternative;
+    const upgradeTo = planTier === 'free' ? 'Pro' : 'Power';
+    const body = alt
+      ? `You've used today's ${tier} quota (${used}/${limit} ${unit}). Switch to ${alt} to keep going, or upgrade to ${upgradeTo} for higher limits.`
+      : `You've used today's ${tier} quota (${used}/${limit} ${unit}). Upgrade to ${upgradeTo} for higher limits, or wait for the daily reset (midnight UTC).`;
+    return {
+      severity: 'warning',
+      title: `Daily ${tier} limit reached`,
+      body,
+      action: {
+        label: `Upgrade to ${upgradeTo}`,
+        href: `https://qlaud.ai/dashboard/billing?upgrade=${planTier === 'free' ? 'pro' : 'power'}`,
+      },
+    };
+  }
+  // Tier blocked entirely (e.g. Free trying to use Opus). Even more
+  // direct upgrade pitch since there's no daily-reset escape hatch.
+  if (code === 'plan_tier_blocked') {
+    const planTier = ctx?.plan?.planTier ?? 'free';
+    const tier = ctx?.plan?.tier ?? 'this';
+    const alt = ctx?.plan?.suggestedAlternative;
+    const upgradeTo = planTier === 'free' ? 'Pro' : 'Power';
+    const body = alt
+      ? `${tier} models aren't included in your ${planTier} plan. Try ${alt} (included), or upgrade to ${upgradeTo} for access.`
+      : `${tier} models aren't included in your ${planTier} plan. Upgrade to ${upgradeTo} for access.`;
+    return {
+      severity: 'warning',
+      title: `${tier} models need ${upgradeTo}`,
+      body,
+      action: {
+        label: `Upgrade to ${upgradeTo}`,
+        href: `https://qlaud.ai/dashboard/billing?upgrade=${planTier === 'free' ? 'pro' : 'power'}`,
+      },
     };
   }
   // Auth expired / revoked.
