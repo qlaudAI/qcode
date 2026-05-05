@@ -645,7 +645,18 @@ export function App() {
           messages = (await getRemoteThreadMessages(fetchKey)).messages;
         }
         if (!messages.length) return;
-        const generated = await generateThreadTitle(messages);
+        // Try LLM first; if it bails (returns null OR returns the
+        // 'New chat' placeholder string the server would null-out
+        // anyway), fall back to titleFromPrompt() so threads ALWAYS
+        // get a real title after first send. The fallback may be
+        // less polished than the LLM output but at least it's
+        // topical instead of empty.
+        let generated = await generateThreadTitle(messages);
+        if (!generated || generated.toLowerCase() === 'new chat') {
+          generated = info.userText
+            ? titleFromPrompt(info.userText)
+            : null;
+        }
         if (!generated) return;
         // Bail if user manually edited between kickoff + now.
         const fresh =

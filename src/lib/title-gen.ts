@@ -33,7 +33,16 @@ const MAX_TOKENS = 30;
 const CONTEXT_TURNS = 6;
 const TITLE_MAX_CHARS = 50;
 
-const SYSTEM = `You write tab titles. Given a conversation, output a 3-5 word title that captures what the user is working on. NO quotes, NO punctuation at the end, NO "Discussing" or "About" prefixes — just the topic in title case. If the conversation hasn't established a clear topic yet, output exactly "New chat".`;
+// IMPORTANT: prompt deliberately does NOT include "output 'New chat'
+// when the topic isn't clear" because the server-side normalizeTitle
+// rejects that exact string back to NULL (it collides with the
+// display-time placeholder). Instead we tell the model to ALWAYS
+// produce something topical — even for "hi" / "hey" the model can
+// describe what was discussed ("Casual greeting", "Saying hello",
+// etc.). If the model still bails, the client falls back to
+// titleFromPrompt() so the thread never shows the bare placeholder
+// after a real conversation.
+const SYSTEM = `You write tab titles. Given a conversation, output a 3-5 word title that captures the topic or vibe. ALWAYS output a title — even if the conversation is brief, a greeting, or off-topic. For greetings use phrases like "Casual greeting", "Saying hello", "Quick check-in". For vague chat use the most concrete noun phrase you can extract. NO quotes, NO trailing punctuation, NO "Discussing" or "About" prefixes — just the topic in title case.`;
 
 /** Generate a fresh title from the thread's recent history. Returns
  *  null on any failure (network, empty, ratelimit) — caller keeps
