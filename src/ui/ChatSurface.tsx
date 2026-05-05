@@ -171,6 +171,7 @@ const WEB_SAMPLE_PROMPTS = [
 
 export function ChatSurface({
   model,
+  onModelChange,
   mode = 'agent',
   threadId,
   ensureThreadId,
@@ -183,6 +184,11 @@ export function ChatSurface({
   onCloseRightRail,
 }: {
   model: string;
+  /** Optional callback to swap the active model. Used by retry()
+   *  when an error block carries retryWithModel — the user one-
+   *  clicks "Retry with Sonnet" on a plan_limit_exceeded error
+   *  and we both switch the picker AND re-trigger the send. */
+  onModelChange?: (slug: string) => void;
   mode?: 'agent' | 'plan';
   threadId: string | null;
   ensureThreadId: () => Promise<string>;
@@ -438,13 +444,22 @@ export function ChatSurface({
     [],
   );
 
-  function retry(retryInputs: {
-    text: string;
-    images: AttachedImage[];
-    documents: AttachedDocument[];
-    textFiles: AttachedText[];
-    attached: string[];
-  }) {
+  function retry(
+    retryInputs: {
+      text: string;
+      images: AttachedImage[];
+      documents: AttachedDocument[];
+      textFiles: AttachedText[];
+      attached: string[];
+    },
+    /** Optional model swap before re-sending. Used by the
+     *  retryWithModel button on plan-tier 402 errors so the user
+     *  one-clicks past a cap without re-typing or fiddling with
+     *  the model picker. The model state lives in the parent and
+     *  feeds back via onModelChange; we update it BEFORE the
+     *  microtask so send() reads the new value from props. */
+    modelOverride?: string,
+  ) {
     // Mark every still-retryable error block as resolved so we don't
     // show a stale Retry; the new turn either succeeds or pushes its
     // own fresh error block.
@@ -453,6 +468,9 @@ export function ChatSurface({
         b.type === 'error' && b.retry ? { ...b, retry: null } : b,
       ),
     );
+    if (modelOverride && modelOverride !== model) {
+      onModelChange?.(modelOverride);
+    }
     setInput(retryInputs.text);
     setImages(retryInputs.images);
     setDocuments(retryInputs.documents);
@@ -1025,6 +1043,9 @@ export function ChatSurface({
                         onRetry={() => {
                           if (b.type === 'error' && b.retry) retry(b.retry);
                         }}
+                        onRetryWithModel={(slug) => {
+                          if (b.type === 'error' && b.retry) retry(b.retry, slug);
+                        }}
                       />
                     </motion.div>
                   );
@@ -1374,6 +1395,12 @@ type ErrorPresentation = {
    *  fix (e.g. "Top up your wallet" for cap_hit). Rendered next to
    *  the retry button. */
   action?: { label: string; href: string };
+  /** Optional inline retry-with-different-model action. When set,
+   *  the error block shows a primary button that switches the
+   *  active model + re-sends the prompt. Used by plan-tier 402s
+   *  with a suggestedAlternative — softens the "you're blocked"
+   *  UX into "we'll use this other model for you, click to go". */
+  retryWithModel?: { label: string; modelSlug: string };
   severity: 'warning' | 'error';
 };
 
@@ -1414,12 +1441,20 @@ function mapError(code: string, ctx?: ErrorContext): ErrorPresentation {
     const alt = ctx?.plan?.suggestedAlternative;
     const upgradeTo = planTier === 'free' ? 'Pro' : 'Power';
     const body = alt
-      ? `You've used today's ${tier} quota (${used}/${limit} ${unit}). Switch to ${alt} to keep going, or upgrade to ${upgradeTo} for higher limits.`
+      ? `You've used today's ${tier} quota (${used}/${limit} ${unit}). Click to retry with ${alt} (included on your plan), or upgrade to ${upgradeTo} for higher limits.`
       : `You've used today's ${tier} quota (${used}/${limit} ${unit}). Upgrade to ${upgradeTo} for higher limits, or wait for the daily reset (midnight UTC).`;
     return {
       severity: 'warning',
       title: `Daily ${tier} limit reached`,
       body,
+      // Soft-fall-back: if the server suggested an alternative, the
+      // primary action becomes one-click switch + retry. The user
+      // never has to re-type their prompt or open the model picker.
+      ...(alt
+        ? {
+            retryWithModel: { label: `Retry with ${alt}`, modelSlug: alt },
+          }
+        : {}),
       action: {
         label: `Upgrade to ${upgradeTo}`,
         href: `https://qlaud.ai/dashboard/billing?upgrade=${planTier === 'free' ? 'pro' : 'power'}`,
@@ -1434,12 +1469,17 @@ function mapError(code: string, ctx?: ErrorContext): ErrorPresentation {
     const alt = ctx?.plan?.suggestedAlternative;
     const upgradeTo = planTier === 'free' ? 'Pro' : 'Power';
     const body = alt
-      ? `${tier} models aren't included in your ${planTier} plan. Try ${alt} (included), or upgrade to ${upgradeTo} for access.`
+      ? `${tier} models aren't included in your ${planTier} plan. Click to retry with ${alt} (included), or upgrade to ${upgradeTo} for access.`
       : `${tier} models aren't included in your ${planTier} plan. Upgrade to ${upgradeTo} for access.`;
     return {
       severity: 'warning',
       title: `${tier} models need ${upgradeTo}`,
       body,
+      ...(alt
+        ? {
+            retryWithModel: { label: `Retry with ${alt}`, modelSlug: alt },
+          }
+        : {}),
       action: {
         label: `Upgrade to ${upgradeTo}`,
         href: `https://qlaud.ai/dashboard/billing?upgrade=${planTier === 'free' ? 'pro' : 'power'}`,
@@ -1772,6 +1812,7 @@ function BlockRow({
   onAllow,
   onReject,
   onRetry,
+  onRetryWithModel,
 }: {
   block: RenderBlock;
   busy: boolean;
@@ -1788,6 +1829,7 @@ function BlockRow({
   onAllow?: () => void;
   onReject?: () => void;
   onRetry?: () => void;
+  onRetryWithModel?: (slug: string) => void;
 }) {
   if (block.type === 'user_text') {
     const hasFiles =
@@ -1923,19 +1965,39 @@ function BlockRow({
               )}
             </div>
           </div>
-          {(block.retry || p.action) && (
+          {(block.retry || p.action || p.retryWithModel) && (
             <div className="flex items-center justify-end gap-2 pt-1">
+              {/* Retry-with-model = primary action when present.
+               *  Plan-tier 402s use this to one-click switch to a
+               *  cheaper/included model and re-send. The user
+               *  doesn't have to re-type their prompt. */}
+              {p.retryWithModel && block.retry && (
+                <button
+                  onClick={() => onRetryWithModel?.(p.retryWithModel!.modelSlug)}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  {p.retryWithModel.label}
+                </button>
+              )}
               {p.action && (
                 <a
                   href={p.action.href}
                   target="_blank"
                   rel="noopener"
-                  className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                  className={
+                    'inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ' +
+                    (p.retryWithModel
+                      ? 'border border-border bg-background text-foreground/80 hover:border-foreground/30 hover:text-foreground'
+                      : 'bg-primary text-primary-foreground hover:bg-primary/90')
+                  }
                 >
                   {p.action.label} →
                 </a>
               )}
-              {block.retry && (
+              {/* Generic retry only when there's no model-specific
+               *  retry to offer (otherwise it'd be redundant). */}
+              {block.retry && !p.retryWithModel && (
                 <button
                   onClick={() => onRetry?.()}
                   className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground/80 transition-colors hover:border-foreground/30 hover:text-foreground"

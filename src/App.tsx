@@ -815,6 +815,7 @@ export function App() {
               void refreshBalance();
             }}
             model={model}
+            onModelChange={onModelChange}
             mode={mode}
             hasWorkspace={!!workspace}
             workspaceName={workspace?.name}
