@@ -12,6 +12,7 @@
 // near-zero overhead for users who do (single read, then cached).
 
 import { isTauri } from './tauri';
+import { QLAUD_TOOLS_SKILL } from './skills/qlaud-tools';
 import { QLAUD_VIDEO_CREATOR_SKILL } from './skills/video-creator';
 
 const SKILLS_DIR_REL = '.qcode/skills';
@@ -43,6 +44,7 @@ export async function ensureSkillsOnDisk(): Promise<string[] | null> {
     }
     const skills: Array<{ name: string; content: string }> = [
       { name: 'video-creator.md', content: QLAUD_VIDEO_CREATOR_SKILL },
+      { name: 'qlaud-tools.md', content: QLAUD_TOOLS_SKILL },
     ];
     const written: string[] = [];
     for (const s of skills) {
@@ -70,20 +72,35 @@ export async function ensureSkillsOnDisk(): Promise<string[] | null> {
 }
 
 /** Short markdown snippet appended to claude-code's system prompt.
- *  Tells the agent skills exist on disk + how to load them.
+ *  Tells the agent which skills exist on disk + when to load them.
  *
- *  Token cost: ~150. Tiny relative to the full skill (7-8k) and
- *  always present so the agent can decide on its own when to load. */
+ *  Two skills today:
+ *    qlaud-tools     — discover/call any external tool via the
+ *                      meta-tool REST API (search-then-call pattern).
+ *                      Covers builtins, MCPs, registered tools.
+ *    video-creator   — full video editor workflow (Remotion +
+ *                      ffmpeg + asset sourcing + voiceover).
+ *
+ *  Token cost: ~250 tokens for the pointer block. Tiny vs the
+ *  ~15k tokens the full skills would add to every system prompt
+ *  if we inlined them. */
 export function buildSkillPointer(homeDir: string): string {
-  return `qcode skills available on disk — load on demand with the Read tool when the user's request matches:
+  return `qcode skills available on disk — load with the Read tool when the user's request matches:
+
+  ${homeDir}/${SKILLS_DIR_REL}/qlaud-tools.md
+    Read when the user asks about external systems: Slack, Linear,
+    GitHub, Stripe, Notion, Atlassian, web search, send email, SMS,
+    or anything else that might need an integration. Teaches the
+    search-then-call pattern via /v1/tools/search → /v1/tools/schemas
+    → /v1/tools/execute. Covers per-user MCP credential management
+    via /v1/connections. Use this BEFORE asking the user "do you
+    have X connected?" — search will tell you.
 
   ${homeDir}/${SKILLS_DIR_REL}/video-creator.md
-    Use when the user wants video creation: explainer / faceless YouTube /
-    cash-cow / ad / reel / SaaS demo / documentary. The file teaches the
-    full workflow (script → ElevenLabs voiceover → Whisper word-timing →
-    storyboard → Pexels/Pixabay stock + AI assets → Remotion + ffmpeg
-    composition → polished MP4 → optional cloud sync). Read it FIRST,
-    then proceed with the user's request.
+    Read when the user wants video creation: explainer / faceless
+    YouTube / ad / reel / SaaS demo / documentary. Teaches the full
+    workflow (script → voiceover → storyboard → stock+AI sourcing
+    → Remotion+ffmpeg → polished MP4 → optional cloud sync).
 
 DO NOT preload these — read only when the user's request actually fits the skill. Skills you read once are cached for the rest of this session.`;
 }
