@@ -83,10 +83,20 @@ export const Markdown = memo(function Markdown({
 // backticks) so paths shown in code samples stay literal.
 function annotateFileLinks(source: string): string {
   // Match: optional ./ then segment(s) ending in .<ext> with
-  // optional :line suffix. Tight to avoid false positives on URLs
-  // and URL-looking prose. Only triggers on tokens with a clear
-  // file extension.
-  const FILE_RE = /(?<![\w/[(])((?:\.\.?\/)?(?:[\w.-]+\/)*[\w.-]+\.[a-zA-Z0-9]{1,8})(?::(\d+))?(?![\w/])/g;
+  // optional :line suffix. Tight to avoid false positives on URLs,
+  // version numbers, and unit-suffixed measurements ('1.4MB',
+  // 'v2.1', '3.14', etc.).
+  //
+  // Two guards against the classic false positives:
+  //   1. Lookahead `(?=[\w.-]*[a-zA-Z])` requires the filename body
+  //      to contain at least one ASCII letter. Excludes pure-digit
+  //      bodies like '1' (in '1.1') or '3' (in '3.14').
+  //   2. Extension must START with a letter `[a-zA-Z][\w]{0,7}`.
+  //      Excludes pure-numeric extensions like '0' (in 'v1.0') and
+  //      keeps real ones (md, ts, tsx, jpeg, mp4).
+  // Together these reject '1.1', '1.4MB', 'v1.0' while still matching
+  // 'README.md', 'app.ts:42', './src/index.tsx', 'logo.svg'.
+  const FILE_RE = /(?<![\w/[(])((?:\.\.?\/)?(?:[\w.-]+\/)*(?=[\w.-]*[a-zA-Z])[\w.-]+\.[a-zA-Z][\w]{0,7})(?::(\d+))?(?![\w/])/g;
   // Split into fenced/non-fenced segments. Fenced regions pass
   // through verbatim.
   const parts = source.split(/(```[\s\S]*?```)/g);
