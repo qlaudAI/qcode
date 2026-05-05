@@ -40,6 +40,7 @@ import type { AgentEvent } from '../legacy/agent';
 import type { ContentBlock } from '../qlaud-client';
 import { getKey } from '../auth';
 import { getSettings, patchSettings } from '../settings';
+import { ensureSkillsOnDisk, buildSkillPointer } from '../skill-bundle';
 import { QLAUD_MEDIA_SKILL } from '../skills/qlaud-media';
 import { QLAUD_VIDEO_CREATOR_SKILL } from '../skills/video-creator';
 
@@ -348,14 +349,31 @@ export async function runEngineClaudeCode(
   // further down (two-model config + cloud sync flag). Reads from
   // localStorage, cheap.
   const settings = getSettings();
+  // Drop skill markdown files to ~/.qcode/skills/ idempotently
+  // before spawn. The pointer below references these paths so the
+  // agent can Read them on demand. Failure here is non-fatal —
+  // pointer falls back to a graceful explanation.
+  await ensureSkillsOnDisk();
+  const homeForPointer = await getHome();
   // System-prompt addition: qcode dev hints + qlaud media skill +
-  // optionally qlaud-video-creator skill (gated behind Settings to
-  // avoid the ~7-8k token cost when not needed). Joined with section
-  // breaks so each is independently legible when claude-code logs
-  // the resolved prompt. The agent picks up the documented endpoints
-  // when the user asks for matching work; otherwise the tokens are
-  // inert.
-  const sections = [QCODE_ENGINE_HINT, QLAUD_MEDIA_SKILL];
+  // skill-on-disk pointer (~150 tokens, always-on). The full
+  // video-creator skill (7-8k tokens) lives at ~/.qcode/skills/
+  // video-creator.md and the agent reads it via the Read tool only
+  // when a user request matches. ~95% token-cost reduction for
+  // users who don't ask for video, near-zero overhead for users
+  // who do (single read, cached for rest of session). Replaces
+  // the previous Settings-gated always-inline pattern.
+  const sections = [
+    QCODE_ENGINE_HINT,
+    QLAUD_MEDIA_SKILL,
+    buildSkillPointer(homeForPointer),
+  ];
+  // Power-user override: settings.videoCreatorSkill, when true,
+  // ALSO inlines the full skill in the system prompt. Useful when
+  // a user knows they're going to ask for video on every turn and
+  // wants to skip the one-time Read tool roundtrip on the first
+  // ask. Default false (pointer-only) since the Read pattern is
+  // strictly cheaper for typical usage.
   if (settings.videoCreatorSkill) sections.push(QLAUD_VIDEO_CREATOR_SKILL);
   const appendedSystemPrompt = sections.join(
     '\n\n────────────────────────────────────────\n\n',

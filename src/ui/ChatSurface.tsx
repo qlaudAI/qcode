@@ -1073,6 +1073,7 @@ export function ChatSurface({
           view={rightRailView}
           blocks={blocks}
           workspacePath={workspacePath}
+          threadId={threadId}
           onClose={onCloseRightRail}
         />
       )}

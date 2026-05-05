@@ -237,19 +237,31 @@ export function SettingsDrawer({
             {isTauri() && (
               <>
                 <Toggle
-                  label="Enable video creator skill"
+                  label="Always inline video creator skill (advanced)"
                   checked={settings.videoCreatorSkill}
                   onChange={(v) => update('videoCreatorSkill', v)}
                 />
                 <p className="text-[11px] text-muted-foreground">
-                  Turns the agent into a professional faceless /
-                  explainer / ad / reel video editor — script →
-                  voiceover (ElevenLabs) → stock footage (Pexels,
-                  Pixabay, included) + AI imagery → Remotion + ffmpeg
-                  composition → polished MP4. Off by default; the
-                  skill adds ~7-8k tokens to every spawn so you only
-                  pay when you actually want it. Render budget
-                  typically $0.30–0.50 per minute (more with Sora b-roll).
+                  The video creator skill is{' '}
+                  <span className="font-medium text-foreground/80">
+                    always available
+                  </span>{' '}
+                  on desktop — qcode drops the full markdown to{' '}
+                  <span className="font-mono">~/.qcode/skills/video-creator.md</span>{' '}
+                  on launch and a thin pointer in the system prompt
+                  tells the agent to{' '}
+                  <span className="font-mono">Read</span> it when a user
+                  request matches (explainer / ad / reel / SaaS demo /
+                  documentary). This toggle{' '}
+                  <span className="font-medium text-foreground/80">
+                    additionally
+                  </span>{' '}
+                  inlines the full ~7-8k-token skill into every system
+                  prompt, skipping the one-time Read roundtrip. Off by
+                  default — the on-demand read is strictly cheaper for
+                  typical usage (skill loads once per session, then
+                  cached). Render budget typically $0.30–0.50 per
+                  minute (more with Sora b-roll).
                 </p>
               </>
             )}

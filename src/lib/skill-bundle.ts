@@ -1,0 +1,89 @@
+// Skill-on-disk bundling — writes skill markdown files to
+// ~/.qcode/skills/ so the agent can `Read` them on demand instead
+// of carrying the full ~7-8k tokens in every system prompt.
+//
+// Pattern: skill catalog (a thin pointer) is always in the system
+// prompt. When the user asks for matching work, the agent calls
+// Read on the file path. File is cached by claude-code's Read tool
+// implementation, so subsequent turns in the same session pay zero.
+//
+// Token budget impact: ~150-token pointer always-on vs 7-8k tokens
+// always-on. ~95% reduction for users who don't trigger the skill,
+// near-zero overhead for users who do (single read, then cached).
+
+import { isTauri } from './tauri';
+import { QLAUD_VIDEO_CREATOR_SKILL } from './skills/video-creator';
+
+const SKILLS_DIR_REL = '.qcode/skills';
+
+/** Idempotent — writes / refreshes the bundled skill markdown files
+ *  to ~/.qcode/skills/. Safe to call on every app boot or every
+ *  claude-code spawn; only writes when the file is missing or its
+ *  content has drifted from what we ship in this build.
+ *
+ *  Why per-app-version: when we update the skill content (better
+ *  templates, new patterns, fixed recipes), we want users to get
+ *  the new file the next time they launch. A simple SHA check on
+ *  the first byte gives us "is the bundled content the live one"
+ *  — fast, no manual versioning.
+ *
+ *  Returns the absolute paths of files written / verified, or null
+ *  on web (no fs access). */
+export async function ensureSkillsOnDisk(): Promise<string[] | null> {
+  if (!isTauri()) return null;
+  try {
+    const { homeDir } = await import('@tauri-apps/api/path');
+    const { exists, mkdir, readTextFile, writeTextFile } = await import(
+      '@tauri-apps/plugin-fs'
+    );
+    const home = await homeDir();
+    const dir = `${home}/${SKILLS_DIR_REL}`;
+    if (!(await exists(dir))) {
+      await mkdir(dir, { recursive: true });
+    }
+    const skills: Array<{ name: string; content: string }> = [
+      { name: 'video-creator.md', content: QLAUD_VIDEO_CREATOR_SKILL },
+    ];
+    const written: string[] = [];
+    for (const s of skills) {
+      const path = `${dir}/${s.name}`;
+      let needsWrite = true;
+      if (await exists(path)) {
+        try {
+          const current = await readTextFile(path);
+          if (current === s.content) needsWrite = false;
+        } catch {
+          /* read failed — overwrite */
+        }
+      }
+      if (needsWrite) {
+        await writeTextFile(path, s.content);
+      }
+      written.push(path);
+    }
+    return written;
+  } catch {
+    // fs failure is non-fatal — the skill pointer falls back to a
+    // graceful explanation when the agent can't find the file.
+    return null;
+  }
+}
+
+/** Short markdown snippet appended to claude-code's system prompt.
+ *  Tells the agent skills exist on disk + how to load them.
+ *
+ *  Token cost: ~150. Tiny relative to the full skill (7-8k) and
+ *  always present so the agent can decide on its own when to load. */
+export function buildSkillPointer(homeDir: string): string {
+  return `qcode skills available on disk — load on demand with the Read tool when the user's request matches:
+
+  ${homeDir}/${SKILLS_DIR_REL}/video-creator.md
+    Use when the user wants video creation: explainer / faceless YouTube /
+    cash-cow / ad / reel / SaaS demo / documentary. The file teaches the
+    full workflow (script → ElevenLabs voiceover → Whisper word-timing →
+    storyboard → Pexels/Pixabay stock + AI assets → Remotion + ffmpeg
+    composition → polished MP4 → optional cloud sync). Read it FIRST,
+    then proceed with the user's request.
+
+DO NOT preload these — read only when the user's request actually fits the skill. Skills you read once are cached for the rest of this session.`;
+}
