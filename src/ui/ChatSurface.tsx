@@ -35,7 +35,6 @@ import {
   type AttachedText,
 } from '../lib/uploads';
 import { getProjectMemory, type ProjectMemory } from '../lib/legacy/memory';
-import { contextWindowFor } from '../lib/models';
 import { useTextModels } from '../lib/queries';
 import { planToAgentHandoff, setLastMode } from '../lib/mode-tracking';
 import { getSettings } from '../lib/settings';
@@ -1046,13 +1045,8 @@ export function ChatSurface({
         workspaceName={workspaceName}
         branch={branch}
         mode={mode}
-        // Latest usage block's inputTokens is the closest proxy for
-        // "current conversation size" — it's what the model just
-        // received (history + system + this turn). Show against the
-        // model's context window so the user sees headroom shrink
-        // and knows when to /compact or start a new chat.
-        contextUsed={latestInputTokens(blocks)}
-        contextMax={contextWindowFor(model)}
+        // Context usage indicator deliberately removed — see the
+        // chip retirement note above the formatTokens helper.
         onSend={send}
         onStop={stop}
         busy={busy}
@@ -2580,56 +2574,18 @@ function CompactionIndicator({
   );
 }
 
-// Latest input-token count across the blocks list — represents the
-// most recent "what the model just received" snapshot, which is the
-// best proxy for current conversation size given that we don't get
-// a separate "context length" signal from the upstream API.
-function latestInputTokens(blocks: RenderBlock[]): number {
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const b = blocks[i];
-    if (b?.type === 'usage' && b.inputTokens > 0) return b.inputTokens;
-  }
-  return 0;
-}
+// Context-usage chip retired. Claude Code and qlaud's qcode-legacy
+// auto-compaction handle context internally. Our pre-compaction
+// "X / Y tokens" estimate diverged from the model's actual
+// effective context after engine-side pruning, so the indicator
+// was misleading more often than not. Real context errors
+// propagate through the dispatch path; we surface those when they
+// fire. formatTokens kept — used elsewhere for usage block render.
 
 function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
   return `${Math.round(n / 1000)}k`;
-}
-
-// Compact context-usage indicator. Shows token count vs the model's
-// context window, with a 4-segment progress bar that escalates from
-// muted → primary → amber → destructive as the conversation fills.
-// At 80%+ we surface "compact" hint copy so the user knows what to
-// say to qcode to free up room.
-function ContextUsageChip({ used, max }: { used: number; max: number }) {
-  const pct = Math.min(100, Math.round((used / max) * 100));
-  const tone =
-    pct >= 90
-      ? 'text-destructive border-destructive/30 bg-destructive/5'
-      : pct >= 75
-        ? 'text-amber-700 dark:text-amber-400 border-amber-500/30 bg-amber-500/10'
-        : 'text-foreground/80 border-border/60 bg-background/60';
-  const barTone =
-    pct >= 90 ? 'bg-destructive' : pct >= 75 ? 'bg-amber-500' : 'bg-primary';
-  return (
-    <span
-      className={cn(
-        'hidden items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10.5px] font-medium tabular-nums sm:inline-flex',
-        tone,
-      )}
-      title={`Conversation context: ${used.toLocaleString()} / ${max.toLocaleString()} tokens (${pct}%)${pct >= 75 ? ' — say "compact this" to summarize older turns' : ''}`}
-    >
-      <span className="inline-flex h-1 w-10 overflow-hidden rounded-full bg-muted">
-        <span
-          className={cn('h-full transition-all duration-300', barTone)}
-          style={{ width: `${pct}%` }}
-        />
-      </span>
-      {formatTokens(used)} / {formatTokens(max)}
-    </span>
-  );
 }
 
 // Sticky checklist panel rendered above the chat blocks. The latest
@@ -2998,8 +2954,6 @@ function Composer({
   workspaceName,
   branch,
   mode,
-  contextUsed,
-  contextMax,
   onSend,
   onStop,
   busy,
@@ -3028,12 +2982,6 @@ function Composer({
   branch?: string | null;
   /** Active mode — drives the secondary pill ("Plan" / "Agent"). */
   mode?: 'agent' | 'plan';
-  /** Latest input-token count from the usage stream. Drives the
-   *  context-usage chip ("32k / 200k · 16%") so users see how much
-   *  headroom remains before auto-compaction kicks in. */
-  contextUsed?: number;
-  /** Active model's context window in tokens. */
-  contextMax?: number;
   onSend: (v: string) => void;
   onStop: () => void;
   busy: boolean;
@@ -3393,14 +3341,9 @@ function Composer({
                     >
                       {modelLabel}
                     </span>
-                    {contextUsed != null &&
-                      contextMax != null &&
-                      contextUsed > 0 && (
-                        <ContextUsageChip
-                          used={contextUsed}
-                          max={contextMax}
-                        />
-                      )}
+                    {/* Context-usage chip retired — Claude Code +
+                     *  qlaud auto-compaction handle context internally;
+                     *  our pre-compaction estimate was misleading. */}
                     <span className="hidden text-[10.5px] text-muted-foreground sm:inline">
                       ⏎ to send · @ files
                     </span>
