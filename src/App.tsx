@@ -70,6 +70,10 @@ import {
   setCurrentWorkspace,
   type Workspace,
 } from './lib/workspace';
+import {
+  hydrateWorkspacesFromServer,
+  syncRegisterWorkspace,
+} from './lib/workspace-sync';
 import { ChatSurface } from './ui/ChatSurface';
 import { type RightRailView } from './ui/RightRail';
 import { CommandPalette } from './ui/CommandPalette';
@@ -322,6 +326,7 @@ export function App() {
       if (!t.workspacePath) continue;
       if (t.workspaceId && getWorkspaceById(t.workspaceId)) continue;
       if (getWorkspaceByPath(t.workspacePath)) continue;
+      const name = t.workspaceName || deriveWorkspaceName(t.workspacePath);
       registerWorkspace({
         path: t.workspacePath,
         // workspaceName from metadata is preferred (it's what the
@@ -329,8 +334,13 @@ export function App() {
         // the path. Empty-string workspaceName (rare, but possible
         // from corrupted metadata) skips through to the path
         // derivation rather than rendering blank.
-        name: t.workspaceName || deriveWorkspaceName(t.workspacePath),
+        name,
       });
+      // Fire-and-forget server-side registration so other devices
+      // see this workspace too. Idempotent on the server: if a row
+      // already exists for (user, path), POST bumps last_used_at
+      // instead of inserting.
+      void syncRegisterWorkspace({ path: t.workspacePath, name });
     }
     // dataUpdatedAt rather than data because threadsQuery may
     // structurally re-share the same array reference; we still
@@ -378,6 +388,18 @@ export function App() {
       posthog.identify(profile.user_id, { email: profile.email });
     }
   }, [authed, profile?.user_id, profile?.email]);
+
+  // Workspace registry sync — pull server-side workspaces once auth
+  // lands so devices that signed in fresh see the user's prior
+  // folders without forcing a re-open. Fire-and-forget; offline /
+  // older-gateway failure modes degrade to local-only registry,
+  // which is what we had before this layer existed.
+  useEffect(() => {
+    if (!authed) return;
+    void hydrateWorkspacesFromServer().catch((e) => {
+      console.warn('[workspace-sync] boot hydrate failed:', e);
+    });
+  }, [authed]);
 
   // Cross-tab storage sync (vite-dev convenience). Just flips authed —
   // queries refetch on the same render.
@@ -443,10 +465,14 @@ export function App() {
         resolved = getWorkspaceByPath(t.workspacePath);
       }
       if (!resolved && t?.workspacePath) {
+        const wsName = t.workspaceName || deriveWorkspaceName(t.workspacePath);
         resolved = registerWorkspace({
           path: t.workspacePath,
-          name: t.workspaceName || deriveWorkspaceName(t.workspacePath),
+          name: wsName,
         });
+        // Mirror the registration server-side. Same fire-and-forget
+        // pattern as the boot-scan registration.
+        void syncRegisterWorkspace({ path: t.workspacePath, name: wsName });
       }
       if (resolved && resolved.path !== workspace?.path) {
         setWorkspace(resolved);

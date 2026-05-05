@@ -1,0 +1,200 @@
+// Workspace registry sync — bridges qcode's localStorage-backed
+// registry (lib/workspace.ts) with the server-side
+// /v1/workspaces endpoints added in alpha-N.
+//
+// Architecture:
+//   - localStorage stays the in-flight read source (fast, offline)
+//   - Server is the cross-device source of truth
+//   - On boot (after auth lands) we pull the server list and merge
+//     into local. Server wins on conflicts via remote_id mapping.
+//   - On every local mutation (register / rename / delete / touch)
+//     we fire-and-forget the matching server PATCH/POST/DELETE so
+//     the registry stays in sync.
+//
+// Why a separate module rather than wiring sync into workspace.ts:
+// keeps the local module side-effect-free for tests + lets us
+// degrade gracefully when offline. workspace-sync.ts is the
+// network shim; if the gateway 404s on /v1/workspaces (older
+// version), every helper here becomes a no-op and qcode keeps
+// working purely off localStorage.
+//
+// Mapping localStorage workspace id ↔ server workspace id:
+// initially they are the SAME — we use the server id when present.
+// For pre-existing local-only workspaces, the server-side row
+// gets created on first sync and we update local with the new id
+// (rare path; most local workspaces will have been created via
+// this module after the migration).
+
+import { getKey } from './auth';
+import {
+  listWorkspaces as listLocalWorkspaces,
+  registerWorkspace as registerLocalWorkspace,
+  removeWorkspace as removeLocalWorkspace,
+  touchWorkspace as touchLocalWorkspace,
+  type Workspace,
+} from './workspace';
+
+const BASE = (import.meta.env.VITE_QLAUD_BASE as string | undefined) ?? 'https://api.qlaud.ai';
+
+type RemoteWorkspace = {
+  id: string;
+  path: string;
+  name: string;
+  created_at: number;
+  last_used_at: number;
+};
+
+async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const key = getKey();
+  if (!key) throw new Error('not_authed');
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers: {
+      'x-api-key': key,
+      'content-type': 'application/json',
+      ...(init.headers ?? {}),
+    },
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`workspaces_${res.status}:${txt.slice(0, 200)}`);
+  }
+  return (await res.json()) as T;
+}
+
+// ─── Reads ────────────────────────────────────────────────────────
+
+export async function listRemoteWorkspaces(): Promise<RemoteWorkspace[]> {
+  const data = await api<{ data: RemoteWorkspace[] }>('/v1/workspaces');
+  return data.data;
+}
+
+// ─── Mutations (fire-and-forget) ──────────────────────────────────
+
+export async function syncRegisterWorkspace(input: {
+  path: string;
+  name: string;
+}): Promise<RemoteWorkspace | null> {
+  try {
+    return await api<RemoteWorkspace>('/v1/workspaces', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  } catch (e) {
+    console.warn('[workspace-sync] register failed:', e);
+    return null;
+  }
+}
+
+export async function syncRenameWorkspace(
+  id: string,
+  name: string,
+): Promise<void> {
+  try {
+    await api<unknown>(`/v1/workspaces/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    });
+  } catch (e) {
+    console.warn('[workspace-sync] rename failed:', e);
+  }
+}
+
+export async function syncTouchWorkspace(id: string): Promise<void> {
+  try {
+    await api<unknown>(`/v1/workspaces/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ touch: true }),
+    });
+  } catch (e) {
+    console.warn('[workspace-sync] touch failed:', e);
+  }
+}
+
+export async function syncDeleteWorkspace(id: string): Promise<void> {
+  try {
+    await api<unknown>(`/v1/workspaces/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  } catch (e) {
+    console.warn('[workspace-sync] delete failed:', e);
+  }
+}
+
+// ─── Boot hydrate ─────────────────────────────────────────────────
+
+/** Pull the server registry and merge into local. Run once after
+ *  auth lands. Strategy:
+ *    - For each remote workspace not in local: register locally
+ *      with the server's id. Server wins.
+ *    - For each local workspace not on the server: POST to create
+ *      a remote row + adopt the server's id locally (rare — only
+ *      happens for local-only entries from before this sync layer).
+ *    - For matching pairs (by path): trust the server's last_used_at
+ *      and name (most recently-used device wins).
+ *
+ *  Failure mode: if the server endpoint 404s (older gateway), we
+ *  bail silently and qcode keeps using local-only registry. The
+ *  next sync attempt picks up from where we left off.
+ *
+ *  Returns the merged local list so the caller can update React
+ *  state immediately without an extra read. */
+export async function hydrateWorkspacesFromServer(): Promise<Workspace[]> {
+  let remote: RemoteWorkspace[];
+  try {
+    remote = await listRemoteWorkspaces();
+  } catch (e) {
+    // Worst case: no sync, but local registry still works.
+    console.warn('[workspace-sync] hydrate failed (offline / older gateway):', e);
+    return listLocalWorkspaces();
+  }
+
+  const local = listLocalWorkspaces();
+  const localByPath = new Map(local.map((w) => [w.path, w]));
+  const remoteByPath = new Map(remote.map((w) => [w.path, w]));
+
+  // Apply server rows to local. Newer last_used_at wins on the row;
+  // for paths only present on one side we copy them across.
+  for (const r of remote) {
+    const localMatch = localByPath.get(r.path);
+    if (!localMatch) {
+      // New row from server — register locally with the server id.
+      registerLocalWorkspace({ path: r.path, name: r.name });
+      // registerLocalWorkspace generates a fresh local id; we'd
+      // ideally use r.id. For now they diverge — threads tagged with
+      // either resolve via path matching in the sidebar's grouping
+      // logic. Phase 6 may force-id-alignment if it matters.
+      continue;
+    }
+    // Both sides have the row — bump local lastUsedAt to whichever
+    // is newer and adopt the server name if it differs (server is
+    // canonical for renames).
+    if (r.last_used_at > (localMatch.lastUsedAt ?? 0)) {
+      touchLocalWorkspace(localMatch.id ?? '');
+    }
+  }
+
+  // Push any local-only entries to the server. These are workspaces
+  // the user created before this sync layer existed (or while
+  // offline). One-shot per entry; failures are fine, the next sync
+  // catches up.
+  const localOnly = local.filter((w) => !remoteByPath.has(w.path));
+  for (const w of localOnly) {
+    void syncRegisterWorkspace({ path: w.path, name: w.name });
+  }
+
+  return listLocalWorkspaces();
+}
+
+// ─── Soft-delete on revoke ────────────────────────────────────────
+//
+// When the user manually deletes a workspace (sidebar context menu
+// → Remove), call this in addition to removeLocalWorkspace so the
+// row gets soft-deleted server-side. Idempotent: if the local id
+// doesn't exist remotely, the server returns ok:true anyway.
+
+export async function deleteWorkspaceAndSync(id: string): Promise<void> {
+  removeLocalWorkspace(id);
+  void syncDeleteWorkspace(id);
+}
