@@ -702,32 +702,36 @@ export function ChatSurface({
       // settings.engine carried over from a desktop session.
       // (The settings drawer also hides the Claude Code option
       // on web, but defensive at send time is cheap.)
+      //
+      // Additional fallback: claude-code engine spawns a subprocess
+      // in the workspace folder. If the user is on desktop but
+      // hasn't opened a folder yet, route through qcode-legacy
+      // (the same chat-only path qcode-web uses) instead of
+      // erroring. The user gets pure conversation; once they open
+      // a folder, the claude-code engine takes over for tool-using
+      // turns. Mirrors the web experience for chat-only usage.
       const engineMode =
-        settingsAtSend.engine === 'claude-code' && isTauri()
+        settingsAtSend.engine === 'claude-code' &&
+        isTauri() &&
+        !!workspace?.path
           ? 'claude-code'
           : 'qcode-legacy';
 
       if (engineMode === 'claude-code') {
-        if (!workspace?.path) {
-          sharedOnEvent({
-            type: 'error',
-            message:
-              'Claude Code engine needs an open workspace folder. Open one (⌘O) and resend.',
-          });
-        } else {
-          const { runEngineClaudeCode, getClaudeSessionId, setClaudeSessionId } =
-            await import('../lib/engines/claude-code');
-          await runEngineClaudeCode({
-            sessionId: getClaudeSessionId(id),
-            onSessionId: (sid) => setClaudeSessionId(id, sid),
-            model,
-            qcodeThreadId: id,
-            workspace: workspace.path,
-            content: userContent,
-            signal: abortRef.current.signal,
-            onEvent: sharedOnEvent,
-          });
-        }
+        const { runEngineClaudeCode, getClaudeSessionId, setClaudeSessionId } =
+          await import('../lib/engines/claude-code');
+        await runEngineClaudeCode({
+          sessionId: getClaudeSessionId(id),
+          onSessionId: (sid) => setClaudeSessionId(id, sid),
+          model,
+          qcodeThreadId: id,
+          // workspace is non-null here — engineMode === 'claude-code'
+          // gates on !!workspace?.path above.
+          workspace: workspace!.path,
+          content: userContent,
+          signal: abortRef.current.signal,
+          onEvent: sharedOnEvent,
+        });
       } else {
         await runThreadAgent({
           threadId: id,

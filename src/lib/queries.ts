@@ -183,28 +183,13 @@ export function useThreadsQuery(opts: {
         const liveRow = liveById.get(r.id);
         const cached = cacheById.get(r.id);
         const meta = (r.metadata ?? {}) as Record<string, unknown>;
-        // Two server sources for title, in priority order:
-        //   1. r.title — the canonical column added in migration 0022.
-        //      Set by PATCH /v1/threads/:id with {title:...}.
-        //   2. meta.title — the legacy stash from before the column
-        //      existed. Old threads still have it; preserve as fallback.
-        // metaTitle is also used to seed titleSource='auto' for those
-        // legacy rows (we can't tell if they were user-edited or
-        // auto-derived, so 'auto' is the safe-rerun default).
+        // Title is SERVER-ONLY. Two server sources, in priority order:
+        //   1. r.title — canonical column from migration 0022.
+        //   2. meta.title — legacy stash for pre-migration rows.
+        // No local cache fallback. Empty/missing → render placeholder.
         const serverTitle = r.title ?? null;
         const metaTitle =
           typeof meta.title === 'string' ? meta.title : undefined;
-        // Helper: a row's title is "canonical" only when titleSource
-        // is set (auto = derived/regenerated; user = manually edited).
-        // The createMutation seeds title='New chat' with NO titleSource
-        // — that's a placeholder we should fall through, not a real
-        // value. Without this guard the ?? chain would lock-in 'New
-        // chat' the first time it's seen and never check server-side
-        // even after PATCH lands.
-        const liveCanonicalTitle =
-          liveRow?.titleSource ? liveRow.title : undefined;
-        const cachedCanonicalTitle =
-          cached?.titleSource ? cached.title : undefined;
         const wsPath =
           typeof meta.workspace_path === 'string'
             ? meta.workspace_path
@@ -224,35 +209,11 @@ export function useThreadsQuery(opts: {
           (typeof meta.workspace_id === 'string'
             ? meta.workspace_id
             : undefined);
-        // Title resolution — server-first.
-        //
-        // Server.title is the cross-device truth. Local cache is a
-        // mirror that may go stale (renamed on a different device,
-        // server updated, this device hasn't refetched yet). Letting
-        // local win means stale wins; letting server win means a
-        // brief flicker during PATCH-in-flight is the only cost,
-        // and it self-corrects on the next refetch.
-        //
-        // Local canonical entries (with titleSource set) ride below
-        // server as the optimistic-update fallback for the moment
-        // BETWEEN patchThread firing and the PATCH /v1/threads/:id
-        // landing on the server (~100-500ms typically). Without that
-        // fallback, every fresh first-send would briefly show
-        // 'New chat' before the server caught up.
-        //
-        // Legacy metaTitle stays the final-but-one fallback for
-        // pre-migration-0022 threads.
-        const title =
-          serverTitle ??
-          liveCanonicalTitle ??
-          cachedCanonicalTitle ??
-          metaTitle ??
-          'New chat';
-        const titleSource =
-          (serverTitle ? 'auto' : undefined) ??
-          liveRow?.titleSource ??
-          cached?.titleSource ??
-          (metaTitle ? 'auto' : undefined);
+        // Title resolution — server-only. No local cache fallback.
+        // Empty string = no title yet; sidebar renders the
+        // 'New chat' placeholder for empty titles.
+        const title = serverTitle ?? metaTitle ?? '';
+        const titleSource = serverTitle || metaTitle ? 'auto' : undefined;
         return {
           id: r.id,
           title,
@@ -586,7 +547,12 @@ export function useCreateThreadMutation() {
           remote: t,
           summary: {
             id: t.id,
-            title: 'New chat',
+            // Title is SERVER-ONLY now. We deliberately omit the
+            // 'New chat' seed here — the sidebar renderer maps an
+            // empty/missing title to the placeholder. Any local
+            // title we write here would race with the LLM regen's
+            // server PATCH and could win the merge incorrectly.
+            title: '',
             model: args.model,
             createdAt: t.created_at,
             updatedAt: t.last_active_at,
