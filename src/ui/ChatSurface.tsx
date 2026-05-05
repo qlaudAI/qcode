@@ -642,6 +642,7 @@ export function ChatSurface({
     // Without this, the user sees nothing happen on send and has no
     // signal that anything went wrong.
     let eventsSeen = 0;
+    let seenContent = false;
 
     try {
       // Lazily provision the thread on first send. App.tsx returns
@@ -703,6 +704,18 @@ export function ChatSurface({
         // returned 200 but produced zero events" — a silent failure
         // mode where the user sees nothing happen on send.
         eventsSeen += 1;
+        // Track content-bearing events specifically. If the stream
+        // ends with 'finished' but seenContent stayed false, the
+        // model returned nothing useful (rate limit, over-aggressive
+        // server-side compaction sent an empty prompt, etc.) and we
+        // should surface a real error instead of a silent 0/0/0 pill.
+        if (
+          e.type === 'text' ||
+          e.type === 'tool_progress' ||
+          e.type === 'tool_done'
+        ) {
+          seenContent = true;
+        }
         if (e.type === 'finished') {
           finished = {
             usage: e.usage,
@@ -826,6 +839,26 @@ export function ChatSurface({
           usage: { inputTokens: number; outputTokens: number };
           costUsd: number | null;
         } = finished;
+        // Empty-turn detection. A turn that "finished" without
+        // emitting ANY content events (text / tool_call / tool_result
+        // / thinking) means the model returned nothing useful —
+        // most often because qlaud's pre-emptive compaction sent a
+        // near-empty prompt, the model rate-limited, or the upstream
+        // silently truncated. Surface this as a real error instead
+        // of just showing the 0/0/0/Xs pill the user can't diagnose.
+        // Falls through to the normal usage pill so cost telemetry
+        // stays attached.
+        if (!seenContent) {
+          setBlocks((b) => [
+            ...b,
+            {
+              type: 'error',
+              presentation: mapError('empty_stream'),
+              retry: retryInputs,
+            },
+          ]);
+          posthog.capture('turn_failed', { model, mode, code: 'empty_stream_zero_tokens' });
+        }
         setBlocks((b) => [
           ...b,
           {
