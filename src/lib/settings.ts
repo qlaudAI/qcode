@@ -168,7 +168,17 @@ const DEFAULTS: Settings = {
   defaultModel: DEFAULT_MODEL,
   autoUpdate: true,
   mode: 'agent',
-  enableConnectors: false,
+  // Default ON. The four meta-tools (qlaud_search_tools,
+  // qlaud_get_tool_schemas, qlaud_multi_execute,
+  // qlaud_manage_connections) are pure-discovery — search/schemas
+  // never trigger side effects, multi_execute only fires for tools
+  // the user has registered + (for per-user MCPs) explicitly
+  // connected with credentials. Without this on, the web agent has
+  // ZERO awareness of qlaud's tool ecosystem and falls back to
+  // generic answers ("here's some Resend npm code") even when the
+  // user has Resend / Slack / Linear etc. registered. Default
+  // changed alpha.125; existing users keep whatever they had.
+  enableConnectors: true,
   subagentModel: DEFAULT_SUBAGENT_MODEL,
   theme: 'system',
   autoApprove: 'smart',

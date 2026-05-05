@@ -408,7 +408,7 @@ export function SettingsDrawer({
               </div>
             ) : (
               <Toggle
-                label="Use qlaud connectors (MCP)"
+                label="Let the agent discover qlaud tools"
                 checked={settings.enableConnectors}
                 onChange={(v) => update('enableConnectors', v)}
               />
