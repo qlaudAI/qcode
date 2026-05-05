@@ -15,7 +15,8 @@ import {
 
 import { getKey, startSignIn } from '../lib/auth';
 import { cn } from '../lib/cn';
-import { useMcpServersQuery, useTextModels } from '../lib/queries';
+import { isModelGatedForPlan, upgradeTierForModel } from '../lib/plan-tiers';
+import { useMcpServersQuery, useQcodeMeQuery, useTextModels } from '../lib/queries';
 import { ripgrepInstallHint, ripgrepSource } from '../lib/ripgrep';
 import { Select, type SelectOption } from './Select';
 import {
@@ -60,6 +61,11 @@ export function SettingsDrawer({
   // useTextModels falls back to bundled MODELS when the catalog
   // hasn't loaded yet, so this is safe before the network lands.
   const models = useTextModels();
+  // Plan tier for gating the default-model dropdown. Free users see
+  // Opus / Sora / etc as locked rows with a 'Pro' badge so the
+  // Settings page doesn't let them set a default that would 402 on
+  // the very next send.
+  const qcodeMe = useQcodeMeQuery(true).data ?? null;
 
   // Detect legacy auth: a qlk_ bearer means this user signed in
   // before qcode plans landed (alpha.127 or earlier). Their key is
@@ -182,12 +188,23 @@ export function SettingsDrawer({
               value={settings.defaultModel}
               onChange={(slug) => update('defaultModel', slug)}
               ariaLabel="Default model for new chats"
-              options={models.map<SelectOption>((m) => ({
-                value: m.slug,
-                label: m.label,
-                badge: m.provider,
-                description: m.blurb,
-              }))}
+              options={models.map<SelectOption>((m) => {
+                const gated = isModelGatedForPlan(m.slug, qcodeMe);
+                const upgradeTo = gated ? upgradeTierForModel(m.slug, qcodeMe) : null;
+                return {
+                  value: m.slug,
+                  label: m.label,
+                  badge: m.provider,
+                  description: m.blurb,
+                  ...(gated
+                    ? {
+                        locked: true,
+                        lockBadge: upgradeTo === 'power' ? 'Power' : 'Pro',
+                        lockTone: upgradeTo === 'power' ? 'power' : 'pro',
+                      }
+                    : {}),
+                };
+              })}
             />
             <p className="text-[11px] text-muted-foreground">
               You can still switch the model per-conversation from the title bar.

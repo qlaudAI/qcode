@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react';
-import { ChevronDown, Check } from 'lucide-react';
+import { ChevronDown, Check, Lock } from 'lucide-react';
 
 import { cn } from '../lib/cn';
 import { MODELS, type ModelEntry } from '../lib/models';
+import { isModelGatedForPlan, upgradeTierForModel } from '../lib/plan-tiers';
 import { useTextModels } from '../lib/queries';
+import type { QcodeMe } from '../lib/qcode-me';
 
 // Drop the brand prefix on tight viewports so the picker doesn't
 // wrap. "Claude Sonnet 4.6" → "Sonnet 4.6", "GPT-5.4 mini" stays
@@ -16,9 +18,16 @@ function shortLabel(label: string): string {
 export function ModelPicker({
   value,
   onChange,
+  qcodeMe,
 }: {
   value: string;
   onChange: (slug: string) => void;
+  /** Plan info for gating — when present, models that aren't
+   *  available on this user's plan render as locked + non-clickable
+   *  with the relevant upgrade hint ("Pro" / "Power"). When null
+   *  (legacy PAYG, or qcodeMe still loading), no gating is applied
+   *  and the picker behaves as before. */
+  qcodeMe?: QcodeMe | null;
 }) {
   const [open, setOpen] = useState(false);
   // Live catalog (with localStorage seed) drives the list. Falls
@@ -66,42 +75,81 @@ export function ModelPicker({
                   {group.provider}
                 </div>
                 <ul>
-                  {group.models.map((m) => (
-                    <li key={m.slug}>
-                      <button
-                        role="option"
-                        aria-selected={m.slug === value}
-                        onClick={() => {
-                          onChange(m.slug);
-                          setOpen(false);
-                        }}
-                        className={cn(
-                          'flex w-full items-start gap-2 px-3 py-2 text-left transition-colors hover:bg-muted',
-                          m.slug === value && 'bg-muted/60',
-                        )}
-                      >
-                        <Check
+                  {group.models.map((m) => {
+                    const gated = isModelGatedForPlan(m.slug, qcodeMe ?? null);
+                    const upgradeTo = gated
+                      ? upgradeTierForModel(m.slug, qcodeMe ?? null)
+                      : null;
+                    return (
+                      <li key={m.slug}>
+                        <button
+                          role="option"
+                          aria-selected={m.slug === value}
+                          aria-disabled={gated}
+                          disabled={gated}
+                          onClick={() => {
+                            if (gated) return;
+                            onChange(m.slug);
+                            setOpen(false);
+                          }}
                           className={cn(
-                            'mt-0.5 h-3.5 w-3.5 shrink-0',
-                            m.slug === value ? 'text-primary' : 'opacity-0',
+                            'flex w-full items-start gap-2 px-3 py-2 text-left transition-colors',
+                            gated
+                              ? 'cursor-not-allowed opacity-55 hover:bg-muted/30'
+                              : 'hover:bg-muted',
+                            m.slug === value && !gated && 'bg-muted/60',
                           )}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-baseline justify-between gap-2">
-                            <span className="text-xs font-medium">
-                              {m.label}
-                            </span>
-                            <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
-                              {m.tier}
-                            </span>
+                          title={
+                            gated
+                              ? `${m.label} requires ${upgradeTo === 'power' ? 'qcode Power' : 'qcode Pro'} — open billing to upgrade`
+                              : undefined
+                          }
+                        >
+                          {/* Selected check OR lock icon (not both) — gated
+                           *  models can never be selected, so the Check slot
+                           *  is repurposed for the lock affordance. */}
+                          {gated ? (
+                            <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          ) : (
+                            <Check
+                              className={cn(
+                                'mt-0.5 h-3.5 w-3.5 shrink-0',
+                                m.slug === value ? 'text-primary' : 'opacity-0',
+                              )}
+                            />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-baseline justify-between gap-2">
+                              <span className="text-xs font-medium">
+                                {m.label}
+                              </span>
+                              {gated && upgradeTo ? (
+                                <span
+                                  className={cn(
+                                    'rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider',
+                                    upgradeTo === 'pro'
+                                      ? 'bg-primary/10 text-primary'
+                                      : 'bg-amber-500/10 text-amber-700',
+                                  )}
+                                >
+                                  {upgradeTo}
+                                </span>
+                              ) : (
+                                <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+                                  {m.tier}
+                                </span>
+                              )}
+                            </div>
+                            <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+                              {gated
+                                ? `Included on ${upgradeTo === 'power' ? 'Power' : 'Pro'}. ${m.blurb}`
+                                : m.blurb}
+                            </p>
                           </div>
-                          <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
-                            {m.blurb}
-                          </p>
-                        </div>
-                      </button>
-                    </li>
-                  ))}
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               </li>
             ))}

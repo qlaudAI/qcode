@@ -20,7 +20,7 @@
 // component). For < ~15 entries this is the right tool.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown } from 'lucide-react';
+import { Check, ChevronDown, Lock } from 'lucide-react';
 import { cn } from '../lib/cn';
 
 export type SelectOption<T extends string = string> = {
@@ -31,6 +31,18 @@ export type SelectOption<T extends string = string> = {
   badge?: string;
   /** Optional one-line subtitle under the label. */
   description?: string;
+  /** When true, the row renders as locked + non-clickable, with a
+   *  lock icon in place of the check + an accent badge (overrides
+   *  `badge` when set, takes precedence). Drives the plan-tier
+   *  upsell pattern: gated models on Free render with locked=true
+   *  and lockBadge='Pro'. */
+  locked?: boolean;
+  /** Replaces `badge` when locked=true. Typically 'Pro' or 'Power'.
+   *  Tinted accent color reflects the upgrade tier. */
+  lockBadge?: string;
+  /** Color treatment for the lockBadge: 'pro' = primary tint,
+   *  'power' = amber tint. Defaults to 'pro'. */
+  lockTone?: 'pro' | 'power';
 };
 
 type Props<T extends string> = {
@@ -115,7 +127,10 @@ export function Select<T extends string>({
         case 'Enter':
         case ' ':
           e.preventDefault();
-          if (options[active]) {
+          // Skip locked rows — they're upgrade-pitch placeholders
+          // and selecting them would silently pick a non-functional
+          // model that the server would 402 on the first send.
+          if (options[active] && !options[active].locked) {
             onChange(options[active].value);
             setOpen(false);
             triggerRef.current?.focus();
@@ -183,30 +198,48 @@ export function Select<T extends string>({
           {options.map((opt, i) => {
             const selected = opt.value === value;
             const isActive = i === active;
+            const locked = opt.locked === true;
             return (
               <li
                 key={opt.value}
                 id={`qcode-select-${opt.value}`}
                 role="option"
                 aria-selected={selected}
-                onMouseEnter={() => setActive(i)}
+                aria-disabled={locked}
+                onMouseEnter={() => !locked && setActive(i)}
                 onClick={() => {
+                  if (locked) return;
                   onChange(opt.value);
                   setOpen(false);
                   triggerRef.current?.focus();
                 }}
+                title={
+                  locked
+                    ? `${opt.label} requires qcode ${opt.lockBadge ?? 'Pro'}`
+                    : undefined
+                }
                 className={cn(
-                  'flex cursor-pointer items-start gap-2 px-3 py-2 text-sm transition-colors',
-                  isActive ? 'bg-muted/70' : 'hover:bg-muted/50',
+                  'flex items-start gap-2 px-3 py-2 text-sm transition-colors',
+                  locked
+                    ? 'cursor-not-allowed opacity-55'
+                    : 'cursor-pointer',
+                  !locked && (isActive ? 'bg-muted/70' : 'hover:bg-muted/50'),
                 )}
               >
-                <Check
-                  className={cn(
-                    'mt-0.5 h-3.5 w-3.5 shrink-0 transition-opacity',
-                    selected ? 'text-primary opacity-100' : 'opacity-0',
-                  )}
-                  aria-hidden
-                />
+                {locked ? (
+                  <Lock
+                    className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                    aria-hidden
+                  />
+                ) : (
+                  <Check
+                    className={cn(
+                      'mt-0.5 h-3.5 w-3.5 shrink-0 transition-opacity',
+                      selected ? 'text-primary opacity-100' : 'opacity-0',
+                    )}
+                    aria-hidden
+                  />
+                )}
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-2">
                     <span
@@ -217,15 +250,30 @@ export function Select<T extends string>({
                     >
                       {opt.label}
                     </span>
-                    {opt.badge && (
-                      <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
-                        {opt.badge}
+                    {locked && opt.lockBadge ? (
+                      <span
+                        className={cn(
+                          'shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider',
+                          opt.lockTone === 'power'
+                            ? 'bg-amber-500/10 text-amber-700'
+                            : 'bg-primary/10 text-primary',
+                        )}
+                      >
+                        {opt.lockBadge}
                       </span>
+                    ) : (
+                      opt.badge && (
+                        <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+                          {opt.badge}
+                        </span>
+                      )
                     )}
                   </div>
                   {opt.description && (
                     <p className="mt-0.5 text-[11.5px] leading-snug text-muted-foreground">
-                      {opt.description}
+                      {locked
+                        ? `Included on ${opt.lockBadge ?? 'Pro'}. ${opt.description}`
+                        : opt.description}
                     </p>
                   )}
                 </div>

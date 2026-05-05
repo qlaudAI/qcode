@@ -931,7 +931,7 @@ function Titlebar({
         <div className="hidden sm:block">
           <ModeToggle value={mode} onChange={onModeChange} />
         </div>
-        <ModelPicker value={model} onChange={onModelChange} />
+        <ModelPicker value={model} onChange={onModelChange} qcodeMe={qcodeMe} />
         <div className="hidden sm:block">
           <SpendBar profile={profile} qcodeMe={qcodeMe} onRefresh={onRefreshBalance} />
         </div>
