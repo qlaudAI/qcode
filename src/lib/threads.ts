@@ -114,6 +114,17 @@ export async function createRemoteThread(opts?: {
   });
 }
 
+/** Fetch a single thread row by id. Used by the engine-mode
+ *  session-id-append path — we read the current thread metadata,
+ *  modify it (append session_id to claude_session_ids), then PATCH
+ *  back. Returns the freshly-fetched server row, NOT the cached
+ *  ThreadSummary, so we operate on canonical metadata. */
+export async function getRemoteThread(id: string): Promise<RemoteThread> {
+  return api<RemoteThread>(`/v1/threads/${encodeURIComponent(id)}`, {
+    method: 'GET',
+  });
+}
+
 /** Newest-first list of the caller's threads. Up to `limit` rows.
  *  Default 200 (was 50 — too tight; users with active workflows on
  *  multiple workspaces hit the cap and missed older threads on

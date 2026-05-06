@@ -947,9 +947,60 @@ export function getClaudeSessionId(threadId: string): string | null {
 
 export function setClaudeSessionId(threadId: string, sessionId: string): void {
   const prev = getSettings().claudeSessionByThread ?? {};
+  // Skip both the localStorage write AND the server-side metadata
+  // PATCH when the mapping is unchanged — common case when a thread
+  // is resumed across multiple turns (same session_id reported on
+  // every spawn).
+  if (prev[threadId] === sessionId) return;
   patchSettings({
     claudeSessionByThread: { ...prev, [threadId]: sessionId },
   });
+  // Server-side: append the session_id to the canonical thread's
+  // metadata.claude_session_ids array so OTHER devices (qcode-web,
+  // a fresh desktop install with no localStorage) can resolve
+  // thread → session_ids → message rows on read.
+  //
+  // Threads can accumulate N session_ids over their lifetime —
+  // every fresh Claude spawn (resumed or otherwise) gets its own
+  // ephemeral id. The list captures the full history so the
+  // server's GET /v1/threads/:id/messages can union across all of
+  // them. Idempotent append — re-running this with a session_id
+  // that's already in the list is a no-op server-side.
+  //
+  // Fire-and-forget. Failure here just means cross-device sync
+  // for THIS session is delayed until the next setClaudeSessionId
+  // call (or until a separate sync job catches it). The desktop
+  // session keeps working regardless because localStorage already
+  // has the mapping.
+  void appendClaudeSessionIdToThreadMetadata(threadId, sessionId);
+}
+
+/** PATCH thread metadata to append the session_id. Read-modify-
+ *  write to preserve other metadata fields (workspace_path,
+ *  title, etc.) and to avoid duplicate entries. */
+async function appendClaudeSessionIdToThreadMetadata(
+  threadId: string,
+  sessionId: string,
+): Promise<void> {
+  try {
+    const { getRemoteThread, updateThreadMetadata } = await import('../threads');
+    const thread = await getRemoteThread(threadId);
+    const meta = (thread.metadata ?? {}) as Record<string, unknown>;
+    const existing = Array.isArray(meta.claude_session_ids)
+      ? (meta.claude_session_ids as unknown[]).filter(
+          (x): x is string => typeof x === 'string' && x.length > 0,
+        )
+      : [];
+    if (existing.includes(sessionId)) return; // already linked
+    await updateThreadMetadata(threadId, {
+      claude_session_ids: [...existing, sessionId],
+    });
+  } catch {
+    // Non-fatal — desktop keeps working with localStorage; cross-
+    // device sync just lags one cycle. We log nothing because this
+    // can fire on EVERY turn for an unauthenticated/offline user
+    // and the warnings would drown the console.
+  }
 }
 
 /** Drop the threadId → session_id mapping. Called when the user
