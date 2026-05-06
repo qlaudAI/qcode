@@ -183,14 +183,42 @@ THE WORKFLOW (every template uses some subset)
 
    • Use the standard component shapes documented below.
 
-7. Render
+7. PREVIEW FIRST — let the user see + approve before rendering
+
+   Rendering an mp4 is the EXPENSIVE step (1-5+ minutes for a
+   30-60s reel) AND it commits to whatever the composition currently
+   says. Don't ship straight to render. Boot Remotion's preview dev
+   server first — it opens a live composition viewer at a localhost
+   URL that qcode auto-detects and shows in its right-rail Preview
+   pane. The user scrubs the timeline, watches the playback, and
+   tells you "looks good, render it" or "tighten the cut at 0:08
+   then render."
+
+   Boot the preview server (run in background so the bash tool
+   returns; the dev server keeps running):
+       bunx remotion preview src/index.ts &
+       sleep 2  # let it bind a port
+       lsof -iTCP -sTCP:LISTEN -P -n | grep LISTEN | grep node
+
+   Remotion preview prints "Server ready - http://localhost:3000"
+   to stdout — qcode's right-rail Preview pane picks up that URL
+   automatically. Tell the user "the live preview is in the right
+   panel — scrub through, let me know what to change or say
+   'render it' when ready."
+
+   DO NOT auto-render when the user just asked for a video. Wait
+   for explicit approval. Skip straight to render ONLY when the
+   user says something like "render the final" or "I don't need to
+   preview it."
+
+8. Render (after user approval)
        bunx remotion render src/index.ts MainComp ../../media/$(date +%Y-%m-%d)/output.mp4 \\
          --codec=h264 --crf=23 --jpeg-quality=90 --concurrency=4
 
    • crf=23 = high quality / reasonable size. Lower = bigger + better.
    • 4-core concurrency on Mac M1+. Drop to 2 on lower-end.
 
-8. Polish via ffmpeg (optional but standard)
+9. Polish via ffmpeg (optional but standard)
        ffmpeg -i output.mp4 \\
          -vf "eq=contrast=1.05:saturation=1.1:gamma=0.95" \\
          -c:a copy -c:v libx264 -crf 22 \\
@@ -199,7 +227,7 @@ THE WORKFLOW (every template uses some subset)
    • Subtle warm grade for cozy/lifestyle. Cool grade for tech/SaaS:
        eq=contrast=1.10:saturation=0.92:gamma=0.97
 
-9. (Optional) Cloud sync
+10. (Optional) Cloud sync
    • Honors $QCODE_MEDIA_CLOUD_SYNC env var (set when user toggled
      "Sync generated media to qlaud cloud" in qcode Settings).
    • Reuse the standard artifact-store flow from the qlaud-media skill:
