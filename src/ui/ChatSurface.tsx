@@ -69,9 +69,10 @@ import {
   markInFlight,
 } from '../lib/in-flight';
 import {
-  bumpRunId,
+  bumpStopGen,
+  decBusy,
+  incBusy,
   readRunState,
-  setBusy as setBusyInStore,
   setQueued as setQueuedInStore,
   updateBlocks,
   useThreadRunState,
@@ -245,7 +246,12 @@ export function ChatSurface({
   // and lights up the moment the user switches back.
   const runState = useThreadRunState(threadId);
   const blocks = runState.blocks as RenderBlock[];
-  const busy = runState.busy;
+  // "busy" = at least one send is mid-flight on this thread. With
+  // Phase 2's parallel-send support (Cmd+Enter), busyCount can
+  // climb above 1; the composer still shows the busy UI in that
+  // case (just with the visual "N running" hint).
+  const busy = runState.busyCount > 0;
+  const busyCount = runState.busyCount;
   const queued = runState.queued;
 
   const [compaction, setCompaction] = useState<CompactionInfo | null>(null);
@@ -290,13 +296,6 @@ export function ChatSurface({
   // off-screen runs keep flipping their own thread's busy/queued
   // state without touching whatever thread the user is currently
   // viewing.
-  const setBusy = useCallback(
-    (b: boolean) => {
-      if (!threadId) return;
-      setBusyInStore(threadId, b);
-    },
-    [threadId],
-  );
   const setQueued = useCallback(
     (q: string | null) => {
       if (!threadId) return;
@@ -544,7 +543,7 @@ export function ChatSurface({
     resolveApproval(id, decision);
   }
 
-  async function send(text: string) {
+  async function send(text: string, opts: { parallel?: boolean } = {}) {
     const userMsg = text.trim();
     // Allow send when there are attachments even with empty text
     // (e.g. dropping a screenshot with the implicit "what's wrong
@@ -557,7 +556,11 @@ export function ChatSurface({
       attached.length === 0
     )
       return;
-    if (busy) return;
+    // Default Enter path bails if busy — the user's intent is "wait
+    // for current to finish, then run mine" (handled by sendOrQueue
+    // below). The parallel path (Cmd/Ctrl+Enter) explicitly opts
+    // into firing alongside whatever's running.
+    if (busy && !opts.parallel) return;
     // Clear input only when this is the live-typed path (text ===
     // current input). The queued-fire path (busy lifted, queued
     // dispatch) passes a snapshot from `queued`; meanwhile the user
@@ -677,7 +680,7 @@ export function ChatSurface({
     // busy flips back to false on this thread.
     lastLoadedRef.current = myThread;
 
-    // Per-thread setters bound to the captured myThread. Survive
+    // Per-thread setter bound to the captured myThread. Survives
     // any thread switch the user does mid-stream.
     const myUpdateBlocks = (
       next: RenderBlock[] | ((b: RenderBlock[]) => RenderBlock[]),
@@ -687,9 +690,6 @@ export function ChatSurface({
       } else {
         updateBlocks(myThread, () => next);
       }
-    };
-    const mySetBusy = (b: boolean): void => {
-      setBusyInStore(myThread, b);
     };
 
     myUpdateBlocks((b) => [
@@ -714,15 +714,15 @@ export function ChatSurface({
       attached_workspace_files: retryInputs.attached.length,
       message_chars: userMsg.length,
     });
-    mySetBusy(true);
+    incBusy(myThread);
     abortRef.current = new AbortController();
-    // Per-thread runId. Bumped here at send-start; events arriving
-    // after the run is superseded (stop() pressed on this thread,
-    // or — once we ship Phase 2 — a follow-up send on the same
-    // thread) check this captured value against the store's
-    // current value and bail. Off-screen events from a different
-    // thread DON'T affect this — that's the whole point.
-    const runId = bumpRunId(myThread);
+    // Per-thread stopGen capture. Bumped ONLY by stop() — a
+    // follow-up send on the same thread (parallel run via Cmd+
+    // Enter) does NOT bump it, so multiple sends share the same
+    // stopGen until the user explicitly stops them all. Each
+    // send's events check the captured value against the live
+    // store value before mutating; mismatch = stopped, bail.
+    const stopGen = readRunState(myThread).stopGen;
 
     // qlaud's qlaud.done event ships cost_micros — its authoritative
     // count, markup included. We capture it on the finished event
@@ -760,7 +760,7 @@ export function ChatSurface({
       // send-start and this point, bail. Note: thread-switch does
       // NOT bump the runId anymore (off-screen runs keep going),
       // only stop() and re-send-on-same-thread invalidate.
-      if (runId !== readRunState(myThread).runId) return;
+      if (stopGen !== readRunState(myThread).stopGen) return;
 
       const settingsAtSend = getSettings();
 
@@ -782,7 +782,7 @@ export function ChatSurface({
         // follow-up send on the same thread). Note: thread-switch
         // does NOT bump the runId — off-screen runs SHOULD keep
         // mutating their own thread's slot.
-        if (runId !== readRunState(myThread).runId) return;
+        if (stopGen !== readRunState(myThread).stopGen) return;
         // Track that *something* arrived so we can detect "stream
         // returned 200 but produced zero events" — a silent failure
         // mode where the user sees nothing happen on send.
@@ -870,7 +870,7 @@ export function ChatSurface({
               // bumped). Off-screen runs keep waiting for approval
               // — the user can come back and click; the approval
               // card lives in the thread's blocks until resolved.
-              if (runId !== readRunState(myThread).runId) {
+              if (stopGen !== readRunState(myThread).stopGen) {
                 resolve('reject');
                 return;
               }
@@ -902,7 +902,7 @@ export function ChatSurface({
       // here; only an explicit Stop or follow-up send on this same
       // thread bumps the runId and short-circuits this final UI
       // update phase.
-      if (runId !== readRunState(myThread).runId) return;
+      if (stopGen !== readRunState(myThread).stopGen) return;
 
       // Silent-failure detection: stream completed (no throw) but no
       // events arrived AND no `finished` event landed. Most common
@@ -994,13 +994,17 @@ export function ChatSurface({
       // turn must've landed" prematurely. Normal completions
       // clear it. The run-state store keeps the blocks for the
       // visible thread regardless — those are canonical now.
+      // Decrement busy regardless of stop status — the slot is
+      // free, the counter should reflect that. Floored at 0 inside
+      // decBusy, so a stop() that already reset state can't push
+      // us into negative-busy weirdness.
+      decBusy(myThread);
       if (
-        runId === readRunState(myThread).runId &&
+        stopGen === readRunState(myThread).stopGen &&
         lastSendThreadRef.current
       ) {
         clearInFlight(lastSendThreadRef.current);
       }
-      mySetBusy(false);
       abortRef.current = null;
       // Drop any leftover resolvers — covers the case where streaming
       // bails before the loop reaches the awaiting Promise.
@@ -1010,17 +1014,16 @@ export function ChatSurface({
 
   function stop() {
     // Stop applies to the CURRENTLY VISIBLE thread. Bumping
-    // its runId in the per-thread store is what makes Stop
-    // definitive: the running send()'s onEvent guards see the
-    // bumped value and start dropping events instead of mutating
-    // blocks. Off-screen runs on OTHER threads are unaffected —
-    // each thread has its own runId.
+    // stopGen on this thread invalidates ALL active runs on this
+    // thread (Phase 2 introduced parallel sends — Stop kills them
+    // all in one click). Each running send sees its captured
+    // stopGen no longer matches the live value and starts dropping
+    // its events. Off-screen runs on OTHER threads are unaffected.
     if (threadId) {
-      bumpRunId(threadId);
+      bumpStopGen(threadId);
     }
     abortRef.current?.abort();
     rejectAllApprovals();
-    setBusy(false);
     // Stop is also "abandon what I had planned" — drop any queued
     // follow-up so the busy-flip effect doesn't auto-fire it.
     setQueued(null);
@@ -1033,8 +1036,18 @@ export function ChatSurface({
    *  `queued` instead of bailing — the busy-flip effect below picks
    *  it up the moment the current turn lands. Drops empty/no-attach
    *  sends so a stray Enter doesn't queue an empty turn. */
-  function sendOrQueue(text: string) {
+  function sendOrQueue(text: string, opts: { parallel?: boolean } = {}) {
     const trimmed = text.trim();
+    // Parallel path (Cmd+Enter) — fire alongside whatever's
+    // running. Skip the queue, both runs operate concurrently on
+    // the same thread. Each run captures its own threadId + stopGen
+    // and writes to the run-state store independently; events from
+    // both interleave naturally in the blocks list.
+    if (opts.parallel) {
+      setInput('');
+      void send(text, { parallel: true });
+      return;
+    }
     if (busy) {
       // Nothing to queue if there's no actual content. Attachments
       // are intentionally NOT carried into the queue snapshot — they
@@ -1243,6 +1256,7 @@ export function ChatSurface({
         onSend={sendOrQueue}
         onStop={stop}
         busy={busy}
+        busyCount={busyCount}
         queued={queued}
         onCancelQueue={() => setQueued(null)}
         usageStatus={deriveUsageStatus(qcodeMe)}
@@ -3395,6 +3409,7 @@ function Composer({
   onSend,
   onStop,
   busy,
+  busyCount,
   queued,
   onCancelQueue,
   usageStatus,
@@ -3424,9 +3439,14 @@ function Composer({
   branch?: string | null;
   /** Active mode — drives the secondary pill ("Plan" / "Agent"). */
   mode?: 'agent' | 'plan';
-  onSend: (v: string) => void;
+  onSend: (v: string, opts?: { parallel?: boolean }) => void;
   onStop: () => void;
   busy: boolean;
+  /** Number of active runs on this thread. > 1 only when the user
+   *  has explicitly fired parallel sends via Cmd+Enter. Surfaces
+   *  as a "N running" hint near the Stop button so the user knows
+   *  multiple things are in flight. */
+  busyCount: number;
   /** A message the user committed (Enter) while the previous turn
    *  was still running. Renders as a chip above the textarea so the
    *  user can see what'll auto-fire when the current turn lands. */
@@ -3580,7 +3600,12 @@ function Composer({
 
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      onSend(value);
+      // Cmd/Ctrl+Enter while busy fires in PARALLEL — runs
+      // alongside whatever's currently in flight rather than
+      // queueing for after. Modifier-less Enter keeps the
+      // existing queue-on-busy / send-when-idle behavior.
+      const parallel = busy && (e.metaKey || e.ctrlKey);
+      onSend(value, parallel ? { parallel: true } : undefined);
     }
   }
 
@@ -3739,7 +3764,7 @@ function Composer({
               onFocus={onLoadFiles}
               placeholder={
                 busy
-                  ? 'Type a follow-up — Enter queues it for when the current turn lands'
+                  ? 'Enter queues · ⌘⏎ runs in parallel · type a follow-up'
                   : 'Ask qcode about your code… type @ to attach a file'
               }
               rows={2}
@@ -3846,14 +3871,29 @@ function Composer({
                 )}
               </div>
               {busy ? (
-                <button
-                  onClick={onStop}
-                  className="grid h-7 w-7 place-items-center rounded-md border border-border bg-background text-foreground/70 transition-colors hover:border-foreground/30 hover:text-foreground"
-                  aria-label="Stop"
-                  title="Stop"
-                >
-                  <Square className="h-3 w-3 fill-current" />
-                </button>
+                <div className="flex items-center gap-1.5">
+                  {busyCount > 1 && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-amber-700 dark:text-amber-400"
+                      title={`${busyCount} runs in flight on this thread (parallel via ⌘⏎)`}
+                    >
+                      <span className="h-1 w-1 animate-pulse rounded-full bg-amber-500" />
+                      {busyCount} running
+                    </span>
+                  )}
+                  <button
+                    onClick={onStop}
+                    className="grid h-7 w-7 place-items-center rounded-md border border-border bg-background text-foreground/70 transition-colors hover:border-foreground/30 hover:text-foreground"
+                    aria-label="Stop all runs on this thread"
+                    title={
+                      busyCount > 1
+                        ? `Stop all ${busyCount} runs on this thread`
+                        : 'Stop'
+                    }
+                  >
+                    <Square className="h-3 w-3 fill-current" />
+                  </button>
+                </div>
               ) : (
                 <button
                   onClick={() => onSend(value)}

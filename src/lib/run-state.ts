@@ -42,23 +42,33 @@ export type Block = unknown;
 
 export type ThreadRunState = {
   blocks: Block[];
-  busy: boolean;
+  /** Number of currently-active sends on this thread. Phase 1
+   *  guaranteed at most 1; Phase 2 (alpha.157) lets the user fire
+   *  parallel sends via Cmd+Enter, so this becomes a counter.
+   *  Composer shows "busy" when > 0 — same visual signal, but the
+   *  underlying state allows multiple concurrent runs. */
+  busyCount: number;
   /** Pending send-while-busy message. Lives here (vs ChatSurface
    *  local state) so that switching threads while one has a queued
    *  send doesn't drop the queue. */
   queued: string | null;
-  /** Bumped on every send-start AND on stop(). send() captures at
-   *  start and checks before mutating to detect "this turn was
-   *  superseded" — a stop() or a follow-up send on the same
-   *  thread invalidates an earlier still-streaming run. */
-  runId: number;
+  /** Stop generation. Bumped ONLY by explicit stop() (the user
+   *  pressing the Stop button on this thread). Each running send
+   *  captures the value at start; events check against the
+   *  current value before mutating, bail if mismatched.
+   *
+   *  Critically NOT bumped on a follow-up send to the same thread
+   *  — that's what enables parallel runs to coexist (each run
+   *  shares the same stopGen until the user explicitly stops them
+   *  all). */
+  stopGen: number;
 };
 
 const FALLBACK: ThreadRunState = Object.freeze({
   blocks: [],
-  busy: false,
+  busyCount: 0,
   queued: null,
-  runId: 0,
+  stopGen: 0,
 });
 
 const STATES = new Map<string, ThreadRunState>();
@@ -67,7 +77,7 @@ const SUBS = new Map<string, Set<() => void>>();
 function getOrCreate(threadId: string): ThreadRunState {
   let s = STATES.get(threadId);
   if (!s) {
-    s = { blocks: [], busy: false, queued: null, runId: 0 };
+    s = { blocks: [], busyCount: 0, queued: null, stopGen: 0 };
     STATES.set(threadId, s);
   }
   return s;
@@ -102,9 +112,21 @@ export function updateBlocks(
   updateRunState(threadId, (s) => ({ ...s, blocks: updater(s.blocks) }));
 }
 
-/** Convenience: set busy for a thread. */
-export function setBusy(threadId: string, busy: boolean): void {
-  updateRunState(threadId, (s) => ({ ...s, busy }));
+/** Increment the active-send counter. Each send() calls this at
+ *  start; the matching decBusy fires in the finally block. UI
+ *  treats busyCount > 0 as "this thread has work running." */
+export function incBusy(threadId: string): void {
+  updateRunState(threadId, (s) => ({ ...s, busyCount: s.busyCount + 1 }));
+}
+
+/** Decrement the active-send counter. Floored at 0 — a desync
+ *  shouldn't underflow into "negative busy" which would render
+ *  weird states. */
+export function decBusy(threadId: string): void {
+  updateRunState(threadId, (s) => ({
+    ...s,
+    busyCount: Math.max(0, s.busyCount - 1),
+  }));
 }
 
 /** Convenience: set queued message for a thread. */
@@ -112,14 +134,19 @@ export function setQueued(threadId: string, queued: string | null): void {
   updateRunState(threadId, (s) => ({ ...s, queued }));
 }
 
-/** Bump and return the new runId. send() calls this at start, then
- *  checks the current runId against its captured value to detect
- *  "I'm a stale run, drop my events." */
-export function bumpRunId(threadId: string): number {
+/** Bump the stop-generation counter. Called by stop() ONLY — every
+ *  active send on this thread captures the pre-bump value and bails
+ *  on the next event when the captured value no longer matches.
+ *  Effectively "kill all active runs on this thread."
+ *
+ *  Returns the new stopGen so callers can cross-check during their
+ *  own cleanup (for instance, the in-flight registry decision in
+ *  send()'s finally block). */
+export function bumpStopGen(threadId: string): number {
   if (!threadId) return 0;
   const s = getOrCreate(threadId);
-  const next = s.runId + 1;
-  STATES.set(threadId, { ...s, runId: next });
+  const next = s.stopGen + 1;
+  STATES.set(threadId, { ...s, stopGen: next });
   notify(threadId);
   return next;
 }
