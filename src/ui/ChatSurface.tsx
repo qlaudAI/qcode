@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowUp,
@@ -62,17 +62,20 @@ import {
   type ToolCallView,
 } from './legacy/ToolCallCard';
 import { RightRail, type RightRailView } from './RightRail';
-import { invalidateThreadMessages, loadEarlierMessages } from '../lib/queries';
+import { loadEarlierMessages } from '../lib/queries';
 import {
   clearInFlight,
   isInFlight,
   markInFlight,
 } from '../lib/in-flight';
 import {
-  clearBlocksSnapshot,
-  loadBlocksSnapshot,
-  saveBlocksSnapshot,
-} from '../lib/blocks-snapshot';
+  bumpRunId,
+  readRunState,
+  setBusy as setBusyInStore,
+  setQueued as setQueuedInStore,
+  updateBlocks,
+  useThreadRunState,
+} from '../lib/run-state';
 
 // Each "block" rendered in the chat is the smallest UI unit. The
 // agent loop emits a stream of events that `handleEvent` translates
@@ -232,16 +235,21 @@ export function ChatSurface({
 }) {
   const models = useTextModels();
   const m = models.find((x) => x.slug === model);
-  const [blocks, setBlocks] = useState<RenderBlock[]>([]);
+
+  // Per-thread run state (blocks, busy, queued, runId) lives in
+  // lib/run-state.ts so an off-screen send() can keep writing to
+  // its slot when the user navigates to a different thread. This
+  // surface is just a reactive view of "whatever's happening on
+  // the thread currently displayed." Switching threadId rewires
+  // the subscription; the writer for the other thread keeps going
+  // and lights up the moment the user switches back.
+  const runState = useThreadRunState(threadId);
+  const blocks = runState.blocks as RenderBlock[];
+  const busy = runState.busy;
+  const queued = runState.queued;
+
   const [compaction, setCompaction] = useState<CompactionInfo | null>(null);
   const [input, setInput] = useState('');
-  const [busy, setBusy] = useState(false);
-  // While busy=true, a second Enter from the user stashes the
-  // message here instead of bailing. When busy flips back to false
-  // (turn landed or errored), an effect fires the queued send. Lets
-  // the user keep typing the next thought without waiting for the
-  // current turn to finish — same UX as Claude CLI's mid-run input.
-  const [queued, setQueued] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attached, setAttached] = useState<string[]>([]);
   const [images, setImages] = useState<AttachedImage[]>([]);
@@ -252,15 +260,50 @@ export function ChatSurface({
   const [branch, setBranch] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
-  // Monotonic run id. Bumped on every send + on every thread switch.
-  // Each onEvent callback closes over the run id it was created
-  // with; if the live ref drifts past it (because the user aborted,
-  // switched thread, or sent a new turn before the old stream
-  // unwound), the callback bails. Without this guard, a late SSE
-  // event from an aborted thread can stomp the active thread's
-  // blocks state — symptom is messages bleeding across threads
-  // when the user clicks Stop and switches fast.
-  const activeRunIdRef = useRef(0);
+  // Per-thread blocks updater factory. Bound to a specific thread
+  // id at send-start; survives thread switches because it writes
+  // to the run-state store, not React state. Compatibility shim
+  // for the existing setState-shaped call sites — accepts either
+  // a plain array (replace) or an updater function (transform).
+  const setBlocksFor = useCallback(
+    (id: string | null) =>
+      (
+        next: RenderBlock[] | ((b: RenderBlock[]) => RenderBlock[]),
+      ) => {
+        if (!id) return;
+        if (typeof next === 'function') {
+          updateBlocks(id, (b) => next(b as RenderBlock[]));
+        } else {
+          updateBlocks(id, () => next);
+        }
+      },
+    [],
+  );
+  // setBlocks bound to the CURRENT visible thread — for hydration
+  // paths and other "this surface is updating its own view" calls.
+  const setBlocks = useMemo(
+    () => setBlocksFor(threadId),
+    [setBlocksFor, threadId],
+  );
+  // setBusy / setQueued bound to the active thread. Inside send(),
+  // we use the store directly with the captured myThread id so
+  // off-screen runs keep flipping their own thread's busy/queued
+  // state without touching whatever thread the user is currently
+  // viewing.
+  const setBusy = useCallback(
+    (b: boolean) => {
+      if (!threadId) return;
+      setBusyInStore(threadId, b);
+    },
+    [threadId],
+  );
+  const setQueued = useCallback(
+    (q: string | null) => {
+      if (!threadId) return;
+      setQueuedInStore(threadId, q);
+    },
+    [threadId],
+  );
   // Capture-at-send-time threadId. setBlocks calls in send() check
   // it against the live `threadId` prop; mismatch = thread changed
   // while a request was in flight, drop the result.
@@ -323,63 +366,25 @@ export function ChatSurface({
   // the next thread-switch covers it.
   const messagesQuery = useThreadMessagesQuery(busy ? null : threadId);
   const lastLoadedRef = useRef<string | null>(null);
-  // Thread-switch invalidator. CRITICAL: we do NOT abort the
-  // network here. For text-only turns, qlaud's tee+waitUntil
-  // finishes server-side regardless. For tool-using turns (read_
-  // file, bash, etc.), qlaud is parked waiting for the client to
-  // POST tool results — aborting the SSE connection means the
-  // client never sees the qlaud.tool_dispatch_start event,
-  // never dispatches the tool, never POSTs the result, and the
-  // qlaud-side loop dies at the 60s tool-result timeout. By
-  // letting the network stay alive, the agent.ts onToolDispatch
-  // handlers keep firing even though the user is on a different
-  // thread — file reads / writes / bash all continue, results
-  // post back, model loop completes, qlaud persists the final
-  // assistant turn.
+  // Thread-switch is now a NO-OP from this surface's POV — every
+  // piece of per-thread state (blocks, busy, queued, runId) lives
+  // in lib/run-state.ts, keyed by thread id. An off-screen run
+  // keeps writing to ITS thread's slot. When the user comes back,
+  // useThreadRunState's subscription rewires and the live state
+  // is already there, no rehydration needed.
   //
-  // What we DO on switch:
-  //  - Bump activeRunIdRef → ChatSurface's onEvent guard filters
-  //    out UI updates from the abandoned run (so its blocks state
-  //    doesn't bleed into the now-active thread).
-  //  - rejectAllApprovals → write_file/edit_file/bash that were
-  //    waiting on user click cleanly fail (treated as rejected).
-  //    Read-only tools (no approval) keep running.
-  //  - setBusy(false) → the user can send on the new thread.
-  //  - invalidateThreadMessages(prev) → so a return visit pulls
-  //    fresh canonical history (with whatever the still-running
-  //    or just-completed loop persisted).
-  //
-  // Explicit Stop (the stop button) DOES abort — that's the only
-  // path that kills the in-flight loop. See stop() below.
+  // The network is also unchanged: we never abort on thread-switch
+  // (qlaud's tee+waitUntil finishes server-side regardless; tool-
+  // using turns can't be aborted client-side without losing
+  // the loop entirely). Approvals stay alive too — the approval
+  // card lives in the off-screen thread's blocks; when the user
+  // comes back they can click it and the resolveApproval module
+  // routes the answer back to the still-running loop. Only an
+  // explicit Stop (see stop() below) bumps the runId and kills.
   const lastThreadIdRef = useRef(threadId);
   useEffect(() => {
-    const prev = lastThreadIdRef.current;
     lastThreadIdRef.current = threadId;
-    // CRITICAL: guard on `prev` truthiness. The first send on a
-    // brand-new chat starts with threadId=null, then ensureThreadId
-    // creates the remote thread and the prop transitions null →
-    // real-id mid-stream. That's NOT a thread switch — it's the
-    // initial id assignment. Without this guard the invalidator
-    // bumps runId, every subsequent SSE event gets filtered by the
-    // onEvent runId guard, and the live stream silently disappears
-    // (user has to refresh to see the canonical history).
-    if (prev && prev !== threadId && busy) {
-      // Snapshot the live blocks BEFORE we bump runId / setBusy.
-      // The agent keeps running server-side via waitUntil; what we
-      // need to preserve here is everything the user already saw
-      // on this thread (tool cards mid-execution, partial assistant
-      // text, approval cards, usage pills, etc.) so that when they
-      // switch back the screen restores to what they remember
-      // instead of resetting to "just the user message" while
-      // polling slowly fills in the persisted final turn.
-      saveBlocksSnapshot(prev, blocks as unknown[]);
-      activeRunIdRef.current += 1;
-      rejectAllApprovals();
-      setBusy(false);
-      void invalidateThreadMessages(prev);
-      if (lastLoadedRef.current === prev) lastLoadedRef.current = null;
-    }
-  }, [threadId, busy, blocks]);
+  }, [threadId]);
 
   useEffect(() => {
     if (busy) return;
@@ -389,23 +394,16 @@ export function ChatSurface({
       return;
     }
 
-    // Snapshot-first rehydrate: when the user lands on a thread
-    // that's still in-flight (a turn they kicked off and walked
-    // away from), restore the live blocks they saw before they
-    // left. Without this, the user sees a stripped-down "just the
-    // user message" view while polling slowly catches up — every
-    // tool card, partial assistant text fragment, and approval
-    // status visible at switch-away time gets lost. The snapshot
-    // is preserved until clearBlocksSnapshot fires (in the
-    // `finally` of send() when the run resolves on this surface,
-    // OR when the polling loop sees a fresh assistant turn land).
-    if (lastLoadedRef.current !== threadId && isInFlight(threadId)) {
-      const snapshot = loadBlocksSnapshot(threadId);
-      if (snapshot && snapshot.length > 0) {
-        setBlocks(snapshot as RenderBlock[]);
-        lastLoadedRef.current = threadId;
-        return;
-      }
+    // If the run-state store already has live blocks for this
+    // thread (off-screen run wrote to it while we were away, OR a
+    // run on this surface just populated it) — trust the store and
+    // skip server hydration. Subscription via useThreadRunState
+    // already wired the live updates into `blocks` above; clobbering
+    // with stale server history would replace tool cards / partial
+    // text with the persisted-only final assistant message.
+    if (lastLoadedRef.current !== threadId && blocks.length > 0) {
+      lastLoadedRef.current = threadId;
+      return;
     }
 
     // Engine Mode rehydrate. When engine === 'claude-code' the
@@ -653,7 +651,48 @@ export function ChatSurface({
     setDocuments([]);
     setTextFiles([]);
 
-    setBlocks((b) => [
+    // Resolve the target thread NOW. Every per-thread state update
+    // below — busy, queued, blocks (the user_text bubble, tool
+    // cards, error blocks, usage pills), runId — targets THIS
+    // thread, not whatever thread happens to be visible at update
+    // time. That decoupling is what enables off-screen runs: when
+    // the user navigates to a different thread mid-stream, this
+    // send() keeps writing to its captured myThread slot, and
+    // useThreadRunState in any later ChatSurface mount picks it
+    // up live the moment the user comes back.
+    //
+    // Most sends pay zero latency here (existing thread →
+    // ensureThreadId returns instantly with the prop value);
+    // a fresh-chat first send pays one ~200ms POST /v1/threads.
+    let myThread: string;
+    try {
+      myThread = await ensureThreadId();
+    } catch {
+      return;
+    }
+    if (!myThread) return;
+    lastSendThreadRef.current = myThread;
+    // Pre-mark the thread as already-loaded so the rehydrate
+    // effect doesn't refetch + clobber the live blocks the moment
+    // busy flips back to false on this thread.
+    lastLoadedRef.current = myThread;
+
+    // Per-thread setters bound to the captured myThread. Survive
+    // any thread switch the user does mid-stream.
+    const myUpdateBlocks = (
+      next: RenderBlock[] | ((b: RenderBlock[]) => RenderBlock[]),
+    ): void => {
+      if (typeof next === 'function') {
+        updateBlocks(myThread, (b) => next(b as RenderBlock[]));
+      } else {
+        updateBlocks(myThread, () => next);
+      }
+    };
+    const mySetBusy = (b: boolean): void => {
+      setBusyInStore(myThread, b);
+    };
+
+    myUpdateBlocks((b) => [
       ...b,
       {
         type: 'user_text',
@@ -675,14 +714,15 @@ export function ChatSurface({
       attached_workspace_files: retryInputs.attached.length,
       message_chars: userMsg.length,
     });
-    setBusy(true);
+    mySetBusy(true);
     abortRef.current = new AbortController();
-    // Bump run id and capture for this send. Every callback below
-    // checks `runId === activeRunIdRef.current` before touching
-    // state — if the user aborts, switches threads, or sends a new
-    // turn, the ref bumps and stale callbacks become no-ops.
-    activeRunIdRef.current += 1;
-    const runId = activeRunIdRef.current;
+    // Per-thread runId. Bumped here at send-start; events arriving
+    // after the run is superseded (stop() pressed on this thread,
+    // or — once we ship Phase 2 — a follow-up send on the same
+    // thread) check this captured value against the store's
+    // current value and bail. Off-screen events from a different
+    // thread DON'T affect this — that's the whole point.
+    const runId = bumpRunId(myThread);
 
     // qlaud's qlaud.done event ships cost_micros — its authoritative
     // count, markup included. We capture it on the finished event
@@ -702,40 +742,25 @@ export function ChatSurface({
     let seenContent = false;
 
     try {
-      // Lazily provision the thread on first send. App.tsx returns
-      // the active id when there is one, otherwise creates a remote
-      // thread and updates the sidebar before resolving.
-      const id = await ensureThreadId();
-      lastSendThreadRef.current = id;
-      // Mark this thread as already-loaded so the post-send message
-      // re-fetch effect bails. Without this, the moment busy flips
-      // back to false the messagesQuery for this thread enables,
-      // fetches the canonical server history, and setBlocks
-      // overwrites every tool card / approval / usage pill we
-      // streamed live (historyToBlocks only knows user_text +
-      // assistant_text). Symptom: "streaming message briefly,
-      // disappeared." The streamed blocks ARE canonical; we don't
-      // need to round-trip the server to learn what we just rendered.
-      lastLoadedRef.current = id;
-      // Track this send as in-flight so if the user navigates away
-      // mid-stream, switching back triggers a poll until qlaud's
-      // server-side persisted assistant turn shows up. The seq
-      // floor is the highest seq currently in the cached history;
-      // hasLanded() looks for an assistant turn past that seq to
-      // detect "the new turn arrived." Cleared on success in the
-      // finally block; left in place if the user abandons (server
-      // keeps running via waitUntil).
+      // Track this send as in-flight so the sidebar shows a
+      // running indicator on this thread when the user navigates
+      // away. The seq floor is the highest seq currently in the
+      // cached history; hasLanded() looks for an assistant turn
+      // past that seq to detect "the new turn arrived." Cleared
+      // on success in the finally block; left in place if the
+      // user abandons (server keeps running via waitUntil).
       const cachedHistory = messagesQuery.data;
       const seqFloor =
         cachedHistory?.messages.reduce(
           (max, m) => Math.max(max, m.seq ?? 0),
           0,
         ) ?? 0;
-      markInFlight(id, seqFloor);
-      // Thread changed (user navigated) between send press and the
-      // thread-id resolution. Don't keep going — the user's looking
-      // at a different conversation.
-      if (runId !== activeRunIdRef.current) return;
+      markInFlight(myThread, seqFloor);
+      // Stale-run check — if stop() bumped the runId between
+      // send-start and this point, bail. Note: thread-switch does
+      // NOT bump the runId anymore (off-screen runs keep going),
+      // only stop() and re-send-on-same-thread invalidate.
+      if (runId !== readRunState(myThread).runId) return;
 
       const settingsAtSend = getSettings();
 
@@ -752,11 +777,12 @@ export function ChatSurface({
       // its session_id. Both still need a workspace open (claude
       // can't usefully run without one).
       const sharedOnEvent = (e: AgentEvent) => {
-        // Stale-run guard: drop events from any run that's been
-        // superseded (user switched threads, aborted, re-sent).
-        // Without this, a late tool_done from an aborted thread
-        // mutates the active thread's blocks.
-        if (runId !== activeRunIdRef.current) return;
+        // Stale-run guard: drop events from a run that's been
+        // superseded by an explicit Stop (or, in Phase 2, a
+        // follow-up send on the same thread). Note: thread-switch
+        // does NOT bump the runId — off-screen runs SHOULD keep
+        // mutating their own thread's slot.
+        if (runId !== readRunState(myThread).runId) return;
         // Track that *something* arrived so we can detect "stream
         // returned 200 but produced zero events" — a silent failure
         // mode where the user sees nothing happen on send.
@@ -780,7 +806,12 @@ export function ChatSurface({
             seq: e.seq,
           };
         }
-        handleEvent(e, setBlocks);
+        // Critical: route through myUpdateBlocks (bound to the
+        // captured myThread), NOT the surface-bound setBlocks. If
+        // the user navigated to a different thread, setBlocks
+        // would write events into the WRONG thread's slot. The
+        // store decouples writer thread from active view.
+        handleEvent(e, myUpdateBlocks);
       };
 
       // Engine Mode requires Tauri's shell plugin to spawn the
@@ -808,10 +839,10 @@ export function ChatSurface({
         const { runEngineClaudeCode, getClaudeSessionId, setClaudeSessionId } =
           await import('../lib/engines/claude-code');
         await runEngineClaudeCode({
-          sessionId: getClaudeSessionId(id),
-          onSessionId: (sid) => setClaudeSessionId(id, sid),
+          sessionId: getClaudeSessionId(myThread),
+          onSessionId: (sid) => setClaudeSessionId(myThread, sid),
           model,
-          qcodeThreadId: id,
+          qcodeThreadId: myThread,
           // workspace is non-null here — engineMode === 'claude-code'
           // gates on !!workspace?.path above.
           workspace: workspace!.path,
@@ -821,7 +852,7 @@ export function ChatSurface({
         });
       } else {
         await runThreadAgent({
-          threadId: id,
+          threadId: myThread,
           model,
           mode,
           workspace: workspace?.path ?? null,
@@ -835,11 +866,11 @@ export function ChatSurface({
           onEvent: sharedOnEvent,
           onApproval: (toolUseId, _request) =>
             new Promise<ApprovalDecision>((resolve) => {
-              // If this run is no longer active by the time the model
-              // asks for approval, auto-reject so the executor can
-              // unwind. Otherwise the user would see an approval card
-              // for a turn they already abandoned.
-              if (runId !== activeRunIdRef.current) {
+              // Auto-reject if the run was explicitly stopped (runId
+              // bumped). Off-screen runs keep waiting for approval
+              // — the user can come back and click; the approval
+              // card lives in the thread's blocks until resolved.
+              if (runId !== readRunState(myThread).runId) {
                 resolve('reject');
                 return;
               }
@@ -862,16 +893,16 @@ export function ChatSurface({
         (finished as null | { seq: number | null })?.seq ?? null;
       onTurnLanded?.({
         userText: userMsg || null,
-        threadId: id,
+        threadId: myThread,
         assistantSeq: finalSeq,
       });
-      setLastMode(id, mode);
+      setLastMode(myThread, mode);
 
-      // UI updates (the usage pill in the chat surface) — gated on
-      // the runId because the pill belongs to the chat the user is
-      // looking at; rendering it into the wrong thread would be
-      // worse than dropping it.
-      if (runId !== activeRunIdRef.current) return;
+      // Stop-bumped runId guard. Off-screen runs proceed normally
+      // here; only an explicit Stop or follow-up send on this same
+      // thread bumps the runId and short-circuits this final UI
+      // update phase.
+      if (runId !== readRunState(myThread).runId) return;
 
       // Silent-failure detection: stream completed (no throw) but no
       // events arrived AND no `finished` event landed. Most common
@@ -880,7 +911,7 @@ export function ChatSurface({
       // bubble + nothing else and has no idea why. Show an explicit
       // error block so they can retry or report.
       if (eventsSeen === 0 && !finished) {
-        setBlocks((b) => [
+        myUpdateBlocks((b) => [
           ...b,
           {
             type: 'error',
@@ -906,7 +937,7 @@ export function ChatSurface({
         // Falls through to the normal usage pill so cost telemetry
         // stays attached.
         if (!seenContent) {
-          setBlocks((b) => [
+          myUpdateBlocks((b) => [
             ...b,
             {
               type: 'error',
@@ -916,7 +947,7 @@ export function ChatSurface({
           ]);
           posthog.capture('turn_failed', { model, mode, code: 'empty_stream_zero_tokens' });
         }
-        setBlocks((b) => [
+        myUpdateBlocks((b) => [
           ...b,
           {
             type: 'usage',
@@ -949,7 +980,7 @@ export function ChatSurface({
       // Inline error block with retry context. Image-error / network
       // banner state stays for transient toasts that don't make sense
       // to "retry" (image too big, etc.).
-      setBlocks((b) => [
+      myUpdateBlocks((b) => [
         ...b,
         {
           type: 'error',
@@ -958,20 +989,18 @@ export function ChatSurface({
         },
       ]);
     } finally {
-      // If this run was superseded (user switched threads or sent a
-      // new turn), the server is still working on the abandoned
-      // thread. Leave it in the in-flight set so a return visit
-      // polls until the assistant turn lands. If the run completed
-      // normally, clear it.
-      if (runId === activeRunIdRef.current && lastSendThreadRef.current) {
+      // If this run was explicitly stopped, leave the in-flight
+      // marker around so the polling loop doesn't claim "the
+      // turn must've landed" prematurely. Normal completions
+      // clear it. The run-state store keeps the blocks for the
+      // visible thread regardless — those are canonical now.
+      if (
+        runId === readRunState(myThread).runId &&
+        lastSendThreadRef.current
+      ) {
         clearInFlight(lastSendThreadRef.current);
-        // Run completed cleanly on this surface — the live blocks
-        // ARE the canonical record. Drop the snapshot so a future
-        // switch-back doesn't restore stale state on top of the
-        // (now-current) live state.
-        clearBlocksSnapshot(lastSendThreadRef.current);
       }
-      setBusy(false);
+      mySetBusy(false);
       abortRef.current = null;
       // Drop any leftover resolvers — covers the case where streaming
       // bails before the loop reaches the awaiting Promise.
@@ -980,25 +1009,23 @@ export function ChatSurface({
   }
 
   function stop() {
-    // Bumping the run id is what actually makes "Stop" definitive.
-    // abort() asks the network to give up, but late events from the
-    // server side can still arrive (SSE buffering); the run-id
-    // check in onEvent ensures they're discarded instead of
-    // mutating blocks the user is now reading fresh.
-    activeRunIdRef.current += 1;
+    // Stop applies to the CURRENTLY VISIBLE thread. Bumping
+    // its runId in the per-thread store is what makes Stop
+    // definitive: the running send()'s onEvent guards see the
+    // bumped value and start dropping events instead of mutating
+    // blocks. Off-screen runs on OTHER threads are unaffected —
+    // each thread has its own runId.
+    if (threadId) {
+      bumpRunId(threadId);
+    }
     abortRef.current?.abort();
     rejectAllApprovals();
     setBusy(false);
     // Stop is also "abandon what I had planned" — drop any queued
     // follow-up so the busy-flip effect doesn't auto-fire it.
     setQueued(null);
-    // Drop any background snapshot for this thread — explicit
-    // Stop means the user is done with this run, not just
-    // navigating away. clearInFlight is also called by the polling
-    // loop's onTurnLanded path; tidying both here for safety.
-    if (lastSendThreadRef.current) {
-      clearInFlight(lastSendThreadRef.current);
-      clearBlocksSnapshot(lastSendThreadRef.current);
+    if (threadId) {
+      clearInFlight(threadId);
     }
   }
 
@@ -1445,7 +1472,9 @@ function reduceBlocks(blocks: RenderBlock[], e: AgentEvent): RenderBlock[] {
 
 function handleEvent(
   e: AgentEvent,
-  setBlocks: React.Dispatch<React.SetStateAction<RenderBlock[]>>,
+  setBlocks: (
+    next: RenderBlock[] | ((b: RenderBlock[]) => RenderBlock[]),
+  ) => void,
 ): void {
   setBlocks((blocks) => reduceBlocks(blocks, e));
 }
