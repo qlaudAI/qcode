@@ -225,18 +225,36 @@ export function getWorkspaceByPath(path: string): Workspace | null {
  *  path already exists, that one is returned (and lastUsedAt
  *  refreshed). Otherwise a new entry is created with a fresh id.
  *  Does NOT mark the workspace active — call setActiveWorkspaceId. */
-export function registerWorkspace(input: { path: string; name: string }): Workspace {
+export function registerWorkspace(input: {
+  path: string;
+  name: string;
+  /** Optional server-issued id. When syncing from /v1/workspaces
+   *  on first boot of a fresh client (qcode-web with empty
+   *  localStorage, fresh desktop install), pass the server's id
+   *  here so threads tagged with `metadata.workspace_id = <server
+   *  id>` from another device match by id, not just by path. Falls
+   *  back to a fresh local id if omitted (offline-first registers
+   *  before sync). */
+  id?: string;
+}): Workspace {
   const reg = readRegistry();
   const now = Date.now();
   const existing = reg.workspaces.find((w) => w.path === input.path);
   if (existing) {
     existing.lastUsedAt = now;
     if (input.name && existing.name !== input.name) existing.name = input.name;
+    // Adopt the server id if provided AND the local id was a fresh
+    // local-only one (i.e., we registered offline first). This
+    // cures the cross-device id divergence without bumping every
+    // existing local registration.
+    if (input.id && existing.id !== input.id) {
+      existing.id = input.id;
+    }
     writeRegistry(reg);
     return existing;
   }
   const created: Workspace = {
-    id: newId(),
+    id: input.id ?? newId(),
     path: input.path,
     name: input.name,
     createdAt: now,

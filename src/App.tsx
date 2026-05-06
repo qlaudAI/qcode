@@ -307,6 +307,28 @@ export function App() {
     }
   }, [threadsQuery.data, threadsQuery.dataUpdatedAt, currentId]);
 
+  // Workspace-aware auto-select. When a workspace becomes active
+  // but no thread is selected (fresh load on web, post-delete,
+  // post-workspace-switch with empty thread cache), pick the most
+  // recent thread of that workspace as soon as the threads query
+  // lands. Without this, qcode-web shows the workspace landing
+  // page on first visit even when threads exist server-side —
+  // onActivateWorkspace's pick happens before the query resolves,
+  // so the cache is empty and currentId stays null.
+  useEffect(() => {
+    if (!workspace) return;
+    if (currentId) return;
+    if (!threadsQuery.data) return;
+    const match = threadsQuery.data
+      .filter(
+        (t) =>
+          t.workspaceId === workspace.id ||
+          t.workspacePath === workspace.path,
+      )
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (match) setCurrentId(match.id);
+  }, [workspace, currentId, threadsQuery.data]);
+
   // Backfill the registry from any thread that arrives with a
   // workspacePath we don't know about yet. Two scenarios this
   // covers:

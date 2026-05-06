@@ -155,23 +155,30 @@ export async function hydrateWorkspacesFromServer(): Promise<Workspace[]> {
   const remoteByPath = new Map(remote.map((w) => [w.path, w]));
 
   // Apply server rows to local. Newer last_used_at wins on the row;
-  // for paths only present on one side we copy them across.
+  // for paths only present on one side we copy them across. Crucially:
+  // pass the server's id through so the local registry adopts it,
+  // not a freshly-minted local id. Without this, a fresh client
+  // (qcode-web with empty localStorage, fresh desktop install) sees
+  // server-tagged threads as orphans because their `metadata.workspace_id`
+  // points at the SERVER's id while the local workspace has a NEW
+  // id — sidebar's id-match path silently misses them and they fall
+  // back to path-matching (slower / fragile when paths differ
+  // across devices).
   for (const r of remote) {
     const localMatch = localByPath.get(r.path);
     if (!localMatch) {
-      // New row from server — register locally with the server id.
-      registerLocalWorkspace({ path: r.path, name: r.name });
-      // registerLocalWorkspace generates a fresh local id; we'd
-      // ideally use r.id. For now they diverge — threads tagged with
-      // either resolve via path matching in the sidebar's grouping
-      // logic. Phase 6 may force-id-alignment if it matters.
+      registerLocalWorkspace({ id: r.id, path: r.path, name: r.name });
       continue;
     }
-    // Both sides have the row — bump local lastUsedAt to whichever
-    // is newer and adopt the server name if it differs (server is
-    // canonical for renames).
+    // Both sides have the row. Adopt the server id if the local
+    // entry has a fresh local-only id (so cross-device threads
+    // start matching by id). Bump lastUsedAt to whichever is newer
+    // and adopt the server name on rename (server is canonical).
+    if (r.id && localMatch.id !== r.id) {
+      registerLocalWorkspace({ id: r.id, path: r.path, name: r.name });
+    }
     if (r.last_used_at > (localMatch.lastUsedAt ?? 0)) {
-      touchLocalWorkspace(localMatch.id ?? '');
+      touchLocalWorkspace(r.id || localMatch.id || '');
     }
   }
 
