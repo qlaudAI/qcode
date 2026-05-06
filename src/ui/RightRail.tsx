@@ -1114,9 +1114,14 @@ async function scanWorkspaceMedia(root: string): Promise<MediaItem[]> {
     `\\( -name node_modules -o -name .git -o -name .next ` +
     `-o -name .open-next -o -name dist -o -name build -o -name target ` +
     `-o -name coverage -o -name .cache -o -name .turbo \\) -prune -o`;
-  // BSD vs GNU stat format selection.
-  const statBsd = `stat -f "%N\\t%z\\t%m" "$0"`;
-  const statGnu = `stat -c "%n\\t%s\\t%Y" "$0"`;
+  // BSD vs GNU stat format selection. Use '|' as separator instead
+  // of '\t' — BSD stat on macOS does NOT expand \t in the format
+  // string (output gets literal backslash-t instead of an actual
+  // tab), which silently broke the JS parser. '|' passes through
+  // both BSD and GNU stat unmodified, and media filenames don't
+  // contain it (regex-safe for png/jpg/mp4/etc).
+  const statBsd = `stat -f "%N|%z|%m" "$0"`;
+  const statGnu = `stat -c "%n|%s|%Y" "$0"`;
   const cmd =
     `cd "${root}" 2>/dev/null && ` +
     `if stat --version >/dev/null 2>&1; then STAT='${statGnu}'; else STAT='${statBsd}'; fi && ` +
@@ -1139,7 +1144,7 @@ async function scanWorkspaceMedia(root: string): Promise<MediaItem[]> {
   const out: MediaItem[] = [];
   for (const line of stdout.split('\n')) {
     if (!line.trim()) continue;
-    const [pathRaw, sizeRaw, mtimeRaw] = line.split('\t');
+    const [pathRaw, sizeRaw, mtimeRaw] = line.split('|');
     if (!pathRaw) continue;
     // Path is `./relative/from/root` because we cd'd in. Normalize.
     const rel = pathRaw.replace(/^\.\//, '');
