@@ -83,6 +83,66 @@ export function RightRail({
     .filter((b): b is ToolBlock => b.type === 'tool')
     .filter((b) => b.call.name !== 'todo_write');
 
+  // Resizable width on desktop. User drags the left edge to make
+  // the rail bigger when working with media / files / preview that
+  // benefit from more horizontal room. Persisted to localStorage so
+  // their preferred width sticks across sessions. Mobile keeps the
+  // bottom-sheet pattern unchanged (no resize there).
+  const [railWidth, setRailWidth] = useState<number>(() => {
+    if (typeof window === 'undefined') return 288;
+    const saved = window.localStorage.getItem('qcode.rightRail.width');
+    const n = saved ? Number.parseInt(saved, 10) : NaN;
+    return Number.isFinite(n) && n >= 240 && n <= 1200 ? n : 288;
+  });
+  const [isResizing, setIsResizing] = useState(false);
+
+  // Drag-resize handler. Captures pointer on the divider, follows
+  // pointermove until pointerup. Width = viewport-right - cursor-x,
+  // clamped to a sane range so the user can't drag the chat down
+  // to a 50px stripe. Persisted on release so we don't thrash
+  // localStorage on every move.
+  function onResizeStart(e: React.PointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setIsResizing(true);
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+
+    const onMove = (ev: PointerEvent) => {
+      const next = Math.max(
+        240,
+        Math.min(1200, window.innerWidth - ev.clientX),
+      );
+      setRailWidth(next);
+    };
+    const onUp = () => {
+      setIsResizing(false);
+      try {
+        target.releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released — nbd */
+      }
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      // Persist final value once on release, not 60 times/sec
+      // during the drag.
+      try {
+        // Capture latest from the closure-scoped state via a synchronous
+        // read of the DOM (cheaper than a setState callback dance).
+        const finalRect = target.parentElement?.getBoundingClientRect();
+        if (finalRect) {
+          window.localStorage.setItem(
+            'qcode.rightRail.width',
+            String(Math.round(finalRect.width)),
+          );
+        }
+      } catch {
+        /* localStorage unavailable (private mode etc.) — non-fatal */
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
   return (
     <>
       {/* Mobile scrim — taps close the sheet. md+ never sees this. */}
@@ -92,14 +152,38 @@ export function RightRail({
         className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm md:hidden"
       />
       <aside
+        style={{
+          // Inline width applies on md+ only — mobile is 100vw via
+          // the inset-x-0 class. The CSS class below sets w-full on
+          // mobile and lets inline style win on desktop.
+          ...(typeof window !== 'undefined' && window.innerWidth >= 768
+            ? { width: railWidth }
+            : {}),
+        }}
         className={cn(
           // Mobile: bottom-anchored sheet that takes 75dvh, slides up
           // over the chat. Desktop md+: in-flow column on the right
-          // (272px wide) with the chat surface to the left.
+          // (resizable, default 288px) with the chat surface to the
+          // left. md:relative is the positioning context for the
+          // absolute drag handle.
           'fixed inset-x-0 bottom-0 z-50 flex h-[75dvh] flex-col rounded-t-xl border-t border-border/40 bg-background/95 backdrop-blur-md',
-          'md:static md:h-auto md:w-72 md:shrink-0 md:rounded-none md:border-l md:border-t-0 md:bg-background/60',
+          'md:static md:relative md:h-auto md:shrink-0 md:rounded-none md:border-l md:border-t-0 md:bg-background/60',
         )}
       >
+        {/* Resize handle — desktop only. 4px-wide hot-zone on the
+         *  left edge that captures pointer for a drag. Stretches
+         *  full height. Subtle hover state hints at resizability;
+         *  no permanent visible affordance to keep the surface
+         *  clean. */}
+        <div
+          onPointerDown={onResizeStart}
+          className={cn(
+            'absolute inset-y-0 left-0 z-10 hidden w-1 cursor-col-resize transition-colors hover:bg-primary/20 md:block',
+            isResizing && 'bg-primary/30',
+          )}
+          title="Drag to resize"
+          aria-label="Resize panel"
+        />
         {/* Sheet grabber on mobile only — visual handoff that this is
          *  draggable-feeling. Just decoration; actual close is via
          *  the X button or scrim tap. */}

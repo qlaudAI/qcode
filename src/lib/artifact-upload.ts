@@ -143,13 +143,18 @@ export async function uploadArtifactToCloud(opts: {
     const text = await initRes.text().catch(() => '');
     throw new Error(`init failed (${initRes.status}): ${text.slice(0, 200)}`);
   }
+  // Server returns { artifact_id, upload_url, r2_key, ... } from
+  // /v1/artifacts/init. We aliased it to `id` in an earlier pass —
+  // wrong, the actual field is `artifact_id`. Reading the wrong key
+  // silently failed every upload here with "init response missing
+  // id / upload_url" since alpha.161.
   const initJson = (await initRes.json()) as {
-    id?: string;
+    artifact_id?: string;
     upload_url?: string;
     download_url?: string;
   };
-  if (!initJson.id || !initJson.upload_url) {
-    throw new Error('init response missing id / upload_url');
+  if (!initJson.artifact_id || !initJson.upload_url) {
+    throw new Error('init response missing artifact_id / upload_url');
   }
 
   // Step 2: upload bytes. The worker's PUT endpoint is bearer-
@@ -168,7 +173,9 @@ export async function uploadArtifactToCloud(opts: {
   }
 
   return {
-    id: initJson.id,
-    download_url: initJson.download_url ?? `${BASE}/v1/artifacts/${initJson.id}/download`,
+    id: initJson.artifact_id,
+    download_url:
+      initJson.download_url ??
+      `${BASE}/v1/artifacts/${initJson.artifact_id}/download`,
   };
 }
