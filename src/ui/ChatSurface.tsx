@@ -1103,9 +1103,79 @@ export function ChatSurface({
   // server (Vite/Next/Astro/etc. — port-agnostic).
   const detectedDevUrl = useMemo(() => deriveDevServerUrl(blocks), [blocks]);
 
+  // Workspace-wide drag-and-drop. Drop files anywhere in the chat
+  // surface (messages area, header strip, anywhere) and they get
+  // ingested into the composer's attachment slots. The composer
+  // itself still has its own onDrop handler for backwards-compat
+  // and tighter visual feedback inside the textarea — both paths
+  // fan into the same setImages/setDocuments/setTextFiles state.
+  const [surfaceDragging, setSurfaceDragging] = useState(false);
+  async function ingestDroppedFiles(list: File[]) {
+    const { readUploadedFile } = await import('../lib/uploads');
+    for (const f of list) {
+      const result = await readUploadedFile(f);
+      if ('reason' in result) {
+        setError(result.message);
+        continue;
+      }
+      if (result.kind === 'image') setImages((prev) => [...prev, result]);
+      else if (result.kind === 'document')
+        setDocuments((prev) => [...prev, result]);
+      else setTextFiles((prev) => [...prev, result]);
+    }
+  }
+  function onSurfaceDragEnter(e: React.DragEvent) {
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    e.preventDefault();
+    setSurfaceDragging(true);
+  }
+  function onSurfaceDragOver(e: React.DragEvent) {
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  }
+  function onSurfaceDragLeave(e: React.DragEvent) {
+    // Only clear when the drag leaves the OUTER container (not when
+    // it crosses a child boundary). The relatedTarget is null when
+    // the drag exits the window entirely; otherwise it's the next
+    // element under the cursor — if that's still inside us, ignore.
+    if (
+      e.relatedTarget &&
+      e.currentTarget.contains(e.relatedTarget as Node)
+    ) {
+      return;
+    }
+    setSurfaceDragging(false);
+  }
+  async function onSurfaceDrop(e: React.DragEvent) {
+    setSurfaceDragging(false);
+    const { filesFromDrop } = await import('../lib/uploads');
+    const list = filesFromDrop(e.nativeEvent);
+    if (list.length === 0) return;
+    e.preventDefault();
+    await ingestDroppedFiles(list);
+  }
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div
+        className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+        onDragEnter={onSurfaceDragEnter}
+        onDragOver={onSurfaceDragOver}
+        onDragLeave={onSurfaceDragLeave}
+        onDrop={onSurfaceDrop}
+      >
+      {/* Surface-wide drop overlay — visible only while a drag is
+       *  hovering the chat surface. Pointer-events-none so the
+       *  overlay itself doesn't intercept the drop event; the
+       *  parent's handler catches it. */}
+      {surfaceDragging && (
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-primary/60 bg-primary/[0.06] backdrop-blur-[2px]">
+          <div className="rounded-md border border-primary/30 bg-background px-4 py-2 text-[13px] font-medium text-primary shadow-md">
+            Drop to attach
+          </div>
+        </div>
+      )}
       <div ref={scrollRef} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto">
         <StickyActivityBar activity={stickyActivity} devUrl={detectedDevUrl} />
         {/* Session-switch fade. Keying the inner container on threadId
