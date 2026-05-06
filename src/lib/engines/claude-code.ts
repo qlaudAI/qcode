@@ -69,25 +69,35 @@ VERIFYING RUNNING APPS — you do NOT have a built-in browser tool here. Use Pla
 DO NOT ask the user permission first ("Want me to do that?" is the wrong default). Just do it.
 
   # ─── ONE-TIME bootstrap (only if ~/.qcode/runtime/node_modules/playwright doesn't exist yet)
-  # Prefer bun (~3-5s install) → pnpm (~8s) → npm (~25s) for the install
-  # step. They all produce a node_modules/playwright that imports the
-  # same way, so the verify script below is package-manager agnostic.
+  # qcode bundles bun as a Tauri sidecar but it's not on the bash
+  # subshell's PATH, so \`command -v bun\` returns false even when
+  # qcode itself is using bun. To avoid a slow npm fallback, install
+  # bun from the official curl script if it isn't already on PATH —
+  # ~10s one-time, persists at ~/.bun/bin for every future session
+  # AND every other tool the user runs.
   if [ ! -d "$HOME/.qcode/runtime/node_modules/playwright" ]; then
+    if ! command -v bun >/dev/null 2>&1; then
+      curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || true
+    fi
+    # Make bun discoverable for the rest of this command even if the
+    # installer just dropped it. ~/.bun/bin is the canonical install
+    # location on macOS + Linux; npm-global bun lands on PATH already.
+    export PATH="$HOME/.bun/bin:$PATH"
     mkdir -p "$HOME/.qcode/runtime" && cd "$HOME/.qcode/runtime"
     if command -v bun >/dev/null 2>&1; then
       bun init -y >/dev/null 2>&1 || true
       bun add playwright >/dev/null
-    elif command -v pnpm >/dev/null 2>&1; then
-      pnpm init >/dev/null 2>&1 || true
-      pnpm add playwright >/dev/null
+      # bun x runs npx-equivalent via bun's own runner — ~3x faster
+      # than npx + no per-call npm cache hits.
+      bun x playwright install chrome-headless-shell >/dev/null
     else
+      # Last-resort fallback if bun install + ~/.bun/bin both failed
+      # (offline machine, no curl, locked-down env). npm always
+      # exists alongside Node, which Playwright needs anyway.
       npm init -y >/dev/null
       npm i playwright >/dev/null
+      npx playwright install chrome-headless-shell >/dev/null
     fi
-    # chrome-headless-shell is Playwright's slim ~80MB build (vs full
-    # Chromium ~150MB) — enough for navigate/screenshot/eval/click,
-    # which is all we use it for.
-    npx playwright install chrome-headless-shell >/dev/null
     cd - >/dev/null
   fi
 
@@ -121,6 +131,36 @@ Localhost / dev-server access — ports change between runs (Vite picks 5174 if 
   1. Scan recent bash output for "Local:" / "ready on" / "Listening on" / "started server" banners — Vite, Next, Astro, Storybook, Remix, Nuxt, SvelteKit, Tauri's vite, Express, Fastify, NestJS, Django, Flask, Rails all print one of those.
   2. If no recent banner, run: \`lsof -i -P -n -sTCP:LISTEN | grep LISTEN\` (or \`netstat -tnlp | grep LISTEN\` on Linux when lsof isn't available). Pick the port matching the project's dev framework (3000 for Next, 5173 for Vite, 4321 for Astro, 6006 for Storybook, etc.).
 The user is on a desktop app, so localhost is THEIR machine. Treat dev servers as state-you-can-inspect, not state-you-can-guess.`;
+
+/** Delegation + context-hygiene hint. Always-on, ~250 tokens. The
+ *  best lever we have for keeping main-thread context lean across a
+ *  long agentic session: push exploratory work into subagents whose
+ *  output is a SUMMARY, not a transcript. Without this hint the
+ *  default behavior is "do everything inline" and the parent
+ *  context balloons with grep dumps, file reads, log scans the user
+ *  doesn't actually need to see — and worse, those bloat every
+ *  subsequent turn's input cost.
+ *
+ *  Subagent → context win: child runs in its own window, returns
+ *  ≤200-word summary. The grep / read / log-scan tokens NEVER hit
+ *  the parent. On a 30-turn session this is 5-10× compounding. */
+const QCODE_DELEGATION_HINT = `DELEGATING TO SUBAGENTS — when work is "search, then summarize" (not "edit this file"), spawn a subagent. The subagent runs in its own context window and reports back a concise summary; the exploration tokens (grep dumps, file reads, command output) never enter THIS conversation's context, keeping every later turn cheaper and faster.
+
+Use a subagent for:
+  • Exploring how a system works ("how does authentication work in this codebase?")
+  • Running long-output commands and summarizing ("run the test suite and report only the failures")
+  • Scanning logs / large outputs ("scan /var/log/app and summarize errors from the last hour")
+  • Multi-target research IN PARALLEL ("research how each of these 3 services handles retries" → 3 subagents in one turn)
+  • Auditing for a specific pattern across many files ("find every place we still call the old API")
+
+Don't subagent for:
+  • Single-file edits, single grep — just do it inline.
+  • Tasks needing this conversation's full context to make decisions.
+  • Anything you'd finish in <2 tool calls.
+
+Tell the subagent what you want and the OUTPUT FORMAT — "report under 200 words", "list paths only", "punch list of done vs missing". Vague prompts produce verbose reports. Run independent subagents IN PARALLEL (one message, multiple Task tool calls) when their work doesn't depend on each other.
+
+CONTEXT MANAGEMENT — if THIS conversation gets long and you're noticing slow turns or autocompact warnings, the user can compact early via qcode's Compact button (or by sending "/compact" as a message). You can suggest it when work transitions to a new phase ("we just finished the auth refactor; compact before we move to billing?"). Don't compact mid-task — only at natural boundaries.`;
 
 /** Where the gateway lives. Claude Code reads ANTHROPIC_BASE_URL and
  *  appends /v1/messages. We use the standard URL — no path prefix,
@@ -365,6 +405,14 @@ export async function runEngineClaudeCode(
   // the previous Settings-gated always-inline pattern.
   const sections = [
     QCODE_ENGINE_HINT,
+    // Always-on. Teaches the agent to push exploratory / scanning /
+    // multi-target research into subagents (clean child context,
+    // ≤200-word summary back), and points at the Compact button for
+    // long-thread hygiene. The biggest single context-conservation
+    // lever in the long-session steady state — keeps the parent
+    // turn's input flat across 30+ tool roundtrips that would
+    // otherwise grow with every grep dump and log scan.
+    QCODE_DELEGATION_HINT,
     QLAUD_MEDIA_SKILL,
     buildSkillPointer(homeForPointer),
   ];
