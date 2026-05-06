@@ -838,6 +838,8 @@ export function App() {
               const w = await tryOpenFolder();
               if (w) setWorkspace(w);
             }}
+            qcodeMe={qcodeMeQuery.data ?? null}
+            onOpenBilling={() => setSettingsOpen(true)}
             rightRailView={rightRailView}
             onCloseRightRail={() => setRightRailView(null)}
             workspacePath={workspace?.path}
