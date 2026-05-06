@@ -164,6 +164,14 @@ THE WORKFLOW (every template uses some subset)
    • User-supplied: read from the workspace as-is. The user said "use logo.svg"? Use logo.svg.
 
 6. Build the Remotion composition
+   • Ensure bun is on PATH first. qcode's bundled bun is a Tauri
+     sidecar and isn't visible to bash. If bun isn't installed
+     system-wide, install via the official one-liner — ~10s, persists
+     at ~/.bun/bin:
+       if ! command -v bun >/dev/null 2>&1; then
+         curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || true
+       fi
+       export PATH="$HOME/.bun/bin:$PATH"
    • One-time scaffold per workspace (idempotent — skip if .qcode/video-projects/main exists):
        mkdir -p .qcode/video-projects
        cd .qcode/video-projects

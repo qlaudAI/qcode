@@ -123,7 +123,14 @@ DO NOT ask the user permission first ("Want me to do that?" is the wrong default
   console.log('errors', errors.length ? errors : 'none');
   await b.close();
   EOF
-  node /tmp/verify.mjs
+  # Prefer bun (we just installed it above; faster cold-start than
+  # node + handles ESM dynamic imports natively). Fall back to node
+  # only if bun ended up unavailable AND node is on PATH.
+  if command -v bun >/dev/null 2>&1; then
+    bun /tmp/verify.mjs
+  else
+    node /tmp/verify.mjs
+  fi
 
 The bootstrap step takes ~30s the FIRST time the user uses qcode (one-time across their machine, not per project). Every subsequent run is instant — \`~/.qcode/runtime\` persists between projects, restarts, even qcode upgrades. Same approach works for clicking buttons, filling forms, e2e flows — extend the script with page.click / page.fill / page.waitForSelector.
 
