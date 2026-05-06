@@ -402,6 +402,92 @@ function FilesView({ workspacePath }: { workspacePath?: string | null }) {
 const DEV_URL_RE =
   /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d{2,5})?(?:\/[^\s'"<>)]*)?/g;
 
+/** Tiny dropdown chip rendered in the Preview toolbar when more
+ *  than zero URLs have been detected in the agent's bash output
+ *  this session. Click reveals the list, click an item to switch
+ *  the iframe to it. Zero ports detected → component doesn't
+ *  render (PreviewView gates on detectedUrls.length > 0). */
+function DetectedUrlsDropdown({
+  urls,
+  currentUrl,
+  onPick,
+}: {
+  urls: string[];
+  currentUrl: string;
+  onPick: (url: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  // Close on outside click — standard popover behavior. Skipped
+  // when `open=false` to avoid attaching a no-op listener.
+  useEffect(() => {
+    if (!open) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (!ref.current) return;
+      if (!ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex items-center gap-1 rounded border border-border/60 bg-background px-1.5 py-1 text-[10.5px] font-medium text-foreground/80 hover:border-foreground/30 hover:text-foreground"
+        title={`${urls.length} URL${urls.length === 1 ? '' : 's'} detected from agent's bash output`}
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+        <span className="tabular-nums">{urls.length}</span>
+        <ChevronRight
+          className={cn(
+            'h-2.5 w-2.5 transition-transform',
+            open ? 'rotate-90' : '',
+          )}
+        />
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-30 mt-1 w-[280px] overflow-hidden rounded-md border border-border bg-popover shadow-lg">
+          <div className="border-b border-border/40 px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            Running in this session
+          </div>
+          <div className="max-h-[240px] overflow-y-auto py-1">
+            {urls.map((u) => {
+              const isActive = u === currentUrl;
+              return (
+                <button
+                  key={u}
+                  onClick={() => {
+                    onPick(u);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[11.5px] font-mono transition-colors',
+                    isActive
+                      ? 'bg-primary/10 text-primary'
+                      : 'text-foreground/85 hover:bg-muted',
+                  )}
+                  title={u}
+                >
+                  <span
+                    className={cn(
+                      'h-1.5 w-1.5 shrink-0 rounded-full',
+                      isActive ? 'bg-primary' : 'bg-muted-foreground/40',
+                    )}
+                  />
+                  <span className="truncate">{u}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
   // Two sources for what to load in the iframe, in priority order:
   //   1. lastNavigatedUrl — the agent explicitly called
@@ -452,7 +538,39 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
     return '';
   }, [blocks]);
 
-  // Effective auto-source: explicit navigate beats inferred dev URL.
+  // Every URL the agent's bash commands have ever printed in this
+  // session — not just the most recent one. The agent already
+  // tells us exactly what's running in this workspace via the
+  // tool calls it makes (every `bun dev` / `npm start` / `python
+  // -m http.server` etc. emits a "Local: http://..." or "Listening
+  // on http://..." banner that lands in the bash block's output).
+  // Walking the blocks once gives us the source of truth: what
+  // THIS conversation has spun up, in order. No system-wide port
+  // sniffing, no platform-specific shell-outs, no polling — just
+  // re-derive when blocks change. Naturally workspace-scoped
+  // because the agent ran in the workspace.
+  const detectedUrls = useMemo(() => {
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+    for (const b of blocks) {
+      if (!b || b.type !== 'tool') continue;
+      const tb = b as ToolBlock;
+      const name = tb.call.name.toLowerCase();
+      if (name !== 'bash' && name !== 'verify') continue;
+      const out = (tb.call as { output?: string }).output;
+      if (!out) continue;
+      for (const m of out.matchAll(DEV_URL_RE)) {
+        const u = (m[0] ?? '').replace(/[.,;)]+$/, '');
+        if (!u || seen.has(u)) continue;
+        seen.add(u);
+        ordered.push(u);
+      }
+    }
+    return ordered;
+  }, [blocks]);
+
+  // Effective auto-source: explicit navigate beats inferred dev
+  // URL beats nothing.
   const autoSource = lastNavigatedUrl || lastDevServerUrl;
 
   const [url, setUrl] = useState(autoSource || 'http://localhost:3000');
@@ -487,6 +605,16 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
+        {detectedUrls.length > 0 && (
+          <DetectedUrlsDropdown
+            urls={detectedUrls}
+            currentUrl={loadedUrl}
+            onPick={(u) => {
+              setUrl(u);
+              setLoadedUrl(u);
+            }}
+          />
+        )}
         <input
           value={url}
           onChange={(e) => setUrl(e.target.value)}
