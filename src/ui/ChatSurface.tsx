@@ -77,6 +77,7 @@ import {
   updateBlocks,
   useThreadRunState,
 } from '../lib/run-state';
+import { bumpWorkspaceRevision } from '../lib/workspace-revision';
 
 // Each "block" rendered in the chat is the smallest UI unit. The
 // agent loop emits a stream of events that `handleEvent` translates
@@ -805,6 +806,16 @@ export function ChatSurface({
             costUsd: e.costUsd,
             seq: e.seq,
           };
+        }
+        // Workspace-revision tick: when the agent finishes a tool
+        // call, bump the global workspace-revision counter so the
+        // Media / Files / Diff right-rail tabs re-scan and pick
+        // up any newly-created or modified files. We bump on
+        // EVERY tool_done — overly broad (read-only tools like
+        // Read also bump) but cheap, and it guarantees the user
+        // never sees stale right-rail state after agent activity.
+        if (e.type === 'tool_done') {
+          bumpWorkspaceRevision();
         }
         // Critical: route through myUpdateBlocks (bound to the
         // captured myThread), NOT the surface-bound setBlocks. If

@@ -3,6 +3,7 @@ import { ChevronRight, FileText, Folder, FolderOpen } from 'lucide-react';
 
 import { cn } from '../lib/cn';
 import { readDir, type FileNode } from '../lib/workspace';
+import { useWorkspaceRevision } from '../lib/workspace-revision';
 
 // Lazy-expanding tree. Each folder loads its children on first
 // expand; we cache them in component state so collapsing + reopening
@@ -36,6 +37,43 @@ export function FileTree({ rootPath }: { rootPath: string }) {
   useEffect(() => {
     void ensureChildren(rootPath);
   }, [rootPath, ensureChildren]);
+
+  // Workspace revision: bumps when the agent does anything that
+  // might modify files. Re-fetch children for every currently-
+  // expanded path so newly-created files / directories appear
+  // without the user manually collapsing + reopening. Cheap —
+  // typically only 2-5 expanded paths at any time.
+  const workspaceRev = useWorkspaceRevision();
+  useEffect(() => {
+    if (workspaceRev === 0) return; // skip the initial mount
+    let cancelled = false;
+    const expanded = Array.from(state.expanded);
+    void Promise.all(
+      expanded.map(async (path) => {
+        try {
+          const items = await readDir(path);
+          return [path, items] as const;
+        } catch {
+          return [path, [] as FileNode[]] as const;
+        }
+      }),
+    ).then((results) => {
+      if (cancelled) return;
+      setState((s) => {
+        const next = new Map(s.children);
+        for (const [path, items] of results) next.set(path, items);
+        return { ...s, children: next };
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // state.expanded intentionally excluded from deps — including
+    // it would cause re-fetches on every toggle, which already
+    // gets a targeted ensureChildren call. We ONLY want
+    // revision-driven refresh here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceRev]);
 
   function toggle(path: string) {
     setState((s) => {

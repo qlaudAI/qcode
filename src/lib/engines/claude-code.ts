@@ -136,7 +136,11 @@ The bootstrap step takes ~30s the FIRST time the user uses qcode (one-time acros
 Localhost / dev-server access — ports change between runs (Vite picks 5174 if 5173 is busy; Next picks 3001 if 3000 is taken). NEVER hardcode a port from package.json scripts. Before any \`curl\`, \`fetch\`, or playwright \`page.goto\` to a localhost URL, verify the LIVE port two ways:
   1. Scan recent bash output for "Local:" / "ready on" / "Listening on" / "started server" banners — Vite, Next, Astro, Storybook, Remix, Nuxt, SvelteKit, Tauri's vite, Express, Fastify, NestJS, Django, Flask, Rails all print one of those.
   2. If no recent banner, run: \`lsof -i -P -n -sTCP:LISTEN | grep LISTEN\` (or \`netstat -tnlp | grep LISTEN\` on Linux when lsof isn't available). Pick the port matching the project's dev framework (3000 for Next, 5173 for Vite, 4321 for Astro, 6006 for Storybook, etc.).
-The user is on a desktop app, so localhost is THEIR machine. Treat dev servers as state-you-can-inspect, not state-you-can-guess.`;
+The user is on a desktop app, so localhost is THEIR machine. Treat dev servers as state-you-can-inspect, not state-you-can-guess.
+
+GIT REPO BOUNDARY — qcode's right-rail Diff tab and several builtin tools assume the workspace IS its own git repo (a workspace-scoped \`.git\` at the root). When the user opens a workspace that ISN'T a repo of its own — common for fresh project folders, or for subfolders inside a larger personal monorepo — silent fallthrough to a parent repo's diff causes confusing bleed (Diff tab shows files outside the workspace, etc.).
+
+If you're about to do anything commit-shaped (write_file, edit_file, multi-step refactor, scaffold a new project) AND \`git rev-parse --show-toplevel\` differs from the workspace path, run \`git init\` once at the workspace root before the changes. One-time setup, gives the user undo + history + qcode's diff tab works correctly. Skip when the workspace already has its own \`.git\` (the toplevel matches), or when the user is doing pure read-only / chat work where git isn't relevant.`;
 
 /** Delegation + context-hygiene hint. Always-on, ~250 tokens. The
  *  best lever we have for keeping main-thread context lean across a

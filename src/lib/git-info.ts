@@ -85,6 +85,16 @@ const MAX_FILES = 50;
 export async function readWorkspaceDiff(workspace: string): Promise<FileDiff[]> {
   if (!isTauri()) return [];
   try {
+    // Scope to the workspace dir using `:(top)` pathspec + a cwd
+    // pinned to the workspace. The `--` "." pathspec restricts
+    // status/diff to files under the cwd, so even when the
+    // workspace is a subfolder of a larger git repo (parent .git),
+    // we ONLY see changes inside the workspace boundary — not the
+    // user's whole monorepo. Without this scoping, opening
+    // `~/dev/some-project` while `~/dev/.git` exists shows every
+    // dirty file in the parent repo, including stuff outside the
+    // workspace the user has open.
+    //
     // First the porcelain summary (path + status); then per-file
     // numstat + the patch body. One bash call to minimize round-
     // trip overhead. Sentinel-separated so we parse cleanly.
@@ -92,11 +102,11 @@ export async function readWorkspaceDiff(workspace: string): Promise<FileDiff[]> 
       `cd "${workspace}"`,
       `git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo NOT_GIT; exit 0; }`,
       `echo __QCODE_PORCELAIN__`,
-      `git status --porcelain 2>/dev/null | head -${MAX_FILES}`,
+      `git status --porcelain -- . 2>/dev/null | head -${MAX_FILES}`,
       `echo __QCODE_NUMSTAT__`,
-      `git diff --numstat HEAD 2>/dev/null | head -${MAX_FILES}`,
+      `git diff --numstat HEAD -- . 2>/dev/null | head -${MAX_FILES}`,
       `echo __QCODE_PATCH__`,
-      `git diff HEAD 2>/dev/null | head -c ${MAX_DIFF_BYTES}`,
+      `git diff HEAD -- . 2>/dev/null | head -c ${MAX_DIFF_BYTES}`,
     ].join('\n');
     const r = await runBashSession({
       workspace,

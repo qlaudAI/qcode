@@ -38,6 +38,7 @@ import {
   bucketByMonth,
   bucketByWeek,
 } from '../lib/qcode-usage';
+import { useWorkspaceRevision } from '../lib/workspace-revision';
 import { FileTree } from './FileTree';
 import type { ToolCallView } from './legacy/ToolCallCard';
 
@@ -768,10 +769,12 @@ function DiffView({ workspacePath }: { workspacePath?: string | null }) {
   const [files, setFiles] = useState<FileDiff[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [openFiles, setOpenFiles] = useState<Set<string>>(new Set());
+  const workspaceRev = useWorkspaceRevision();
 
-  // Fetch on mount + on workspace change. The user can also manual-
-  // refresh via the reload button — we don't auto-poll because git
-  // diff isn't free, and the user knows when they want fresh state.
+  // Fetch on mount + on workspace change + when the agent has done
+  // anything that might have modified files. No background poll —
+  // git diff is cheap but not free; revision-driven refresh is
+  // both fresher and lighter.
   useEffect(() => {
     if (!workspacePath) {
       setFiles(null);
@@ -788,7 +791,7 @@ function DiffView({ workspacePath }: { workspacePath?: string | null }) {
     return () => {
       cancelled = true;
     };
-  }, [workspacePath]);
+  }, [workspacePath, workspaceRev]);
 
   const refresh = () => {
     if (!workspacePath) return;
@@ -1242,10 +1245,16 @@ function MediaView({
   const [items, setItems] = useState<MediaItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // Tick whenever the agent does something that may have written
+  // new files to the workspace — re-runs the scan so the user
+  // sees "agent just generated this" without manual refresh.
+  const workspaceRev = useWorkspaceRevision();
 
   useEffect(() => {
     let cancelled = false;
-    setItems(null);
+    // Don't blank-out items on a revision-tick refresh — keep the
+    // current view visible and merge in new entries when the scan
+    // completes. Only fully clear on workspace/thread change.
     setError(null);
 
     // Two parallel fetches — local fs scan + qlaud cloud ledger —
@@ -1276,7 +1285,7 @@ function MediaView({
     return () => {
       cancelled = true;
     };
-  }, [workspacePath, threadId, reloadKey]);
+  }, [workspacePath, threadId, reloadKey, workspaceRev]);
 
   // Bucket: generated (newest first) → project (newest first within
   // each kind). The split surfaces qcode's own output above the
