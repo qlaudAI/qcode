@@ -114,9 +114,14 @@ export async function createRemoteThread(opts?: {
   });
 }
 
-/** Newest-first list of the caller's threads. Up to `limit` rows. */
+/** Newest-first list of the caller's threads. Up to `limit` rows.
+ *  Default 200 (was 50 — too tight; users with active workflows on
+ *  multiple workspaces hit the cap and missed older threads on
+ *  cross-device views, esp. on qcode-web). 200 covers the
+ *  vast majority of real users; future v1 will paginate when we
+ *  have real numbers on the long tail. */
 export async function listRemoteThreads(
-  limit = 50,
+  limit = 200,
   signal?: AbortSignal,
 ): Promise<RemoteThread[]> {
   const data = await api<{ data: RemoteThread[] }>(
