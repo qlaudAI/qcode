@@ -1034,17 +1034,10 @@ const MEDIA_EXTENSIONS = {
   video: new Set(['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v']),
 };
 
-const MEDIA_HIDDEN_DIRS = new Set([
-  'node_modules',
-  '.git',
-  'dist',
-  'build',
-  'target',
-  '.next',
-  '.open-next',
-  '.cache',
-  'coverage',
-]);
+// MEDIA_HIDDEN_DIRS retired with the readDir-based walk — the new
+// `find` shell-out in scanWorkspaceMedia does -prune at the find
+// level, which is faster (no dir descent at all) and matches the
+// noise list inline.
 
 type MediaKind = 'image' | 'audio' | 'video';
 
@@ -1087,68 +1080,85 @@ function classifyMedia(name: string): MediaKind | null {
 
 async function scanWorkspaceMedia(root: string): Promise<MediaItem[]> {
   if (!isTauri()) return [];
-  const { readDir, stat, exists } = await import('@tauri-apps/plugin-fs');
-  const out: MediaItem[] = [];
+
+  // Shell out to `find` rather than walking via Tauri's readDir.
+  //
+  // Why: Tauri 2's plugin-fs readDir has surfaced cases on macOS
+  // where it silently omits entries starting with '.' — same way
+  // `ls` (without -a) does. The agent saves to .qcode/media/, so
+  // a hidden-dir-skipping walk silently returns "No media" while
+  // the files clearly exist on disk. find on the other hand walks
+  // EVERY entry like `ls -a`, including dotted dirs. We also get
+  // size + mtime in one fork (via -printf or stat) instead of N+1
+  // separate stat calls per file.
+  //
+  // Format: TAB-separated absolute_path \t size_bytes \t mtime_seconds.
+  // GNU find supports -printf directly; BSD find (macOS default)
+  // doesn't, so we use -exec stat per file for portability. Stat's
+  // -f format differs between BSD and GNU; we detect via uname.
+  //
+  // -prune the noise dirs early so find doesn't waste time
+  // descending into node_modules / .git / etc. Limit at 1000
+  // hits via head -n.
   const MAX = 1000;
-  async function walk(rel: string): Promise<void> {
-    if (out.length >= MAX) return;
-    const dir = rel ? `${root}/${rel}` : root;
-    let entries;
-    try {
-      entries = await readDir(dir);
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      if (out.length >= MAX) return;
-      if (e.isDirectory) {
-        if (MEDIA_HIDDEN_DIRS.has(e.name)) continue;
-        await walk(rel ? `${rel}/${e.name}` : e.name);
-        continue;
-      }
-      const kind = classifyMedia(e.name);
-      if (!kind) continue;
-      const childRel = rel ? `${rel}/${e.name}` : e.name;
-      const abs = `${root}/${childRel}`;
-      let size: number | null = null;
-      let mtime: number | null = null;
-      try {
-        const s = await stat(abs);
-        size = s.size ?? null;
-        mtime = s.mtime ? new Date(s.mtime).getTime() : null;
-      } catch {
-        /* size/mtime stay null */
-      }
-      out.push({
-        absPath: abs,
-        relPath: childRel,
-        name: e.name,
-        kind,
-        size,
-        mtime,
-        isGenerated: childRel.startsWith('.qcode/media/'),
-        origin: 'local',
-      });
-    }
+  const exts = [
+    'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif',
+    'mp4', 'mov', 'webm', 'mkv', 'm4v',
+    'mp3', 'wav', 'flac', 'm4a', 'ogg', 'aac',
+    'pdf',
+  ];
+  const orPattern = exts.map((e) => `-iname "*.${e}"`).join(' -o ');
+  const pruneNoise =
+    `\\( -name node_modules -o -name .git -o -name .next ` +
+    `-o -name .open-next -o -name dist -o -name build -o -name target ` +
+    `-o -name coverage -o -name .cache -o -name .turbo \\) -prune -o`;
+  // BSD vs GNU stat format selection.
+  const statBsd = `stat -f "%N\\t%z\\t%m" "$0"`;
+  const statGnu = `stat -c "%n\\t%s\\t%Y" "$0"`;
+  const cmd =
+    `cd "${root}" 2>/dev/null && ` +
+    `if stat --version >/dev/null 2>&1; then STAT='${statGnu}'; else STAT='${statBsd}'; fi && ` +
+    `find . ${pruneNoise} \\( -type f \\( ${orPattern} \\) \\) -print0 2>/dev/null | ` +
+    `head -c 200000 | xargs -0 -n 1 -I '{}' sh -c "$STAT" '{}' 2>/dev/null | head -n ${MAX}`;
+
+  let stdout = '';
+  try {
+    const { runBashSession } = await import('../lib/legacy/bash-session');
+    const r = await runBashSession({
+      workspace: root,
+      command: cmd,
+      timeoutMs: 8_000,
+    });
+    stdout = r.stdout;
+  } catch {
+    return [];
   }
-  await walk('');
-  // Defensive: some Tauri/macOS combos have surfaced cases where the
-  // top-level readDir doesn't return entries beginning with '.' even
-  // though Tauri's docs say it should. The agent persists generations
-  // to .qcode/media/<date>/, so skipping that directory means the
-  // Media tab silently shows "no media" while files exist on disk.
-  // Force-walk .qcode if it exists and we haven't already collected
-  // anything from inside it via the main walk above.
-  const haveQcode = out.some((m) => m.relPath.startsWith('.qcode/'));
-  if (!haveQcode) {
-    try {
-      const qcodeExists = await exists(`${root}/.qcode`);
-      if (qcodeExists) {
-        await walk('.qcode');
-      }
-    } catch {
-      /* exists() may throw on permission or path errors — keep going */
-    }
+
+  const out: MediaItem[] = [];
+  for (const line of stdout.split('\n')) {
+    if (!line.trim()) continue;
+    const [pathRaw, sizeRaw, mtimeRaw] = line.split('\t');
+    if (!pathRaw) continue;
+    // Path is `./relative/from/root` because we cd'd in. Normalize.
+    const rel = pathRaw.replace(/^\.\//, '');
+    const name = rel.split('/').pop() ?? rel;
+    const kind = classifyMedia(name);
+    if (!kind) continue;
+    const sizeNum = sizeRaw ? Number(sizeRaw) : NaN;
+    const mtimeNum = mtimeRaw ? Number(mtimeRaw) : NaN;
+    out.push({
+      absPath: `${root}/${rel}`,
+      relPath: rel,
+      name,
+      kind,
+      size: Number.isFinite(sizeNum) ? sizeNum : null,
+      // BSD %m and GNU %Y both return seconds since epoch; convert
+      // to ms to match what `new Date(...).getTime()` produced
+      // before so the "newest first" sort works the same.
+      mtime: Number.isFinite(mtimeNum) ? mtimeNum * 1000 : null,
+      isGenerated: rel.startsWith('.qcode/media/'),
+      origin: 'local',
+    });
   }
   return out;
 }

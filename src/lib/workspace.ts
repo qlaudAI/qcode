@@ -460,7 +460,37 @@ export async function readDir(path: string): Promise<FileNode[]> {
   const matcher = ws && path.startsWith(ws.path) ? await getMatcher(ws.path) : null;
   try {
     const { readDir: fsReadDir } = await import('@tauri-apps/plugin-fs');
-    const entries = await fsReadDir(path);
+    let entries = await fsReadDir(path);
+    // Tauri 2's plugin-fs has surfaced cases on macOS where readDir
+    // silently omits entries beginning with '.' (the same way `ls`
+    // without `-a` does). Detect and fix: if NO dotted entry shows
+    // up but the actual fs has them (we can verify with `ls -A`),
+    // shell out and merge in what we missed. Only fires when the
+    // Tauri call returned ≥1 entry but no dotfiles — preserves the
+    // fast path for normal cases.
+    const sawDotted = entries.some((e) => e.name.startsWith('.'));
+    if (entries.length > 0 && !sawDotted) {
+      const dotted = await listHiddenEntries(path);
+      if (dotted.length > 0) {
+        const seen = new Set(entries.map((e) => e.name));
+        // DirEntry from plugin-fs has isFile + isSymlink alongside
+        // isDirectory. We only need isDirectory downstream; cast
+        // the synthetic shapes to fill in the unused fields.
+        type DE = (typeof entries)[number];
+        for (const e of dotted) {
+          if (seen.has(e.name)) continue;
+          entries = [
+            ...entries,
+            {
+              name: e.name,
+              isDirectory: e.isDirectory,
+              isFile: !e.isDirectory,
+              isSymlink: false,
+            } as DE,
+          ];
+        }
+      }
+    }
     return entries
       .map((e) => ({
         name: e.name,
@@ -478,6 +508,41 @@ export async function readDir(path: string): Promise<FileNode[]> {
         if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
         return a.name.localeCompare(b.name, 'en');
       });
+  } catch {
+    return [];
+  }
+}
+
+/** Shell out to `ls -A` to enumerate hidden entries that Tauri's
+ *  readDir may have silently dropped on macOS. Returns the same
+ *  shape readDir's entries use (name + isDirectory). Each entry's
+ *  isDirectory is determined via a tiny `[ -d ]` check — slower
+ *  than getting it from one readDir call, but only fires for the
+ *  dotted-entries fallback so the cost is bounded.
+ *
+ *  -A vs -a: -A skips '.' and '..' (the self + parent refs);
+ *  exactly the dotfiles we want without manual filtering. */
+async function listHiddenEntries(
+  path: string,
+): Promise<Array<{ name: string; isDirectory: boolean }>> {
+  try {
+    const { runBashSession } = await import('./legacy/bash-session');
+    // For each dotted entry, emit "name\tD" or "name\tF". Single
+    // bash call so we don't pay N forks for N hidden entries.
+    const cmd = `cd "${path}" 2>/dev/null && ls -A 2>/dev/null | while IFS= read -r f; do if [ -d "$f" ]; then printf "%s\\tD\\n" "$f"; else printf "%s\\tF\\n" "$f"; fi; done`;
+    const r = await runBashSession({
+      workspace: path,
+      command: cmd,
+      timeoutMs: 3_000,
+    });
+    const out: Array<{ name: string; isDirectory: boolean }> = [];
+    for (const line of r.stdout.split('\n')) {
+      if (!line) continue;
+      const [name, kind] = line.split('\t');
+      if (!name || !name.startsWith('.')) continue;
+      out.push({ name, isDirectory: kind === 'D' });
+    }
+    return out;
   } catch {
     return [];
   }
