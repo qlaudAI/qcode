@@ -218,6 +218,12 @@ export function ChatSurface({
   const [compaction, setCompaction] = useState<CompactionInfo | null>(null);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  // While busy=true, a second Enter from the user stashes the
+  // message here instead of bailing. When busy flips back to false
+  // (turn landed or errored), an effect fires the queued send. Lets
+  // the user keep typing the next thought without waiting for the
+  // current turn to finish — same UX as Claude CLI's mid-run input.
+  const [queued, setQueued] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attached, setAttached] = useState<string[]>([]);
   const [images, setImages] = useState<AttachedImage[]>([]);
@@ -508,7 +514,12 @@ export function ChatSurface({
     )
       return;
     if (busy) return;
-    setInput('');
+    // Clear input only when this is the live-typed path (text ===
+    // current input). The queued-fire path (busy lifted, queued
+    // dispatch) passes a snapshot from `queued`; meanwhile the user
+    // may have already started typing the NEXT message into the
+    // textarea — wiping it would destroy what they're composing.
+    if (input === text) setInput('');
     setError(null);
 
     // Snapshot exactly what the user is sending so the inline error
@@ -927,7 +938,46 @@ export function ChatSurface({
     abortRef.current?.abort();
     rejectAllApprovals();
     setBusy(false);
+    // Stop is also "abandon what I had planned" — drop any queued
+    // follow-up so the busy-flip effect doesn't auto-fire it.
+    setQueued(null);
   }
+
+  /** Composer entry point. While busy, stashes the message into
+   *  `queued` instead of bailing — the busy-flip effect below picks
+   *  it up the moment the current turn lands. Drops empty/no-attach
+   *  sends so a stray Enter doesn't queue an empty turn. */
+  function sendOrQueue(text: string) {
+    const trimmed = text.trim();
+    if (busy) {
+      // Nothing to queue if there's no actual content. Attachments
+      // are intentionally NOT carried into the queue snapshot — they
+      // travel with the active textarea state and will be picked up
+      // by send() when the queued fire happens (any attachments the
+      // user added while busy are still in `attached/images/...`).
+      if (!trimmed) return;
+      setQueued(trimmed);
+      setInput('');
+      return;
+    }
+    void send(text);
+  }
+
+  // Busy-flip dispatcher. When the current turn lands (busy true →
+  // false) and there's a queued message, fire it. Wrapped in a
+  // microtask via the dependency-driven effect — React has already
+  // flushed state by the time this runs.
+  useEffect(() => {
+    if (busy) return;
+    if (!queued) return;
+    const text = queued;
+    setQueued(null);
+    void send(text);
+    // We deliberately don't depend on `send` (it captures fresh
+    // state on every render and we'd loop). Reading the latest send
+    // via closure is the standard React pattern for this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, queued]);
 
   const empty = blocks.length === 0;
 
@@ -1104,9 +1154,11 @@ export function ChatSurface({
         mode={mode}
         // Context usage indicator deliberately removed — see the
         // chip retirement note above the formatTokens helper.
-        onSend={send}
+        onSend={sendOrQueue}
         onStop={stop}
         busy={busy}
+        queued={queued}
+        onCancelQueue={() => setQueued(null)}
         attached={attached}
         images={images}
         files={files}
@@ -3103,6 +3155,8 @@ function Composer({
   onSend,
   onStop,
   busy,
+  queued,
+  onCancelQueue,
   attached,
   images,
   documents,
@@ -3131,6 +3185,12 @@ function Composer({
   onSend: (v: string) => void;
   onStop: () => void;
   busy: boolean;
+  /** A message the user committed (Enter) while the previous turn
+   *  was still running. Renders as a chip above the textarea so the
+   *  user can see what'll auto-fire when the current turn lands. */
+  queued?: string | null;
+  /** Drop the queued message — the × on the queued chip. */
+  onCancelQueue?: () => void;
   attached: string[];
   images: AttachedImage[];
   documents: AttachedDocument[];
@@ -3395,15 +3455,48 @@ function Composer({
                 ))}
               </div>
             )}
+            {queued && (
+              <div className="flex items-center gap-2 border-b border-border/40 bg-amber-500/5 px-3 py-1.5">
+                <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
+                  Queued
+                </span>
+                <span
+                  className="min-w-0 flex-1 truncate text-[11.5px] text-foreground/85"
+                  title={queued}
+                >
+                  {queued}
+                </span>
+                <span className="hidden text-[10.5px] text-muted-foreground sm:inline">
+                  Sends when current turn lands
+                </span>
+                <button
+                  type="button"
+                  onClick={onCancelQueue}
+                  className="grid h-4 w-4 place-items-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                  aria-label="Cancel queued message"
+                  title="Cancel queued message"
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </div>
+            )}
             <textarea
               value={value}
               onChange={onTextChange}
               onKeyDown={onKeyDown}
               onPaste={onPaste}
               onFocus={onLoadFiles}
-              placeholder="Ask qcode about your code… type @ to attach a file"
+              placeholder={
+                busy
+                  ? 'Type a follow-up — Enter queues it for when the current turn lands'
+                  : 'Ask qcode about your code… type @ to attach a file'
+              }
               rows={2}
-              disabled={busy}
+              // Stays enabled while busy: pressing Enter queues the
+              // message into the parent's `queued` state and fires
+              // it as soon as the current turn completes. Same UX
+              // as Claude CLI's mid-run input handling.
               // text-base (16px) on mobile prevents iOS Safari from
               // auto-zooming the page on focus — Safari only zooms
               // when the input's font-size is < 16px. text-sm
