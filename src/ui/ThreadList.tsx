@@ -3,6 +3,7 @@ import { MessageSquare, Pin, PinOff, Trash2 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 
 import { cn } from '../lib/cn';
+import { useInFlightThreads } from '../lib/in-flight';
 import { prefetchThreadMessages } from '../lib/queries';
 import type { ThreadSummary } from '../lib/threads';
 
@@ -27,6 +28,10 @@ export function ThreadList({
    *  thread. Null/undefined entries fall back to title-only. */
   snippetByThread?: Map<string, string> | null;
 }) {
+  // Reactive set of threads currently mid-turn — bumps whenever a
+  // turn starts/lands so each row's "running" pulse dot turns on
+  // and off in real time even when it isn't the active thread.
+  const inFlight = useInFlightThreads();
   if (threads.length === 0) {
     return (
       <p className="px-3 py-2 text-xs leading-relaxed text-muted-foreground">
@@ -53,6 +58,7 @@ export function ThreadList({
             thread={t}
             snippet={snippetByThread?.get(t.id) ?? null}
             active={t.id === currentId}
+            running={inFlight.has(t.id)}
             onPick={() => onPick(t.id)}
             onDelete={() => onDelete(t.id)}
             onTogglePin={onTogglePin ? () => onTogglePin(t.id) : undefined}
@@ -74,6 +80,7 @@ function Row({
   thread,
   snippet,
   active,
+  running,
   onPick,
   onDelete,
   onTogglePin,
@@ -82,6 +89,11 @@ function Row({
   thread: ThreadSummary;
   snippet: string | null;
   active: boolean;
+  /** This thread has a turn running in the background — show a
+   *  pulsing dot so the user knows it's still working even when
+   *  they've switched to a different thread. Driven by the
+   *  reactive useInFlightThreads() set in the parent. */
+  running: boolean;
   onPick: () => void;
   onDelete: () => void;
   onTogglePin?: () => void;
@@ -171,7 +183,22 @@ function Row({
        *  the row is pinned), reveal pin + trash actions. The
        *  timestamp fades out under the actions so the row width
        *  doesn't jitter as state changes. */}
-      <div className="relative flex shrink-0 items-center">
+      <div className="relative flex shrink-0 items-center gap-1.5">
+        {/* Background-running indicator — pulsing primary dot when
+         *  this thread has a turn streaming while the user is
+         *  elsewhere. Stays visible even while the action buttons
+         *  reveal on hover, because "is this thread working?" is
+         *  more important than the timestamp. */}
+        {running && (
+          <span
+            className="grid h-3 w-3 place-items-center"
+            title="Working in the background"
+            aria-label="Running"
+          >
+            <span className="absolute h-3 w-3 animate-ping rounded-full bg-primary/60" />
+            <span className="relative h-1.5 w-1.5 rounded-full bg-primary" />
+          </span>
+        )}
         <span
           className={cn(
             'pointer-events-none block text-[10px] tabular-nums text-muted-foreground/70 transition-opacity',

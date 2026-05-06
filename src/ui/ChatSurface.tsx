@@ -68,6 +68,11 @@ import {
   isInFlight,
   markInFlight,
 } from '../lib/in-flight';
+import {
+  clearBlocksSnapshot,
+  loadBlocksSnapshot,
+  saveBlocksSnapshot,
+} from '../lib/blocks-snapshot';
 
 // Each "block" rendered in the chat is the smallest UI unit. The
 // agent loop emits a stream of events that `handleEvent` translates
@@ -359,13 +364,22 @@ export function ChatSurface({
     // onEvent runId guard, and the live stream silently disappears
     // (user has to refresh to see the canonical history).
     if (prev && prev !== threadId && busy) {
+      // Snapshot the live blocks BEFORE we bump runId / setBusy.
+      // The agent keeps running server-side via waitUntil; what we
+      // need to preserve here is everything the user already saw
+      // on this thread (tool cards mid-execution, partial assistant
+      // text, approval cards, usage pills, etc.) so that when they
+      // switch back the screen restores to what they remember
+      // instead of resetting to "just the user message" while
+      // polling slowly fills in the persisted final turn.
+      saveBlocksSnapshot(prev, blocks as unknown[]);
       activeRunIdRef.current += 1;
       rejectAllApprovals();
       setBusy(false);
       void invalidateThreadMessages(prev);
       if (lastLoadedRef.current === prev) lastLoadedRef.current = null;
     }
-  }, [threadId, busy]);
+  }, [threadId, busy, blocks]);
 
   useEffect(() => {
     if (busy) return;
@@ -373,6 +387,25 @@ export function ChatSurface({
       setBlocks([]);
       lastLoadedRef.current = null;
       return;
+    }
+
+    // Snapshot-first rehydrate: when the user lands on a thread
+    // that's still in-flight (a turn they kicked off and walked
+    // away from), restore the live blocks they saw before they
+    // left. Without this, the user sees a stripped-down "just the
+    // user message" view while polling slowly catches up — every
+    // tool card, partial assistant text fragment, and approval
+    // status visible at switch-away time gets lost. The snapshot
+    // is preserved until clearBlocksSnapshot fires (in the
+    // `finally` of send() when the run resolves on this surface,
+    // OR when the polling loop sees a fresh assistant turn land).
+    if (lastLoadedRef.current !== threadId && isInFlight(threadId)) {
+      const snapshot = loadBlocksSnapshot(threadId);
+      if (snapshot && snapshot.length > 0) {
+        setBlocks(snapshot as RenderBlock[]);
+        lastLoadedRef.current = threadId;
+        return;
+      }
     }
 
     // Engine Mode rehydrate. When engine === 'claude-code' the
@@ -932,6 +965,11 @@ export function ChatSurface({
       // normally, clear it.
       if (runId === activeRunIdRef.current && lastSendThreadRef.current) {
         clearInFlight(lastSendThreadRef.current);
+        // Run completed cleanly on this surface — the live blocks
+        // ARE the canonical record. Drop the snapshot so a future
+        // switch-back doesn't restore stale state on top of the
+        // (now-current) live state.
+        clearBlocksSnapshot(lastSendThreadRef.current);
       }
       setBusy(false);
       abortRef.current = null;
@@ -954,6 +992,14 @@ export function ChatSurface({
     // Stop is also "abandon what I had planned" — drop any queued
     // follow-up so the busy-flip effect doesn't auto-fire it.
     setQueued(null);
+    // Drop any background snapshot for this thread — explicit
+    // Stop means the user is done with this run, not just
+    // navigating away. clearInFlight is also called by the polling
+    // loop's onTurnLanded path; tidying both here for safety.
+    if (lastSendThreadRef.current) {
+      clearInFlight(lastSendThreadRef.current);
+      clearBlocksSnapshot(lastSendThreadRef.current);
+    }
   }
 
   /** Composer entry point. While busy, stashes the message into
