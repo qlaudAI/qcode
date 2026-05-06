@@ -613,6 +613,45 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
     setTimeout(() => setLoadedUrl(current), 0);
   }
 
+  // Two macOS-specific footguns when loading dev URLs in the
+  // WebView, both surfacing as "wrong page in preview":
+  //
+  //   1. `localhost` resolves to `::1` (IPv6 loopback) on macOS
+  //      by default. Vite + most dev servers bind to `127.0.0.1`
+  //      (IPv4) only — so loading `http://localhost:5173/` either
+  //      fails or hits a STALE process from a prior session that
+  //      had bound IPv6. Forcing 127.0.0.1 sidesteps the entire
+  //      AAAA-vs-A resolution path.
+  //
+  //   2. WebView caches by origin, and `localhost` and `127.0.0.1`
+  //      are different origins. A cached page for one stays valid
+  //      across server restarts that change the underlying content
+  //      at the same port. Adding a per-load cache-buster query
+  //      param forces a fresh fetch every time the iframe loads.
+  //
+  // Normalize for iframe loading only — keep the user's typed
+  // URL display intact so they see what they typed in the URL bar.
+  // Vite + Next + every dev server we test ignore unknown query
+  // params, so `?_qcode=<ts>` is safe. */
+  const iframeSrc = useMemo(() => {
+    if (!loadedUrl) return '';
+    let normalized = loadedUrl;
+    try {
+      const parsed = new URL(loadedUrl);
+      if (parsed.hostname === 'localhost') {
+        parsed.hostname = '127.0.0.1';
+      }
+      // Cache-bust on every (re)load so a stale cached page from a
+      // prior dev-server instance can't shadow the current content.
+      // Stripped on display in the URL input — this is iframe-only.
+      parsed.searchParams.set('_qcode', String(Date.now()));
+      normalized = parsed.toString();
+    } catch {
+      // Not a parseable URL — fall through with the raw value.
+    }
+    return normalized;
+  }, [loadedUrl]);
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
@@ -674,7 +713,7 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
       {loadedUrl ? (
         <iframe
           ref={iframeRef}
-          src={loadedUrl}
+          src={iframeSrc}
           className="min-h-0 w-full flex-1 border-0 bg-white"
           // Allow same-origin so cookies/storage work for localhost
           // dev. Don't allow scripts to escape the frame (default
