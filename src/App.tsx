@@ -860,12 +860,6 @@ export function App() {
               const w = await tryOpenFolder();
               if (w) setWorkspace(w);
             }}
-            qcodeMe={qcodeMeQuery.data ?? null}
-            // Chip click → open the Usage rail so the user lands on
-            // the full per-tier breakdown / day-week-month view, not
-            // the generic settings drawer. The Usage panel itself
-            // links out to the dashboard for the heavy case.
-            onOpenBilling={() => setRightRailView('usage')}
             rightRailView={rightRailView}
             onCloseRightRail={() => setRightRailView(null)}
             workspacePath={workspace?.path}
@@ -1065,6 +1059,22 @@ function Titlebar({
 // the user-facing action of the old design and has been replaced
 // with the billing redirect. Parent's existing balance polling
 // (turn-completion invalidation) keeps the plan tier fresh.
+// SpendBar — single horizontal usage bar in the title bar.
+//
+// Replaces the previous tier-bucketed plan badge (alpha.152's chip
+// + alpha.154's eight bars) with the credit-style accounting model:
+// one number, "$X used of $Y this period." Color-state machine
+// drives visual escalation so the user sees their budget running
+// out without having to read.
+//
+//   < 70%    white / muted   (informational only)
+//   70-90%   amber           (passive warning)
+//   90-99%   red             (running low)
+//   >= 100%  black + Upgrade (hard-stop until upgrade or wallet topup)
+//
+// Click anywhere on the bar opens billing in the OS browser. The
+// in-app Usage tab (right rail) shows the per-model breakdown for
+// users who want detail; this bar is the always-visible glanceable.
 function SpendBar({
   profile,
   qcodeMe,
@@ -1075,36 +1085,88 @@ function SpendBar({
 }) {
   if (!profile) return null;
 
-  // Compute label + accent from tier when available, else fall back
-  // to the generic Billing affordance.
-  const tier = qcodeMe?.plan.tier;
-  const label = qcodeMe?.plan.benefits.displayName ?? 'Billing';
-  const accent =
-    tier === 'pro'
-      ? 'border-primary/40 bg-primary/5 text-primary hover:border-primary/60'
-      : tier === 'power'
-        ? 'border-amber-500/40 bg-amber-500/5 text-amber-700 hover:border-amber-500/60'
-        : 'border-border/60 text-foreground/80 hover:border-foreground/30';
-
-  function openBilling() {
-    void openExternal('https://qlaud.ai/billing');
+  // Pre-auth or legacy gateway — fall back to a plain "Billing"
+  // affordance so nothing breaks during the credit-model rollout.
+  if (!qcodeMe) {
+    return (
+      <button
+        onClick={() => openExternal('https://qlaud.ai/billing')}
+        className="flex items-center gap-1.5 rounded border border-border/60 bg-background/70 px-2 py-1 text-[11px] font-medium text-foreground/80 transition-colors hover:border-foreground/30"
+        title="Open billing"
+      >
+        <Sparkles className="h-3 w-3" />
+        <span>Billing</span>
+      </button>
+    );
   }
+
+  const planLabel = qcodeMe.plan.benefits.displayName;
+  const used = qcodeMe.usage.used_usd;
+  const budget = qcodeMe.usage.budget_usd;
+  const percent = qcodeMe.usage.percent;
+
+  // Color-state machine. Background tints the track; foreground
+  // tints the fill bar. The exhausted state inverts to a high-
+  // contrast black/white pair so it reads as "stopped" not just
+  // "very full red."
+  let trackClass: string;
+  let fillClass: string;
+  let textClass: string;
+  let borderClass: string;
+  let showUpgrade = false;
+  if (percent >= 100) {
+    trackClass = 'bg-foreground/10';
+    fillClass = 'bg-foreground';
+    textClass = 'text-foreground';
+    borderClass = 'border-foreground/40';
+    showUpgrade = true;
+  } else if (percent >= 90) {
+    trackClass = 'bg-rose-500/10';
+    fillClass = 'bg-rose-500';
+    textClass = 'text-rose-700 dark:text-rose-400';
+    borderClass = 'border-rose-500/40';
+  } else if (percent >= 70) {
+    trackClass = 'bg-amber-500/10';
+    fillClass = 'bg-amber-500';
+    textClass = 'text-amber-700 dark:text-amber-400';
+    borderClass = 'border-amber-500/40';
+  } else {
+    trackClass = 'bg-foreground/[0.06]';
+    fillClass = 'bg-foreground/40';
+    textClass = 'text-foreground/85';
+    borderClass = 'border-border/60';
+  }
+
+  const tooltip = `${planLabel}: $${used.toFixed(2)} of $${budget.toFixed(2)} used this period${
+    qcodeMe.plan.period_resets_at
+      ? ` · resets ${new Date(qcodeMe.plan.period_resets_at).toLocaleDateString()}`
+      : ''
+  }`;
 
   return (
     <button
-      onClick={openBilling}
-      className={
-        'flex items-center gap-1.5 rounded border bg-background/70 px-2 py-1 text-[11px] font-medium transition-colors ' +
-        accent
-      }
-      title={
-        tier
-          ? `${label} plan — open billing`
-          : 'Open billing'
-      }
+      onClick={() => openExternal('https://qlaud.ai/billing')}
+      className={`flex items-center gap-2 rounded border bg-background/70 px-2 py-1 text-[11px] font-medium transition-colors hover:bg-background ${borderClass} ${textClass}`}
+      title={tooltip}
     >
-      <Sparkles className="h-3 w-3" />
-      <span>{label}</span>
+      <span className="font-semibold">{planLabel}</span>
+      <span className="hidden tabular-nums text-foreground/70 sm:inline">
+        ${used.toFixed(2)} / ${budget.toFixed(2)}
+      </span>
+      <span
+        className={`h-1.5 w-20 overflow-hidden rounded-full ${trackClass}`}
+        aria-hidden
+      >
+        <span
+          className={`block h-full transition-all ${fillClass}`}
+          style={{ width: `${Math.min(100, percent)}%` }}
+        />
+      </span>
+      {showUpgrade && (
+        <span className="text-[10.5px] underline underline-offset-2">
+          Upgrade
+        </span>
+      )}
     </button>
   );
 }

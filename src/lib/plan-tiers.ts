@@ -78,22 +78,18 @@ export function tierFor(modelSlug: string): ModelTier {
 }
 
 /** Returns true if the user's current plan blocks this model
- *  entirely (limit === 0). Source of truth: qcodeMe.today.tiers
- *  which is computed server-side from LIMITS. We just look up the
- *  model's tier here and check if that tier's limit is 0. */
+ *  entirely. With the credit-model rewrite, NO model is gated by
+ *  plan tier — every plan covers every model, the only ceiling is
+ *  the period-to-date $-budget. So this always returns false now.
+ *
+ *  Kept as a function (rather than deleted) so the call sites stay
+ *  stable; future per-feature gates (e.g. "Power only: priority
+ *  routing") can plug in without touching the callers. */
 export function isModelGatedForPlan(
-  modelSlug: string,
-  qcodeMe: QcodeMe | null,
+  _modelSlug: string,
+  _qcodeMe: QcodeMe | null,
 ): boolean {
-  // No plan info loaded yet (or legacy PAYG user) — assume nothing
-  // is gated. The server still enforces; this is just UI hinting.
-  if (!qcodeMe) return false;
-  const tier = tierFor(modelSlug);
-  const tierEntry = qcodeMe.today.tiers.find((t) => t.tier === tier);
-  if (!tierEntry) return false;
-  // limit === 0 means tier_blocked — model isn't available on this
-  // plan at all (e.g. premium on Free).
-  return tierEntry.limit === 0;
+  return false;
 }
 
 /** What plan does the user need to upgrade to in order to use this

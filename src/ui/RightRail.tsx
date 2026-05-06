@@ -1680,8 +1680,18 @@ function UsageView() {
 
   const buckets = computeBuckets(usage, range);
   const totals = computeRangeTotals(usage, range, me);
-  const tiers = me.today.tiers.filter((t) => t.limit !== null);
   const topModels = (usage?.by_model ?? []).slice(0, 5);
+
+  // Single-bar period status — replaces the eight-tier-bucket
+  // breakdown that used to live here. Pulls the same numbers the
+  // title-bar SpendBar reads, just rendered fuller for the Usage
+  // tab context: bigger bar, period-resets countdown, plan badge.
+  const planUsedUsd = me.usage.used_usd;
+  const planBudgetUsd = me.usage.budget_usd;
+  const planPercent = me.usage.percent;
+  const periodResetsText = me.plan.period_resets_at
+    ? formatResetCountdown(me.plan.period_resets_at)
+    : 'lifetime trial';
 
   return (
     <div className="flex h-full flex-col gap-3 px-3 py-3">
@@ -1700,10 +1710,38 @@ function UsageView() {
             Resets
           </div>
           <div className="text-[11px] tabular-nums text-foreground/85">
-            {formatResetCountdown()}
+            {periodResetsText}
           </div>
         </div>
       </div>
+
+      {/* Period-to-date usage bar — single number, single comparison.
+       *  Replaces the eight tier-buckets that used to live here. */}
+      <section>
+        <div className="mb-1.5 flex items-center justify-between text-[11px]">
+          <span className="font-medium text-foreground/85">
+            This period
+          </span>
+          <span className="tabular-nums text-muted-foreground">
+            ${planUsedUsd.toFixed(2)} / ${planBudgetUsd.toFixed(2)}
+          </span>
+        </div>
+        <div className="h-2 overflow-hidden rounded-full bg-muted">
+          <div
+            className={cn(
+              'h-full transition-all',
+              planPercent >= 100
+                ? 'bg-foreground'
+                : planPercent >= 90
+                  ? 'bg-rose-500'
+                  : planPercent >= 70
+                    ? 'bg-amber-500'
+                    : 'bg-primary',
+            )}
+            style={{ width: `${Math.min(100, planPercent)}%` }}
+          />
+        </div>
+      </section>
 
       {/* Day / Week / Month toggle */}
       <div className="flex rounded-md border border-border/60 bg-background/60 p-0.5 text-[11px]">
@@ -1735,18 +1773,6 @@ function UsageView() {
           value={totals.request_count.toLocaleString()}
         />
       </div>
-
-      {/* Per-tier limits — always today since limits are daily */}
-      {tiers.length > 0 && (
-        <section>
-          <SectionLabel>Today's tier usage</SectionLabel>
-          <div className="space-y-2">
-            {tiers.map((t) => (
-              <TierBar key={t.tier} tier={t} />
-            ))}
-          </div>
-        </section>
-      )}
 
       {/* Bucket chart */}
       {buckets.length > 0 && (
@@ -1806,41 +1832,10 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function TierBar({
-  tier,
-}: {
-  tier: import('../lib/qcode-me').QcodeMe['today']['tiers'][number];
-}) {
-  const limit = tier.limit ?? 0;
-  const used = tier.used;
-  const percent = tier.percent ?? 0;
-  const level =
-    percent >= 95 ? 'critical' : percent >= 80 ? 'warning' : 'ok';
-  const barColor =
-    level === 'critical'
-      ? 'bg-red-500'
-      : level === 'warning'
-        ? 'bg-amber-500'
-        : 'bg-primary';
-  return (
-    <div>
-      <div className="mb-0.5 flex items-center justify-between text-[11px]">
-        <span className="font-medium capitalize text-foreground/85">
-          {tier.tier}
-        </span>
-        <span className="tabular-nums text-muted-foreground">
-          {used.toLocaleString()}/{limit.toLocaleString()} {tier.unit}
-        </span>
-      </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-        <div
-          className={cn('h-full transition-all', barColor)}
-          style={{ width: `${Math.min(100, percent)}%` }}
-        />
-      </div>
-    </div>
-  );
-}
+// TierBar component retired — the credit-model rewrite replaces
+// the eight per-tier bars with a single period-to-date $-bar
+// rendered inline above. Component dropped wholesale; the inline
+// bar in UsageView is its replacement.
 
 function BucketChart({
   buckets,
@@ -1891,34 +1886,21 @@ function computeBuckets(
 function computeRangeTotals(
   usage: import('../lib/qcode-usage').QcodeUsage | null,
   range: UsageRange,
-  me: import('../lib/qcode-me').QcodeMe,
+  _me: import('../lib/qcode-me').QcodeMe,
 ): { cost_micros: number; request_count: number } {
-  // Day = today only — sum from /v1/qcode/me's tier breakdown so the
-  // number matches what the chip in the composer shows. Doesn't go
-  // back to the by_day series because today's bucket may not be
-  // present yet on a fresh account.
+  if (!usage) return { cost_micros: 0, request_count: 0 };
   if (range === 'day') {
-    const today = me.today.tiers.reduce(
-      (acc, t) => acc + t.used,
-      0,
-    );
-    // Day spend isn't directly in /v1/qcode/me; fall back to today's
-    // bucket from /v1/qcode/usage if available.
     const todayUtc = Date.UTC(
       new Date().getUTCFullYear(),
       new Date().getUTCMonth(),
       new Date().getUTCDate(),
     );
-    const todayBucket = usage?.by_day.find((d) => d.day_ms === todayUtc);
+    const todayBucket = usage.by_day.find((d) => d.day_ms === todayUtc);
     return {
       cost_micros: todayBucket?.cost_micros ?? 0,
-      request_count: todayBucket?.request_count ?? today,
+      request_count: todayBucket?.request_count ?? 0,
     };
   }
-  if (!usage) return { cost_micros: 0, request_count: 0 };
-  // Week = sum of the most-recent week bucket
-  // Month = sum of the most-recent month bucket
-  // Both come from the same daily series.
   if (range === 'week') {
     const oneWeekAgo = Date.now() - 7 * 86_400_000;
     return usage.by_day
@@ -1952,18 +1934,16 @@ function rangeLabel(r: UsageRange): string {
   return r === 'day' ? 'Today' : r === 'week' ? 'This week' : 'This month';
 }
 
-function formatResetCountdown(): string {
-  // Plan limits reset at midnight UTC. Show H:MM remaining so the
-  // user knows when their daily cap rolls over.
-  const now = new Date();
-  const tomorrow = new Date(
-    Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate() + 1,
-    ),
-  );
-  const ms = tomorrow.getTime() - now.getTime();
+/** Format a "resets in X" countdown for the plan period anchor.
+ *  Days for >1d, hours for sub-day. The credit-model rewrite
+ *  retired the daily UTC midnight reset — periods now anchor to
+ *  Stripe's billing cycle, so the countdown is from the user's
+ *  actual renewal date passed in via /v1/qcode/me.plan.period_resets_at. */
+function formatResetCountdown(periodResetsAt: number): string {
+  const ms = periodResetsAt - Date.now();
+  if (ms <= 0) return 'now';
+  const days = Math.floor(ms / 86_400_000);
+  if (days >= 1) return `${days}d`;
   const hours = Math.floor(ms / 3_600_000);
   const minutes = Math.floor((ms % 3_600_000) / 60_000);
   if (hours === 0) return `${minutes}m`;

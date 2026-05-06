@@ -190,8 +190,6 @@ export function ChatSurface({
   workspaceName,
   workspacePath,
   onOpenFolder,
-  qcodeMe,
-  onOpenBilling,
   rightRailView,
   onCloseRightRail,
 }: {
@@ -218,17 +216,6 @@ export function ChatSurface({
   workspacePath?: string;
   hasWorkspace: boolean;
   onOpenFolder: () => void | Promise<void>;
-  /** Plan + per-tier daily-usage snapshot (from /v1/qcode/me).
-   *  Composer renders a usage chip from this so the user sees
-   *  "8/10 mid msg today" BEFORE they hit Send and get a 402.
-   *  Null = pre-auth, gateway predates the route, or fetch failed
-   *  — chip just doesn't render. */
-  qcodeMe?: import('../lib/qcode-me').QcodeMe | null;
-  /** Open the Settings drawer to a specific section. The usage
-   *  chip routes the user to the billing/plans pane on click so
-   *  they can see the full per-tier breakdown + upgrade in one
-   *  place. */
-  onOpenBilling?: () => void;
   /** Active right-rail view, or null when hidden. ChatSurface owns
    *  the `blocks` state so it renders the rail as a sibling. */
   rightRailView?: RightRailView | null;
@@ -1340,8 +1327,6 @@ export function ChatSurface({
         busyCount={busyCount}
         queued={queued}
         onCancelQueue={() => setQueued(null)}
-        usageStatus={deriveUsageStatus(qcodeMe)}
-        onOpenBilling={onOpenBilling}
         attached={attached}
         images={images}
         files={files}
@@ -2430,77 +2415,12 @@ const THINKING_QUIPS = [
 // "Working with files") because specific reads as competent and
 // generic reads as vague. Truncation caps long inputs so a giant
 // path or shell command doesn't overflow the bubble.
-// ─── Usage status (plan-tier daily quota) ─────────────────────────
-//
-// Picks the worst-off tier from /v1/qcode/me's per-tier breakdown so
-// the composer chip reflects the user's most-pressing limit. The
-// "worst" tier is the one with the highest percent-of-limit used.
-// Tiers without a configured limit (Power tier on most caps) are
-// skipped — they're effectively unlimited for the user, no chip
-// needed.
-//
-// The chip surfaces:
-//   - Free plan: ALWAYS, even at 0% (free users want the count
-//     visible so they can pace themselves).
-//   - Pro/Power: ONLY when percent >= 50% (avoids visual noise when
-//     the user has tons of headroom). Threshold tuned to give the
-//     user ~half a day's runway from first warning to lockout.
-//
-// Levels:
-//   ok       — < 50%   (only rendered for Free plan)
-//   moderate — 50-79%  (gray chip, informational)
-//   warning  — 80-94%  (amber chip, "approaching limit")
-//   critical — >= 95%  (red chip, "next send may fail")
-//
-// Click → opens Settings → billing pane so the user can see the
-// per-tier breakdown and upgrade in one place.
-export type UsageStatus = {
-  tier: string;
-  used: number;
-  limit: number;
-  unit: 'messages' | 'tokens' | 'minutes';
-  percent: number;
-  level: 'ok' | 'moderate' | 'warning' | 'critical';
-  planTier: 'free' | 'pro' | 'power';
-};
-
-function deriveUsageStatus(
-  qcodeMe: import('../lib/qcode-me').QcodeMe | null | undefined,
-): UsageStatus | null {
-  if (!qcodeMe) return null;
-  const tiers = qcodeMe.today.tiers.filter(
-    (t) => t.limit !== null && t.percent !== null,
-  );
-  if (tiers.length === 0) return null;
-  // Worst = highest percent. Tied tiers? We pick the first (stable
-  // sort would be ideal but for ~3 tiers max this is fine).
-  let worst = tiers[0];
-  if (!worst) return null;
-  for (const t of tiers) {
-    if ((t.percent ?? 0) > (worst.percent ?? 0)) worst = t;
-  }
-  const percent = worst.percent ?? 0;
-  let level: UsageStatus['level'];
-  if (percent >= 95) level = 'critical';
-  else if (percent >= 80) level = 'warning';
-  else if (percent >= 50) level = 'moderate';
-  else level = 'ok';
-
-  const planTier = qcodeMe.plan.tier;
-  // Hide chip when there's tons of headroom, EXCEPT for Free users
-  // who benefit from always seeing where they are in the budget.
-  if (level === 'ok' && planTier !== 'free') return null;
-
-  return {
-    tier: worst.tier,
-    used: worst.used,
-    limit: worst.limit ?? 0,
-    unit: worst.unit,
-    percent,
-    level,
-    planTier,
-  };
-}
+// Usage chip + deriveUsageStatus() retired in the credit-model
+// rewrite — the title-bar SpendBar is now the single source of
+// glanceable usage truth, replacing the per-tier "47/200 mid"
+// chip that lived here through alpha.152-alpha.165. The composer
+// stays clean of plan information; users get one bar at the top
+// of the app, click for the full breakdown.
 
 function deriveCurrentActivity(blocks: RenderBlock[]): string | null {
   // Walk from the end — the most recent running tool wins. Tools
@@ -3402,82 +3322,6 @@ function Kbd({
 
 // ─── Usage chip ────────────────────────────────────────────────────
 //
-// Small click-to-billing pill rendered next to the model label in
-// the composer footer. Color follows usageStatus.level so the user
-// catches the visual cue ("hey, my chip turned amber") before the
-// next send burns through the last of their quota and they get a
-// 402. Tooltip is verbose ("47/200 mid messages today · Pro plan
-// resets at midnight UTC") so the hover answers any "where's the
-// rest of my budget?" question without a click.
-function UsageChip({
-  status,
-  onClick,
-}: {
-  status: UsageStatus;
-  onClick?: () => void;
-}) {
-  // Tier label expansion. The /v1/qcode/me payload uses internal
-  // ModelTier slugs ("cheap" / "mid" / "pro"); humans read better
-  // with the qlaud-marketing names.
-  const tierLabel =
-    status.tier === 'cheap'
-      ? 'cheap'
-      : status.tier === 'mid'
-        ? 'mid'
-        : status.tier === 'pro'
-          ? 'pro'
-          : status.tier;
-  const usedFmt = status.used.toLocaleString();
-  const limitFmt = status.limit.toLocaleString();
-  const planLabel =
-    status.planTier === 'free'
-      ? 'Free plan'
-      : status.planTier === 'pro'
-        ? 'Pro plan'
-        : 'Power plan';
-  const tooltip = `${usedFmt}/${limitFmt} ${tierLabel}-tier ${status.unit} today · ${planLabel} · resets at midnight UTC. Click for full breakdown.`;
-
-  const colorClasses =
-    status.level === 'critical'
-      ? 'border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-400'
-      : status.level === 'warning'
-        ? 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400'
-        : status.level === 'moderate'
-          ? 'border-border/60 bg-background/60 text-foreground/85'
-          : 'border-border/60 bg-background/60 text-muted-foreground';
-
-  // Pulse dot on critical to draw attention. Anything below stays
-  // calm — the chip itself is the signal, no need for animation.
-  const dotClasses =
-    status.level === 'critical'
-      ? 'bg-red-500 animate-pulse'
-      : status.level === 'warning'
-        ? 'bg-amber-500'
-        : 'bg-foreground/30';
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10.5px] font-medium tabular-nums transition-colors hover:brightness-110',
-        colorClasses,
-      )}
-      title={tooltip}
-      aria-label={tooltip}
-    >
-      <span className={cn('h-1.5 w-1.5 rounded-full', dotClasses)} />
-      <span className="hidden sm:inline">
-        {usedFmt}/{limitFmt} {tierLabel}
-      </span>
-      <span className="sm:hidden">
-        {/* Mobile: just the percent — chip space is tight. */}
-        {Math.round(status.percent)}%
-      </span>
-    </button>
-  );
-}
-
 // ─── Composer ──────────────────────────────────────────────────────
 
 function Composer({
@@ -3493,8 +3337,6 @@ function Composer({
   busyCount,
   queued,
   onCancelQueue,
-  usageStatus,
-  onOpenBilling,
   attached,
   images,
   documents,
@@ -3534,14 +3376,6 @@ function Composer({
   queued?: string | null;
   /** Drop the queued message — the × on the queued chip. */
   onCancelQueue?: () => void;
-  /** Per-tier daily-quota status from /v1/qcode/me, picked down to
-   *  the most-pressing tier. Null when user is well within all
-   *  limits (or pre-auth / route missing). Renders as a small
-   *  click-to-billing chip in the composer footer. */
-  usageStatus?: UsageStatus | null;
-  /** Click handler for the usage chip — opens Settings → billing
-   *  so the user can see full per-tier breakdown + upgrade. */
-  onOpenBilling?: () => void;
   attached: string[];
   images: AttachedImage[];
   documents: AttachedDocument[];
@@ -3936,15 +3770,10 @@ function Composer({
                     >
                       {modelLabel}
                     </span>
-                    {usageStatus && (
-                      <UsageChip
-                        status={usageStatus}
-                        onClick={onOpenBilling}
-                      />
-                    )}
-                    {/* Context-usage chip retired — Claude Code +
-                     *  qlaud auto-compaction handle context internally;
-                     *  our pre-compaction estimate was misleading. */}
+                    {/* Plan-tier chip + context-usage chip both
+                     *  retired. The title-bar SpendBar is now the
+                     *  single source of usage truth (one bar, color-
+                     *  state machine, click for breakdown). */}
                     <span className="hidden text-[10.5px] text-muted-foreground sm:inline">
                       ⏎ to send · @ files
                     </span>

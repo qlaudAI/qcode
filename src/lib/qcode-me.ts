@@ -1,11 +1,12 @@
-// /v1/qcode/me — plan tier + today's per-tier usage + wallet balance,
-// in a single bearer-authed read. Used by the title-bar SpendBar +
-// (future) Settings plan panel to render the right UI for the user's
-// current plan.
+// /v1/qcode/me — plan tier + period-to-date usage + wallet balance,
+// in a single bearer-authed read.
 //
-// Mirrors lib/billing.ts (fetchBalance) — same fetch hardening, same
-// graceful-fail. Returns null when the gateway doesn't have the
-// route deployed yet so older clients keep working.
+// Subscription pricing on the surface, credit-style accounting under
+// the hood. The user just sees "Pro $17/mo, used $X this period."
+// One number per plan, one comparison, no per-tier buckets.
+//
+// Returns null when the gateway 404s the route (older edge worker
+// not yet upgraded) so the client degrades gracefully.
 
 import { getKey } from './auth';
 
@@ -17,9 +18,14 @@ export type QcodeMe = {
   user_id: string;
   plan: {
     tier: QcodePlanTier;
-    status: string;
-    renewed_at: number | null;
-    expires_at: number | null;
+    /** Start of the current billing period (ms epoch). Free's
+     *  trial starts at user.createdAt; Pro/Power at the last
+     *  Stripe invoice.paid renewal. */
+    period_starts_at: number;
+    /** End of the current billing period (ms epoch). Null for
+     *  Free (lifetime trial credit, no reset). For Pro/Power, the
+     *  next billing date; clients render countdown text. */
+    period_resets_at: number | null;
     has_active_subscription: boolean;
     benefits: {
       displayName: string;
@@ -29,16 +35,18 @@ export type QcodeMe = {
       bullets: string[];
     };
   };
-  today: {
-    day_utc: string;
-    tiers: Array<{
-      tier: string;
-      used: number;
-      limit: number | null;
-      unit: 'messages' | 'tokens' | 'minutes';
-      remaining: number | null;
-      percent: number | null;
-    }>;
+  /** Period-to-date usage. Single bar fuel — used_usd vs budget_usd
+   *  is the entire UI surface. Per-model breakdown is a separate
+   *  query against /v1/qcode/usage when the user opens the Usage tab. */
+  usage: {
+    used_usd: number;
+    budget_usd: number;
+    /** 0-100, one decimal. UI maps this to color states:
+     *    < 70  white/muted
+     *    < 90  amber
+     *    < 100 red
+     *    >= 100 black + Upgrade CTA */
+    percent: number;
   };
   wallet: {
     balance_micros: number;
