@@ -69,21 +69,20 @@ VERIFYING RUNNING APPS — you do NOT have a built-in browser tool here. Use Pla
 DO NOT ask the user permission first ("Want me to do that?" is the wrong default). Just do it.
 
   # ─── ONE-TIME bootstrap (only if ~/.qcode/runtime/node_modules/playwright doesn't exist yet)
-  # qcode bundles bun as a Tauri sidecar but it's not on the bash
-  # subshell's PATH, so \`command -v bun\` returns false even when
-  # qcode itself is using bun. To avoid a slow npm fallback, install
-  # bun from the official curl script if it isn't already on PATH —
-  # ~10s one-time, persists at ~/.bun/bin for every future session
-  # AND every other tool the user runs.
+  # qcode bundles bun as a Tauri sidecar AND drops a symlink at
+  # ~/.qcode/runtime/bun on first launch — that runtime dir is at
+  # the front of PATH, so \`command -v bun\` should always succeed
+  # in this script. The curl install + npm fallbacks below are
+  # belt-and-suspenders for the rare cases where the symlink
+  # didn't get created (Windows w/o dev-mode, locked FS, etc).
   if [ ! -d "$HOME/.qcode/runtime/node_modules/playwright" ]; then
     if ! command -v bun >/dev/null 2>&1; then
+      # Fallback path: shim wasn't created, install bun system-wide.
+      # ~10s one-time, persists at ~/.bun/bin for every future tool.
       curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || true
+      export PATH="$HOME/.bun/bin:$PATH"
     fi
-    # Make bun discoverable for the rest of this command even if the
-    # installer just dropped it. ~/.bun/bin is the canonical install
-    # location on macOS + Linux; npm-global bun lands on PATH already.
-    export PATH="$HOME/.bun/bin:$PATH"
-    mkdir -p "$HOME/.qcode/runtime" && cd "$HOME/.qcode/runtime"
+    cd "$HOME/.qcode/runtime"
     if command -v bun >/dev/null 2>&1; then
       bun init -y >/dev/null 2>&1 || true
       bun add playwright >/dev/null
@@ -226,6 +225,93 @@ async function getLoginPath(): Promise<string> {
   }
   cachedLoginPath = FALLBACK_PATH;
   return FALLBACK_PATH;
+}
+
+/** Cached qcode-runtime dir (with the bun shim in place). Resolved
+ *  on first claude-code spawn; idempotent thereafter. */
+let cachedRuntimeDir: string | null = null;
+
+/** Make qcode's bundled bun visible to bash subshells.
+ *
+ *  Why this exists: Tauri sidecar binaries ship at platform-specific
+ *  paths with target-triple suffixes (e.g.
+ *  `Contents/MacOS/binaries/bun-aarch64-apple-darwin` on macOS). The
+ *  Tauri JS API (`Command.sidecar('binaries/bun', ...)`) knows how
+ *  to find them, but a bash subshell looking for `bun` on PATH does
+ *  NOT — neither the directory nor the suffixed name is visible to
+ *  any shell. So when an agent runs `bunx playwright install` from
+ *  a bash tool call, it fails with "bun: command not found" even
+ *  though qcode is shipping a perfectly good bun binary.
+ *
+ *  Fix: ask the bundled bun where it lives (via `process.execPath`
+ *  inside a one-liner), then drop a symlink at
+ *  `~/.qcode/runtime/bun` pointing at it. claude-code's spawn env
+ *  prepends `~/.qcode/runtime` to PATH so bash finds the symlink as
+ *  plain `bun`. Zero downloads, zero waiting — the binary is already
+ *  on disk, we just make it discoverable.
+ *
+ *  Idempotent: skips if the symlink already exists. Falls back
+ *  gracefully if the symlink can't be created (older Windows
+ *  without dev mode, locked FS, etc.) — the bootstrap script's
+ *  curl-install fallback still runs.
+ *
+ *  Returns the runtime dir to prepend to PATH, or null when we're
+ *  not in Tauri (web build) or the prep failed. */
+export async function prepareBunRuntime(): Promise<string | null> {
+  if (cachedRuntimeDir) return cachedRuntimeDir;
+  try {
+    const home = await getHome();
+    if (!home) return null;
+    const runtimeDir = `${home}/.qcode/runtime`;
+    const shimPath = `${runtimeDir}/bun`;
+
+    const { exists, mkdir } = await import('@tauri-apps/plugin-fs');
+    if (!(await exists(runtimeDir))) {
+      await mkdir(runtimeDir, { recursive: true });
+    }
+    if (await exists(shimPath)) {
+      // Already prepared in a previous session.
+      cachedRuntimeDir = runtimeDir;
+      return runtimeDir;
+    }
+
+    // Ask bundled bun for its own absolute path, then symlink.
+    // process.execPath is the binary that's currently running — for
+    // a Tauri sidecar that's the resolved per-platform path under
+    // Contents/MacOS/ (or wherever the OS unpacked it). Doing this
+    // via bun itself is platform-agnostic; we don't have to know
+    // the target triple or the bundle layout.
+    //
+    // The one-liner does the symlink in-process so we only spawn
+    // bun once: print path, create symlink to itself. Errors are
+    // swallowed — JSON.stringify(false) on failure tells the JS
+    // caller to fall back. fs.symlinkSync is the bun built-in.
+    const setupScript = [
+      'const fs = require("fs");',
+      'const path = require("path");',
+      'try {',
+      '  const dst = process.argv[2];',
+      '  const dir = path.dirname(dst);',
+      '  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });',
+      '  if (!fs.existsSync(dst)) fs.symlinkSync(process.execPath, dst);',
+      '  console.log("ok:" + process.execPath);',
+      '} catch (e) { console.log("err:" + (e && e.message || e)); }',
+    ].join(' ');
+    const out = await Command.sidecar('binaries/bun', [
+      '-e', setupScript, '--', shimPath,
+    ]).execute();
+    const stdout = (out.stdout || '').trim();
+    if (out.code !== 0 || !stdout.startsWith('ok:')) {
+      // Symlink failed (Windows w/o dev mode, locked FS, etc).
+      // Caller will skip the PATH prepend and the bootstrap script
+      // will fall back to curl-installing bun system-wide.
+      return null;
+    }
+    cachedRuntimeDir = runtimeDir;
+    return runtimeDir;
+  } catch {
+    return null;
+  }
 }
 
 /** Resolve the bundled claude CLI — bun sidecar + claude package
@@ -478,6 +564,18 @@ export async function runEngineClaudeCode(
   // necessary on macOS apps launched from Finder.
   const loginPath = await getLoginPath();
 
+  // Make qcode's bundled bun visible to bash. Returns the runtime
+  // dir to prepend to PATH, or null if prep failed (Windows w/o
+  // dev-mode symlinks, locked FS, etc) — in which case the agent's
+  // bootstrap script falls back to curl-installing bun. First call
+  // does the symlink (~5ms one-time); subsequent calls hit the
+  // module-level cache and return instantly.
+  const runtimeDir = await prepareBunRuntime();
+  // Prepend the runtime dir if we have one — putting it BEFORE
+  // loginPath ensures our bundled bun wins over any older
+  // user-installed bun on the user's system PATH.
+  const spawnPath = runtimeDir ? `${runtimeDir}:${loginPath}` : loginPath;
+
   // Resolve the bundled claude wrapper path. No user install needed —
   // qcode ships its own bun sidecar + claude code package.
   let claudeSpec: ClaudeSpawnSpec;
@@ -544,8 +642,10 @@ export async function runEngineClaudeCode(
       // PATH is the headline reason this env block exists at all.
       // Without it, Tauri's spawn inherits macOS launchd's minimal
       // PATH and `claude` (Homebrew / npm-global / bun-global) isn't
-      // findable. We pass the user's full login PATH instead.
-      PATH: loginPath,
+      // findable. We pass the user's full login PATH, prefixed with
+      // ~/.qcode/runtime when available so the bundled bun shim
+      // wins over anything else.
+      PATH: spawnPath,
       // Pass through HOME so claude's own config dir resolution
       // works (claude reads ~/.claude/ for credentials/sessions).
       // We resolve via Tauri's path API rather than process.env
