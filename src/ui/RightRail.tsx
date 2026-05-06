@@ -32,6 +32,12 @@ import { isTauri, openExternal } from '../lib/tauri';
 
 import { cn } from '../lib/cn';
 import { readWorkspaceDiff, type FileDiff } from '../lib/git-info';
+import { useQcodeMeQuery, useQcodeUsageQuery } from '../lib/queries';
+import {
+  bucketByDay,
+  bucketByMonth,
+  bucketByWeek,
+} from '../lib/qcode-usage';
 import { FileTree } from './FileTree';
 import type { ToolCallView } from './legacy/ToolCallCard';
 
@@ -42,7 +48,8 @@ export type RightRailView =
   | 'terminal'
   | 'preview'
   | 'diff'
-  | 'media';
+  | 'media'
+  | 'usage';
 
 // The render-block shape is mirrored from ChatSurface so the rail
 // can run as a leaf component without circular imports. We only
@@ -123,6 +130,7 @@ export function RightRail({
           {view === 'media' && (
             <MediaView workspacePath={workspacePath} threadId={threadId} />
           )}
+          {view === 'usage' && <UsageView />}
         </div>
       </aside>
     </>
@@ -1516,4 +1524,337 @@ function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+// ─── Usage view ───────────────────────────────────────────────────
+//
+// Centralized "what have I used" panel for qcode users. Shows:
+//   - Plan badge + reset countdown
+//   - Day / Week / Month toggle
+//   - Spend + request count for the selected window
+//   - Per-tier daily progress bars (always today, since limits are
+//     daily — week/month don't have per-tier limits to compare to)
+//   - Top models by spend
+//   - Bar chart of cost by bucket
+//
+// Pulls from /v1/qcode/me (today's tier breakdown, plan info) and
+// /v1/qcode/usage (30-day daily history for week/month rebucketing).
+// Both are React Query'd in App.tsx + queries.ts so the data is
+// already cached when the view mounts.
+type UsageRange = 'day' | 'week' | 'month';
+
+function UsageView() {
+  const [range, setRange] = useState<UsageRange>('day');
+  const meQ = useQcodeMeQuery(true);
+  const usageQ = useQcodeUsageQuery(30, true);
+
+  if (meQ.isLoading || usageQ.isLoading) {
+    return (
+      <div className="flex h-32 items-center justify-center text-[11px] text-muted-foreground">
+        <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+        Loading usage…
+      </div>
+    );
+  }
+  const me = meQ.data ?? null;
+  const usage = usageQ.data ?? null;
+
+  if (!me) {
+    return (
+      <div className="px-4 py-6 text-center text-[11px] text-muted-foreground">
+        Sign in to see your usage.
+      </div>
+    );
+  }
+
+  const buckets = computeBuckets(usage, range);
+  const totals = computeRangeTotals(usage, range, me);
+  const tiers = me.today.tiers.filter((t) => t.limit !== null);
+  const topModels = (usage?.by_model ?? []).slice(0, 5);
+
+  return (
+    <div className="flex h-full flex-col gap-3 px-3 py-3">
+      {/* Plan header */}
+      <div className="flex items-center justify-between rounded-md border border-border/40 bg-background/60 px-2.5 py-2">
+        <div>
+          <div className="text-[10.5px] uppercase tracking-wide text-muted-foreground">
+            Plan
+          </div>
+          <div className="text-[12.5px] font-semibold text-foreground">
+            {me.plan.benefits.displayName}
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Resets
+          </div>
+          <div className="text-[11px] tabular-nums text-foreground/85">
+            {formatResetCountdown()}
+          </div>
+        </div>
+      </div>
+
+      {/* Day / Week / Month toggle */}
+      <div className="flex rounded-md border border-border/60 bg-background/60 p-0.5 text-[11px]">
+        {(['day', 'week', 'month'] as const).map((r) => (
+          <button
+            key={r}
+            type="button"
+            onClick={() => setRange(r)}
+            className={cn(
+              'flex-1 rounded px-2 py-1 font-medium capitalize transition-colors',
+              range === r
+                ? 'bg-primary/15 text-primary'
+                : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {r}
+          </button>
+        ))}
+      </div>
+
+      {/* Headline totals for the selected range */}
+      <div className="grid grid-cols-2 gap-2">
+        <Stat
+          label={`${rangeLabel(range)} spend`}
+          value={`$${(totals.cost_micros / 1_000_000).toFixed(2)}`}
+        />
+        <Stat
+          label={`${rangeLabel(range)} requests`}
+          value={totals.request_count.toLocaleString()}
+        />
+      </div>
+
+      {/* Per-tier limits — always today since limits are daily */}
+      {tiers.length > 0 && (
+        <section>
+          <SectionLabel>Today's tier usage</SectionLabel>
+          <div className="space-y-2">
+            {tiers.map((t) => (
+              <TierBar key={t.tier} tier={t} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Bucket chart */}
+      {buckets.length > 0 && (
+        <section>
+          <SectionLabel>
+            Cost by{' '}
+            {range === 'day' ? 'day' : range === 'week' ? 'week' : 'month'}
+          </SectionLabel>
+          <BucketChart buckets={buckets} />
+        </section>
+      )}
+
+      {/* Top models */}
+      {topModels.length > 0 && (
+        <section>
+          <SectionLabel>Top models (last 30 days)</SectionLabel>
+          <div className="space-y-1">
+            {topModels.map((m) => (
+              <div
+                key={m.model_slug}
+                className="flex items-center justify-between text-[11px]"
+              >
+                <span className="truncate font-mono text-foreground/85">
+                  {m.model_slug}
+                </span>
+                <span className="shrink-0 tabular-nums text-muted-foreground">
+                  ${(m.cost_micros / 1_000_000).toFixed(2)} ·{' '}
+                  {m.request_count}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+      {children}
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-border/40 bg-background/60 px-2.5 py-2">
+      <div className="text-[10.5px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </div>
+      <div className="text-[14px] font-semibold tabular-nums text-foreground">
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function TierBar({
+  tier,
+}: {
+  tier: import('../lib/qcode-me').QcodeMe['today']['tiers'][number];
+}) {
+  const limit = tier.limit ?? 0;
+  const used = tier.used;
+  const percent = tier.percent ?? 0;
+  const level =
+    percent >= 95 ? 'critical' : percent >= 80 ? 'warning' : 'ok';
+  const barColor =
+    level === 'critical'
+      ? 'bg-red-500'
+      : level === 'warning'
+        ? 'bg-amber-500'
+        : 'bg-primary';
+  return (
+    <div>
+      <div className="mb-0.5 flex items-center justify-between text-[11px]">
+        <span className="font-medium capitalize text-foreground/85">
+          {tier.tier}
+        </span>
+        <span className="tabular-nums text-muted-foreground">
+          {used.toLocaleString()}/{limit.toLocaleString()} {tier.unit}
+        </span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn('h-full transition-all', barColor)}
+          style={{ width: `${Math.min(100, percent)}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function BucketChart({
+  buckets,
+}: {
+  buckets: import('../lib/qcode-usage').UsageBucket[];
+}) {
+  // Tiny bar chart. Max-cost in the window is the 100% reference;
+  // empty windows render as a single faint label row so the user
+  // knows there's no spend (rather than thinking the chart broke).
+  const max = Math.max(...buckets.map((b) => b.cost_micros), 1);
+  return (
+    <div className="space-y-1">
+      {buckets.map((b) => {
+        const pct = (b.cost_micros / max) * 100;
+        return (
+          <div key={b.start_ms} className="flex items-center gap-2 text-[10.5px]">
+            <span className="w-16 shrink-0 truncate text-muted-foreground">
+              {b.label}
+            </span>
+            <div className="relative h-3 flex-1 overflow-hidden rounded bg-muted/60">
+              <div
+                className="h-full bg-primary/70"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <span className="w-12 shrink-0 text-right tabular-nums text-foreground/85">
+              ${(b.cost_micros / 1_000_000).toFixed(2)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Bucket / range helpers ───────────────────────────────────────
+
+function computeBuckets(
+  usage: import('../lib/qcode-usage').QcodeUsage | null,
+  range: UsageRange,
+): import('../lib/qcode-usage').UsageBucket[] {
+  if (!usage) return [];
+  if (range === 'day') return bucketByDay(usage).slice(-14); // last 14 days fits the rail
+  if (range === 'week') return bucketByWeek(usage);
+  return bucketByMonth(usage);
+}
+
+function computeRangeTotals(
+  usage: import('../lib/qcode-usage').QcodeUsage | null,
+  range: UsageRange,
+  me: import('../lib/qcode-me').QcodeMe,
+): { cost_micros: number; request_count: number } {
+  // Day = today only — sum from /v1/qcode/me's tier breakdown so the
+  // number matches what the chip in the composer shows. Doesn't go
+  // back to the by_day series because today's bucket may not be
+  // present yet on a fresh account.
+  if (range === 'day') {
+    const today = me.today.tiers.reduce(
+      (acc, t) => acc + t.used,
+      0,
+    );
+    // Day spend isn't directly in /v1/qcode/me; fall back to today's
+    // bucket from /v1/qcode/usage if available.
+    const todayUtc = Date.UTC(
+      new Date().getUTCFullYear(),
+      new Date().getUTCMonth(),
+      new Date().getUTCDate(),
+    );
+    const todayBucket = usage?.by_day.find((d) => d.day_ms === todayUtc);
+    return {
+      cost_micros: todayBucket?.cost_micros ?? 0,
+      request_count: todayBucket?.request_count ?? today,
+    };
+  }
+  if (!usage) return { cost_micros: 0, request_count: 0 };
+  // Week = sum of the most-recent week bucket
+  // Month = sum of the most-recent month bucket
+  // Both come from the same daily series.
+  if (range === 'week') {
+    const oneWeekAgo = Date.now() - 7 * 86_400_000;
+    return usage.by_day
+      .filter((d) => d.day_ms >= oneWeekAgo)
+      .reduce(
+        (acc, d) => ({
+          cost_micros: acc.cost_micros + d.cost_micros,
+          request_count: acc.request_count + d.request_count,
+        }),
+        { cost_micros: 0, request_count: 0 },
+      );
+  }
+  // Month = current calendar month
+  const monthStart = Date.UTC(
+    new Date().getUTCFullYear(),
+    new Date().getUTCMonth(),
+    1,
+  );
+  return usage.by_day
+    .filter((d) => d.day_ms >= monthStart)
+    .reduce(
+      (acc, d) => ({
+        cost_micros: acc.cost_micros + d.cost_micros,
+        request_count: acc.request_count + d.request_count,
+      }),
+      { cost_micros: 0, request_count: 0 },
+    );
+}
+
+function rangeLabel(r: UsageRange): string {
+  return r === 'day' ? 'Today' : r === 'week' ? 'This week' : 'This month';
+}
+
+function formatResetCountdown(): string {
+  // Plan limits reset at midnight UTC. Show H:MM remaining so the
+  // user knows when their daily cap rolls over.
+  const now = new Date();
+  const tomorrow = new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate() + 1,
+    ),
+  );
+  const ms = tomorrow.getTime() - now.getTime();
+  const hours = Math.floor(ms / 3_600_000);
+  const minutes = Math.floor((ms % 3_600_000) / 60_000);
+  if (hours === 0) return `${minutes}m`;
+  return `${hours}h ${minutes}m`;
 }

@@ -839,7 +839,11 @@ export function App() {
               if (w) setWorkspace(w);
             }}
             qcodeMe={qcodeMeQuery.data ?? null}
-            onOpenBilling={() => setSettingsOpen(true)}
+            // Chip click → open the Usage rail so the user lands on
+            // the full per-tier breakdown / day-week-month view, not
+            // the generic settings drawer. The Usage panel itself
+            // links out to the dashboard for the heavy case.
+            onOpenBilling={() => setRightRailView('usage')}
             rightRailView={rightRailView}
             onCloseRightRail={() => setRightRailView(null)}
             workspacePath={workspace?.path}
@@ -1901,6 +1905,7 @@ function RightRailMenu({
     { view: 'terminal', label: 'Terminal', hint: '⌃`' },
     { view: 'preview', label: 'Preview', hint: '⇧⌘P' },
     { view: 'diff', label: 'Diff', hint: '⇧⌘D' },
+    { view: 'usage', label: 'Usage' },
   ];
 
   return (

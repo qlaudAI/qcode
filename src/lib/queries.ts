@@ -22,6 +22,7 @@ import {
 import { fetchAccount, type AccountInfo } from './account';
 import { fetchBalance, type BalanceInfo } from './billing';
 import { fetchQcodeMe, type QcodeMe } from './qcode-me';
+import { fetchQcodeUsage, type QcodeUsage } from './qcode-usage';
 import {
   fetchCatalog,
   loadCachedCatalog,
@@ -84,6 +85,7 @@ export const qk = {
   account: ['account'] as const,
   balance: ['balance'] as const,
   qcodeMe: ['qcode-me'] as const,
+  qcodeUsage: (days: number) => ['qcode-usage', days] as const,
   catalog: ['catalog'] as const,
   mcpServers: ['mcp-servers'] as const,
 };
@@ -480,6 +482,20 @@ export function useQcodeMeQuery(authed: boolean) {
 
 export function refreshQcodeMe(): void {
   void queryClient.invalidateQueries({ queryKey: qk.qcodeMe });
+}
+
+/** /v1/qcode/usage — daily-bucketed cost+token+request rollup over
+ *  the last `days` days. Used by the right-rail Usage view to
+ *  render day/week/month breakdowns from a single fetch. Stale at
+ *  60s — usage data changes turn-by-turn but we don't need
+ *  refetches more often than that for human-eyeballed charts. */
+export function useQcodeUsageQuery(days: number, enabled: boolean) {
+  return useQuery<QcodeUsage | null>({
+    queryKey: qk.qcodeUsage(days),
+    enabled,
+    queryFn: () => fetchQcodeUsage(days),
+    staleTime: 60_000,
+  });
 }
 
 /** Trigger a balance refetch — call from onTurnLanded so the
