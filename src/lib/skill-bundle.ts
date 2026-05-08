@@ -12,6 +12,7 @@
 // near-zero overhead for users who do (single read, then cached).
 
 import { isTauri } from './tauri';
+import { QLAUD_DEPLOY_CLOUDFLARE_SKILL } from './skills/deploy-cloudflare';
 import { QLAUD_TOOLS_SKILL } from './skills/qlaud-tools';
 import { QLAUD_VIDEO_CREATOR_SKILL } from './skills/video-creator';
 
@@ -45,6 +46,7 @@ export async function ensureSkillsOnDisk(): Promise<string[] | null> {
     const skills: Array<{ name: string; content: string }> = [
       { name: 'video-creator.md', content: QLAUD_VIDEO_CREATOR_SKILL },
       { name: 'qlaud-tools.md', content: QLAUD_TOOLS_SKILL },
+      { name: 'deploy-cloudflare.md', content: QLAUD_DEPLOY_CLOUDFLARE_SKILL },
     ];
     const written: string[] = [];
     for (const s of skills) {
@@ -74,15 +76,19 @@ export async function ensureSkillsOnDisk(): Promise<string[] | null> {
 /** Short markdown snippet appended to claude-code's system prompt.
  *  Tells the agent which skills exist on disk + when to load them.
  *
- *  Two skills today:
- *    qlaud-tools     — discover/call any external tool via the
- *                      meta-tool REST API (search-then-call pattern).
- *                      Covers builtins, MCPs, registered tools.
- *    video-creator   — full video editor workflow (Remotion +
- *                      ffmpeg + asset sourcing + voiceover).
+ *  Three skills today:
+ *    qlaud-tools         — discover/call any external tool via the
+ *                          meta-tool REST API (search-then-call pattern).
+ *                          Covers builtins, MCPs, registered tools.
+ *    video-creator       — full video editor workflow (Remotion +
+ *                          ffmpeg + asset sourcing + voiceover).
+ *    deploy-cloudflare   — ship the project to Cloudflare. Two
+ *                          modes: qlaud-managed ({slug}.qlaud.app +
+ *                          provisioned D1) or BYO Cloudflare via
+ *                          wrangler against the user's own account.
  *
- *  Token cost: ~250 tokens for the pointer block. Tiny vs the
- *  ~15k tokens the full skills would add to every system prompt
+ *  Token cost: ~350 tokens for the pointer block. Tiny vs the
+ *  ~20k tokens the full skills would add to every system prompt
  *  if we inlined them. */
 export function buildSkillPointer(homeDir: string): string {
   return `qcode skills available on disk — load with the Read tool when the user's request matches:
@@ -101,6 +107,15 @@ export function buildSkillPointer(homeDir: string): string {
     YouTube / ad / reel / SaaS demo / documentary. Teaches the full
     workflow (script → voiceover → storyboard → stock+AI sourcing
     → Remotion+ffmpeg → polished MP4 → optional cloud sync).
+
+  ${homeDir}/${SKILLS_DIR_REL}/deploy-cloudflare.md
+    Read when the user says "deploy", "publish", "ship it", "go
+    live", or asks for a live URL. Two modes: qlaud-managed
+    (default for non-technical users — provisions everything under
+    {slug}.qlaud.app) and BYO Cloudflare (uses the user's own CF
+    account via wrangler). Detects framework (Next / Vite / Worker /
+    static), provisions D1/R2/KV bindings, sets secrets, custom
+    domains. Records the user's choice once at .qcode/deploy.json.
 
 DO NOT preload these — read only when the user's request actually fits the skill. Skills you read once are cached for the rest of this session.`;
 }

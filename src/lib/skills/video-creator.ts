@@ -168,14 +168,28 @@ THE WORKFLOW (every template uses some subset)
      binary, symlinked on first launch and added to PATH). If
      \`command -v bun\` fails for any reason, fall back to the
      official one-liner: \`curl -fsSL https://bun.sh/install | bash\`
-   • One-time scaffold per workspace (idempotent — skip if .qcode/video-projects/main exists):
-       mkdir -p .qcode/video-projects
-       cd .qcode/video-projects
-       if [ ! -d main ]; then
-         bunx create-video@latest main --template=blank --pm=bun
-         cd main && bun install && cd ..
+
+   • Use a per-machine template cache to avoid the ~200MB
+     create-video + bun install on every workspace. One scaffold,
+     symlinked node_modules across all video projects on this
+     machine. ~5s to first paint instead of ~90s.
+
+       TEMPLATE_DIR="$HOME/.qcode/runtime/video-template"
+       if [ ! -d "$TEMPLATE_DIR" ]; then
+         mkdir -p "$HOME/.qcode/runtime"
+         (cd "$HOME/.qcode/runtime" && \\
+          bunx create-video@latest video-template --template=blank --pm=bun && \\
+          cd video-template && bun install)
        fi
-       cd main
+
+       # Per-workspace project — copy from cache, symlink node_modules
+       mkdir -p .qcode/video-projects
+       if [ ! -d .qcode/video-projects/main ]; then
+         cp -R "$TEMPLATE_DIR/" .qcode/video-projects/main/
+         rm -rf .qcode/video-projects/main/node_modules
+         ln -s "$TEMPLATE_DIR/node_modules" .qcode/video-projects/main/node_modules
+       fi
+       cd .qcode/video-projects/main
 
    • Edit src/Composition.tsx — define the scene. Reference assets via
      staticFile() with paths relative to public/. Move assets into public/:
@@ -194,17 +208,30 @@ THE WORKFLOW (every template uses some subset)
    tells you "looks good, render it" or "tighten the cut at 0:08
    then render."
 
-   Boot the preview server (run in background so the bash tool
-   returns; the dev server keeps running):
-       bunx remotion preview src/index.ts &
-       sleep 2  # let it bind a port
-       lsof -iTCP -sTCP:LISTEN -P -n | grep LISTEN | grep node
+   Boot the preview server. Track the PID so the next preview/render
+   doesn't leak a server on the old port. Capture stdout to grep the
+   actual URL Remotion picked (Remotion rolls forward 3000 → 3001 →
+   … if the port's busy; do NOT assume 3000):
 
-   Remotion preview prints "Server ready - http://localhost:3000"
-   to stdout — qcode's right-rail Preview pane picks up that URL
-   automatically. Tell the user "the live preview is in the right
-   panel — scrub through, let me know what to change or say
-   'render it' when ready."
+       # Kill any prior preview from this workspace
+       if [ -f .preview.pid ]; then
+         kill "$(cat .preview.pid)" 2>/dev/null || true
+         rm -f .preview.pid
+       fi
+
+       # Spawn fresh preview; capture PID + log
+       bunx remotion preview src/index.ts > .preview.log 2>&1 &
+       echo $! > .preview.pid
+       sleep 2
+
+       # Read the URL Remotion bound to from its own log
+       PREVIEW_URL=$(grep -oE 'http://localhost:[0-9]+' .preview.log | head -1)
+       echo "Preview is at $PREVIEW_URL"
+
+   qcode's right-rail Preview pane auto-picks up the URL Remotion
+   prints. Tell the user "the live preview is in the right panel —
+   scrub through, let me know what to change or say 'render it'
+   when ready."
 
    DO NOT auto-render when the user just asked for a video. Wait
    for explicit approval. Skip straight to render ONLY when the
@@ -212,11 +239,45 @@ THE WORKFLOW (every template uses some subset)
    preview it."
 
 8. Render (after user approval)
-       bunx remotion render src/index.ts MainComp ../../media/$(date +%Y-%m-%d)/output.mp4 \\
-         --codec=h264 --crf=23 --jpeg-quality=90 --concurrency=4
+
+   Render to a temp path first so a crashed render doesn't leave a
+   half-written .mp4 at the final destination. Atomic mv on success.
+   Inspect the log on failure and retry with the right adjustment;
+   don't pretend success.
+
+       OUTPUT="../../media/$(date +%Y-%m-%d)/output.mp4"
+       TEMP="\${OUTPUT}.tmp.mp4"
+       LOG=".render.log"
+
+       set -o pipefail
+       if ! bunx remotion render src/index.ts MainComp "$TEMP" \\
+            --codec=h264 --crf=23 --jpeg-quality=90 --concurrency=4 \\
+            2>&1 | tee "$LOG"; then
+         # Common failure modes — diagnose, retry once
+         if grep -qi "could not find chrome\\|chromium" "$LOG"; then
+           bunx remotion browser ensure
+           bunx remotion render src/index.ts MainComp "$TEMP" \\
+             --codec=h264 --crf=23 --jpeg-quality=90 --concurrency=4
+         elif grep -qi "out of memory\\|heap\\|enomem" "$LOG"; then
+           bunx remotion render src/index.ts MainComp "$TEMP" \\
+             --codec=h264 --crf=23 --jpeg-quality=90 --concurrency=1
+         else
+           rm -f "$TEMP"
+           echo "Render failed. Last 30 lines of $LOG:"
+           tail -30 "$LOG"
+           exit 1
+         fi
+       fi
+
+       # Success — atomic move + clean up the preview server
+       mv "$TEMP" "$OUTPUT"
+       if [ -f .preview.pid ]; then
+         kill "$(cat .preview.pid)" 2>/dev/null || true
+         rm -f .preview.pid
+       fi
 
    • crf=23 = high quality / reasonable size. Lower = bigger + better.
-   • 4-core concurrency on Mac M1+. Drop to 2 on lower-end.
+   • concurrency=4 on Mac M1+. concurrency=1 forced retry on OOM.
 
 9. Polish via ffmpeg (optional but standard)
        ffmpeg -i output.mp4 \\
