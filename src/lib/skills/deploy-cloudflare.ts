@@ -46,7 +46,7 @@ If the file is absent:
   • Otherwise ASK ONCE: "Want me to host this for you (qlaud-managed, free until your usage hits the plan limit, custom domain {slug}.qlaud.app), or deploy to your own Cloudflare account?"
 Write the answer to .qcode/deploy.json and proceed.
 
-NOTE: qlaud-managed is still being wired up. If the user picks managed but POST /v1/apps/:id/deploy returns 404 or "feature not yet available", fall back to byo-cloudflare and let the user know managed deploy is coming soon.
+LIMITATION: managed mode currently supports framework="worker" ONLY (a single bundled JS module). Static sites + Next.js + Vite SPAs need byo-cloudflare for now — the managed deploy doesn't accept Pages-style asset bundles yet. If the project is Worker-shaped, prefer managed; otherwise fall back to BYO. This evolves; check by trying the managed deploy and reading the error if it rejects the framework.
 
 ────────────────────────────────────────────────────────────────────
 STEP 1 — Identify what we're shipping
@@ -79,51 +79,122 @@ yarn.lock → yarn, otherwise npm). Use it consistently for install + build.
 ────────────────────────────────────────────────────────────────────
 MODE A — qlaud-managed (default for non-technical users)
 
-The qlaud edge worker provisions a Cloudflare Workers-for-Platforms
-script, a per-app D1 database, and a custom hostname at
-{slug}.qlaud.app. User authenticates with their qcode session;
-userId is locked server-side from the bearer token, so we never
-pass user_id from the client.
+qlaud-edge provisions a Cloudflare Worker in our managed Workers-for-
+Platforms namespace, auto-creates a per-app D1 database, and routes
+{slug}.qlaud.app to it via a dispatcher. The user authenticates with
+their qcode session token; userId is locked server-side from the
+bearer (same pattern as the qlaud-tools skill), so we never send a
+user_id field.
 
-1. Build the project locally to a deploy-ready bundle.
-   Examples:
-     • Next on CF Pages:  bunx @cloudflare/next-on-pages
-     • Vite SPA:          bun run build  (output usually in dist/ or build/)
-     • Worker:            bunx wrangler deploy --dry-run --outdir=dist
+Today the managed flow accepts framework="worker" only — a single
+bundled JS module that exports default { fetch }. Pages-style static
+bundles + Next.js are coming; until then, fall back to byo-cloudflare
+for those.
 
-2. Resolve the app id. Read .qcode/deploy.json.appId.
-   If absent, register an app first:
+1. Bundle the project to a single JS module.
+
+   For a fresh worker (no wrangler.toml yet — qcode generated it):
+     # The user's src/index.ts already has 'export default { fetch: ... }'.
+     # Use wrangler dry-run to bundle deps, tree-shake, and produce a
+     # ready-to-upload module:
+     bunx wrangler@latest deploy --dry-run --outdir=/tmp/qlaud-build src/index.ts
+     # Output: /tmp/qlaud-build/index.js  (single bundled module)
+
+   For a project that already has wrangler.toml:
+     bunx wrangler@latest deploy --dry-run --outdir=/tmp/qlaud-build
+     # Reads main from wrangler.toml; output goes to /tmp/qlaud-build/
+
+   Either way you end with a single .js file (typically index.js)
+   ready to upload. The qlaud-edge handler caps at 10MB per main file.
+
+2. Resolve the app id. Read .qcode/deploy.json.appId — if present,
+   re-use it. Otherwise register a new app:
+
      curl -s https://api.qlaud.ai/v1/apps \\
-       -H "x-api-key: \$ANTHROPIC_API_KEY" \\
+       -H "x-api-key: $ANTHROPIC_API_KEY" \\
        -H "content-type: application/json" \\
-       -d '{"name":"<friendly-name>","framework":"<next|vite|worker|static>"}' | jq
+       -d '{"name":"<friendly-name>","framework":"worker"}'
 
-   Response: {"id": "app_xxx", "slug": "fancy-otter-42", "live_url": "https://fancy-otter-42.qlaud.app"}
+   Response shape:
+     {
+       "id": "app_<24hex>",
+       "slug": "<adj>-<noun>-<4digits>",       e.g. "sleek-jaguar-8071"
+       "framework": "worker",
+       "status": "created",
+       "live_url": null,                        null until first deploy
+       ...
+     }
 
-   Save id + slug to .qcode/deploy.json so subsequent deploys re-use them.
+   Save the id + slug to .qcode/deploy.json so subsequent deploys
+   re-use them and don't allocate new slugs.
 
-3. Deploy. Tarball the bundle and POST it. Server provisions D1 +
-   binds it as DB, registers the script, attaches the hostname, runs
-   any migrations under migrations/, and streams progress via SSE.
+3. Deploy via multipart POST. Server runs the full provision-and-
+   publish ceremony and streams SSE progress events back.
 
-     tar -czf /tmp/qcode-deploy.tgz -C dist .
-     curl -s -N https://api.qlaud.ai/v1/apps/\$APP_ID/deploy \\
-       -H "x-api-key: \$ANTHROPIC_API_KEY" \\
-       -H "content-type: application/octet-stream" \\
-       --data-binary @/tmp/qcode-deploy.tgz
+     APP_ID=$(jq -r .appId < .qcode/deploy.json)
+     curl -s -N -X POST "https://api.qlaud.ai/v1/apps/$APP_ID/deploy" \\
+       -H "x-api-key: $ANTHROPIC_API_KEY" \\
+       -F 'manifest={"framework":"worker","main":"index.js","compatibility_date":"'$(date +%Y-%m-%d)'"};type=application/json' \\
+       -F 'index.js=@/tmp/qlaud-build/index.js;filename=index.js;type=application/javascript+module'
 
-   The response is an SSE stream: "event: progress" lines with
-   {phase, message, percent}; final "event: complete" with
-   {live_url, deploy_id}. Surface phase-by-phase progress to the
-   user — don't sit on a frozen prompt for 30 seconds.
+   IMPORTANT details:
+     • The "filename=index.js" suffix on the file part is REQUIRED.
+       Without it the server can't match the multipart entry to
+       manifest.main and rejects with "main file missing".
+     • -N tells curl not to buffer the SSE stream so progress
+       lines surface as they arrive.
+     • The form field name (left of the @) must match manifest.main.
 
-4. On success: print the live URL. Open it in the user's browser
-   if they like ("open the link in your browser? y/n").
+4. Parse the SSE response. The server emits this exact sequence:
+     event: progress  data: {"phase":"received","message":"...","percent":5}
+     event: progress  data: {"phase":"provisioning_d1",...,"percent":20}    (first deploy only)
+     event: progress  data: {"phase":"migrating_db",...,"percent":30}        (only with manifest.migrations)
+     event: progress  data: {"phase":"uploading_script",...,"percent":50}
+     event: progress  data: {"phase":"binding_resources",...,"percent":70}
+     event: progress  data: {"phase":"syncing_dispatcher",...,"percent":90}
+     event: progress  data: {"phase":"live",...,"percent":100}
+     event: complete  data: {"deploy_id":"dep_...","live_url":"https://<slug>.qlaud.app","script_version":"..."}
 
-5. On failure: surface the structured error.message verbatim. The
-   server returns plan-limit / quota / build-error reasons in a
-   format the agent can paraphrase ("You've hit your Free plan's
-   1-app limit. Upgrade at qlaud.ai/billing or switch to byo-cloudflare").
+   Failure shape:
+     event: error  data: {"code":"<code>","message":"<human readable>"}
+
+   Surface progress messages to the user as they arrive — DON'T let
+   the prompt sit silent for 20+ seconds while the deploy streams.
+   Print each phase so the user sees forward motion.
+
+5. On success — print the live URL. Tell the user "your app is live
+   at https://<slug>.qlaud.app — try it." Optionally offer to open it.
+
+6. On error — surface error.message verbatim. The server returns
+   structured codes:
+     cf_10121         → managed platform misconfigured (qlaud bug, not user's)
+     deploy_error     → CF API rejected the upload (often a JS syntax error)
+     not_found_error  → app id not in user's account; check .qcode/deploy.json
+
+   For plan-limit errors (status 402): the message says exactly what
+   to do — relay it. "You've hit your Free plan's 1-app limit. Archive
+   an existing app or upgrade at qlaud.ai/billing."
+
+7. Optional: include database migrations. If the project has
+   migrations/*.sql files, list them in manifest.migrations[] (in
+   execution order) and add each as a multipart field:
+
+     -F 'manifest={"framework":"worker","main":"index.js","migrations":["0001_init.sql","0002_users.sql"]};type=application/json' \\
+     -F '0001_init.sql=@migrations/0001_init.sql;filename=0001_init.sql;type=text/plain' \\
+     -F '0002_users.sql=@migrations/0002_users.sql;filename=0002_users.sql;type=text/plain' \\
+     -F 'index.js=@/tmp/qlaud-build/index.js;filename=index.js;type=application/javascript+module'
+
+   Server tracks applied migrations per-app in a _qlaud_migrations
+   table inside the user's D1, so re-deploys are idempotent. The
+   "migrating_db" phase runs the unapplied ones.
+
+8. Optional: include plain (non-secret) env vars in manifest.vars:
+
+     -F 'manifest={"framework":"worker","main":"index.js","vars":{"ENVIRONMENT":"production","API_VERSION":"v1"}};type=application/json' ...
+
+   For SECRET values (API keys, tokens), there's no client-side API
+   yet — direct the user to set them via the dashboard at
+   qlaud.ai/apps/<id>/env once that lands. For now, plain vars only.
 
 ────────────────────────────────────────────────────────────────────
 MODE B — byo-cloudflare (Bring Your Own CF account)
@@ -253,14 +324,28 @@ WHAT NOT TO DO
 QUICK REFERENCE
 
   Detect framework:    look for next.config / vite.config / wrangler.toml / index.html
-  Build SPA:           bun run build
-  Build Next on CF:    bunx @cloudflare/next-on-pages
-  Deploy Pages:        bunx wrangler pages deploy <dir> --project-name=<name>
-  Deploy Worker:       bunx wrangler deploy
-  Create D1:           bunx wrangler d1 create <name>
-  Run migration:       bunx wrangler d1 execute <name> --file=migrations/<file>.sql
-  Set secret:          echo "<value>" | bunx wrangler secret put <NAME>
-  Custom domain:       bunx wrangler pages domain add --project-name=<n> <domain>
-  qlaud-managed:       POST https://api.qlaud.ai/v1/apps/<id>/deploy (binary)
-  qlaud-managed init:  POST https://api.qlaud.ai/v1/apps (creates app + slug)
+  Build worker:        bunx wrangler deploy --dry-run --outdir=/tmp/qlaud-build [src/index.ts]
+
+  qlaud-managed register:
+    curl -s https://api.qlaud.ai/v1/apps -H "x-api-key: $ANTHROPIC_API_KEY" \\
+      -H "content-type: application/json" \\
+      -d '{"name":"<name>","framework":"worker"}'
+
+  qlaud-managed deploy:
+    curl -s -N -X POST "https://api.qlaud.ai/v1/apps/<APP_ID>/deploy" \\
+      -H "x-api-key: $ANTHROPIC_API_KEY" \\
+      -F 'manifest={"framework":"worker","main":"index.js"};type=application/json' \\
+      -F 'index.js=@/tmp/qlaud-build/index.js;filename=index.js;type=application/javascript+module'
+    # SSE response — phase events stream until "complete" with live_url
+
+  qlaud-managed list:  curl https://api.qlaud.ai/v1/apps -H "x-api-key: $ANTHROPIC_API_KEY"
+  qlaud-managed get:   curl https://api.qlaud.ai/v1/apps/<APP_ID> -H "x-api-key: $ANTHROPIC_API_KEY"
+  qlaud-managed history: curl https://api.qlaud.ai/v1/apps/<APP_ID>/deployments -H "x-api-key: $ANTHROPIC_API_KEY"
+
+  BYO Pages:           bunx wrangler pages deploy <dir> --project-name=<name>
+  BYO Worker:          bunx wrangler deploy
+  BYO Create D1:       bunx wrangler d1 create <name>
+  BYO Run migration:   bunx wrangler d1 execute <name> --file=migrations/<file>.sql
+  BYO Set secret:      echo "<value>" | bunx wrangler secret put <NAME>
+  BYO Custom domain:   bunx wrangler pages domain add --project-name=<n> <domain>
 `;
