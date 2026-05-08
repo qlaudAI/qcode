@@ -1617,6 +1617,23 @@ function MediaRow({
         : item.kind === 'video'
           ? Film
           : FileIcon;
+
+  // Tauri 2 asset protocol turns absolute filesystem paths into
+  // http://asset.localhost/<encoded-path> URLs the WebView can load
+  // directly. Configured in src-tauri/tauri.conf.json security.
+  // assetProtocol.scope=["**"]. Falls back to empty string on web
+  // build (no Tauri runtime); rows still render the type icon.
+  //
+  // Construct the asset URL inline — convertFileSrc just URI-encodes
+  // and prefixes http://asset.localhost/. Avoiding the require()
+  // import means the web build doesn't pull tauri internals.
+  const previewSrc = useMemo(() => {
+    if (!item.absPath || !isTauri()) return '';
+    // Strip leading slash so encodeURI doesn't double-encode the
+    // first one; rejoin under the asset.localhost host.
+    const trimmed = item.absPath.replace(/^\//, '');
+    return `http://asset.localhost/${encodeURI(trimmed)}`;
+  }, [item.absPath]);
   // Click target depends on origin:
   //   • local-only: openExternal(absPath) → OS default app (macOS:
   //     Preview / QuickTime / Music; Linux: xdg-open; Windows: start)
@@ -1679,15 +1696,58 @@ function MediaRow({
         className="group flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-muted/50"
         title={item.relPath}
       >
-        <Icon
-          className={cn(
-            'h-3.5 w-3.5 shrink-0',
-            item.kind === 'image' && 'text-emerald-600 dark:text-emerald-400',
-            item.kind === 'audio' && 'text-violet-600 dark:text-violet-400',
-            item.kind === 'video' && 'text-amber-600 dark:text-amber-400',
-          )}
-          aria-hidden
-        />
+        {/* Inline thumbnail when we have a local path + Tauri asset
+         *  protocol available. Falls back to the type icon for cloud-
+         *  only entries or when convertFileSrc resolution failed. */}
+        {item.kind === 'image' && previewSrc ? (
+          <img
+            src={previewSrc}
+            alt=""
+            loading="lazy"
+            className="h-10 w-10 shrink-0 rounded-md object-cover ring-1 ring-border/40"
+            onError={(e) => {
+              // Asset protocol failed (file moved, permission denied);
+              // hide the broken image and let the icon below take over.
+              e.currentTarget.style.display = 'none';
+            }}
+          />
+        ) : item.kind === 'video' && previewSrc ? (
+          <video
+            src={previewSrc}
+            preload="metadata"
+            muted
+            playsInline
+            className="h-10 w-10 shrink-0 rounded-md object-cover ring-1 ring-border/40"
+            onMouseEnter={(e) => {
+              e.currentTarget.play().catch(() => {
+                /* autoplay blocked — fine, click the row to open. */
+              });
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.pause();
+              e.currentTarget.currentTime = 0;
+            }}
+          />
+        ) : item.kind === 'audio' && previewSrc ? (
+          // Audio gets a compact play indicator + waveform-ish badge
+          // (no thumbnail to render). Click row → opens in OS player.
+          <span
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-violet-500/10 ring-1 ring-violet-500/20"
+            aria-hidden
+          >
+            <Music className="h-4 w-4 text-violet-600 dark:text-violet-400" />
+          </span>
+        ) : (
+          <Icon
+            className={cn(
+              'h-3.5 w-3.5 shrink-0',
+              item.kind === 'image' && 'text-emerald-600 dark:text-emerald-400',
+              item.kind === 'audio' && 'text-violet-600 dark:text-violet-400',
+              item.kind === 'video' && 'text-amber-600 dark:text-amber-400',
+            )}
+            aria-hidden
+          />
+        )}
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
             <span className="truncate text-[12px] text-foreground/90">

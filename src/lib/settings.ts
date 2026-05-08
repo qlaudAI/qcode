@@ -189,10 +189,14 @@ const DEFAULTS: Settings = {
   // very first read on a fresh install before localStorage has
   // anything stored.
   engine: 'qcode-legacy',
-  // Media cloud sync — opt-in. Local-only is the default for
-  // privacy + offline + speed. Users explicitly flip this on in
-  // Settings when they want cross-device access.
-  mediaCloudSync: false,
+  // Media cloud sync — default ON. Generated media uploads to qlaud
+  // R2 so the user can see it on every device. The previous default
+  // (off) confused users who expected images they saw the agent
+  // generate to also appear in the dashboard's media library — they
+  // didn't know they had to opt in via Settings. Users who want
+  // strictly local-only flip it OFF; the privacy posture is
+  // documented in the Settings drawer.
+  mediaCloudSync: true,
   // Video creator skill — opt-in. Adds ~7-8k tokens to system
   // prompt; users who never make video shouldn't pay it.
   videoCreatorSkill: false,
