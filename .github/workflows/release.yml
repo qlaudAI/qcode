@@ -280,32 +280,164 @@ jobs:
   # installs auto-updating) within seconds of the build job finishing.
   # Without this hook the manifest still refreshes hourly via the cron
   # in apps/edge — this just shortens the window.
-  notify-qlaud:
-    name: Refresh qlaud release manifest
+  publish-to-qlaud:
+    # CI-side mirror: takes the assets we just published to GitHub
+    # release, uploads them to qlaud's R2 bucket (so the public install
+    # path doesn't need a GitHub PAT to read a private repo), and pushes
+    # a manifest to qlaud-edge that's ready to serve. Replaces the
+    # previous "qlaud-edge fetches GitHub" flow that broke whenever the
+    # GITHUB_RELEASE_PAT lost access.
+    name: Publish manifest + mirror assets to qlaud R2
     runs-on: ubuntu-22.04
     needs: build
     if: success()
     steps:
-      - name: POST /webhooks/qcode-release-refresh
+      - name: Resolve tag + assets
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          if [ -z "$TAG" ]; then
+            echo "GITHUB_REF_NAME unset (not a tag push?); aborting publish step" >&2
+            exit 0
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          mkdir -p /tmp/release
+          gh release view "$TAG" --json publishedAt,body,assets > /tmp/release/info.json
+          gh release download "$TAG" -D /tmp/release/assets --clobber
+
+      - name: Upload assets to R2 (S3 API)
+        # Mirrors every asset to qlaud-qcode-releases R2 bucket under
+        # the key <tag>/<filename>. R2 has an S3-compatible endpoint;
+        # aws-cli is pre-installed on ubuntu-22.04 runners so no setup.
+        # Required secrets:
+        #   R2_ACCOUNT_ID       — CF account id that owns the bucket
+        #   R2_ACCESS_KEY_ID    — CF R2 API token's access key
+        #   R2_SECRET_ACCESS_KEY — CF R2 API token's secret
+        # Create one-time at https://dash.cloudflare.com/?to=/:account/r2/api-tokens
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_ACCESS_KEY_ID" ] || [ -z "$R2_SECRET_ACCESS_KEY" ]; then
+            echo "::warning::R2_* secrets missing — skipping mirror. Releases will only resolve via GitHub fallback (requires PAT)."
+            exit 0
+          fi
+          # Configure aws-cli for the R2 endpoint. R2 ignores region but
+          # the SDK insists on one; 'auto' is the documented sentinel.
+          export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+          export AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+          export AWS_DEFAULT_REGION=auto
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          for f in /tmp/release/assets/*; do
+            NAME=$(basename "$f")
+            KEY="${TAG}/${NAME}"
+            echo "→ R2 ${KEY}"
+            aws s3 cp "$f" "s3://qlaud-qcode-releases/${KEY}" \
+              --endpoint-url="$ENDPOINT" \
+              --no-progress
+          done
+
+      - name: Build manifest JSON
+        # Construct the same shape qlaud-edge's refreshQcodeReleaseManifest
+        # produces server-side, but with all fields resolved from the
+        # release info we have locally — no GitHub API call needed at
+        # qlaud-edge runtime.
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+          VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          python3 <<'PYEOF' > /tmp/release/manifest.json
+          import json, os, glob, base64
+          tag = os.environ['TAG']
+          version = os.environ['VERSION']
+          info = json.load(open('/tmp/release/info.json'))
+          assets = info['assets']
+          asset_by_name = {a['name']: a for a in assets}
+
+          def pick_dl(name):
+              n = name.lower()
+              if n.endswith(('.sig','.tar.gz','.zip')): return None
+              if 'aarch64.dmg' in n: return 'mac-arm64'
+              if 'x64.dmg' in n: return 'mac-x64'
+              if 'x64-setup.exe' in n: return 'windows'
+              if n.endswith(('.appimage','.deb')): return 'linux'
+              return None
+
+          def pick_upd(name):
+              n = name.lower()
+              if not (n.endswith('.app.tar.gz') or n.endswith('.nsis.zip') or n.endswith('.appimage.tar.gz')):
+                  return None
+              if 'aarch64-apple-darwin' in n: return 'darwin-aarch64'
+              if 'x86_64-apple-darwin' in n: return 'darwin-x86_64'
+              if 'linux' in n: return 'linux-x86_64'
+              if 'windows' in n or 'nsis' in n: return 'windows-x86_64'
+              return None
+
+          downloads = {}
+          updater = {}
+          for a in assets:
+              p = pick_dl(a['name'])
+              if p:
+                  # api_url left blank — the R2 mirror is the canonical
+                  # download path now; api_url is a legacy fallback.
+                  downloads[p] = {
+                      'url': a.get('url') or '',
+                      'name': a['name'],
+                      'size': a['size'],
+                  }
+              u = pick_upd(a['name'])
+              if u:
+                  sig_path = f"/tmp/release/assets/{a['name']}.sig"
+                  if os.path.exists(sig_path):
+                      with open(sig_path) as fh:
+                          signature = fh.read().strip()
+                      updater[u] = {
+                          'url': a.get('url') or '',
+                          'name': a['name'],
+                          'size': a['size'],
+                          'signature': signature,
+                      }
+
+          print(json.dumps({
+              'version': version,
+              'tag': tag,
+              'published_at': info['publishedAt'],
+              'notes': info.get('body') or '',
+              'refreshed_at': info['publishedAt'],
+              'downloads': downloads,
+              'updater': updater,
+          }))
+          PYEOF
+          echo "Manifest preview:"
+          jq '{version, tag, downloads: (.downloads | keys), updater: (.updater | keys)}' /tmp/release/manifest.json
+
+      - name: POST manifest to qlaud-edge
         env:
           QCODE_REFRESH_TOKEN: ${{ secrets.QCODE_REFRESH_TOKEN }}
         run: |
           if [ -z "$QCODE_REFRESH_TOKEN" ]; then
-            echo "QCODE_REFRESH_TOKEN secret not set — skipping. Add it under repo secrets to enable instant manifest refresh." >&2
+            echo "::warning::QCODE_REFRESH_TOKEN missing — manifest not pushed. Set the secret to enable."
             exit 0
           fi
-          # Don't fail the workflow if the refresh hook is unreachable —
-          # the hourly cron will pick up the release within an hour.
-          # We still want a clear log line either way.
+          # Wrap manifest in body envelope { manifest: {...} } as the
+          # /webhooks/qcode-release-refresh handler expects.
+          jq '{manifest: .}' /tmp/release/manifest.json > /tmp/release/payload.json
           status=$(curl -sS -o /tmp/refresh.json -w '%{http_code}' \
             -X POST \
             -H "authorization: Bearer $QCODE_REFRESH_TOKEN" \
             -H "content-type: application/json" \
+            --data-binary @/tmp/release/payload.json \
             https://api.qlaud.ai/webhooks/qcode-release-refresh) || status="000"
-          echo "refresh status: $status"
+          echo "manifest publish status: $status"
           cat /tmp/refresh.json || true
           if [ "$status" != "200" ]; then
-            echo "::warning::Manifest refresh returned $status — relying on the hourly cron."
+            echo "::error::Manifest publish returned $status — install path will serve the previous version until next CI run."
+            exit 1
           fi
 
 # ─── First-release checklist ──────────────────────────────────────
