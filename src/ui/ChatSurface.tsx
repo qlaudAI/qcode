@@ -1144,7 +1144,7 @@ export function ChatSurface({
   }
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1">
+    <div className="flex min-h-0 min-w-0 flex-1" data-qcode-selectable="true">
       <div
         className="relative flex min-h-0 min-w-0 flex-1 flex-col"
         onDragEnter={onSurfaceDragEnter}

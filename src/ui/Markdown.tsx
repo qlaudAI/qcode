@@ -79,35 +79,58 @@ export const Markdown = memo(function Markdown({
 // Transform those into markdown links with a custom href scheme so
 // our `a` component can render them as click-to-open chips.
 //
-// Skips any text inside fenced code blocks (delimited by triple
-// backticks) so paths shown in code samples stay literal.
+// Skips:
+//   1. Text inside fenced code blocks (```…```) — paths in code
+//      samples stay literal.
+//   2. URL contexts (https://…, including subdomain hosts) — earlier
+//      bug: `https://leadmind-dashboard.pages.dev` got rewritten as
+//      a file link because the lookbehind only excluded `\w/[(`,
+//      missing `-` and the bare host pattern. The URL-skip pre-pass
+//      below splits on URL boundaries so domain-shaped strings can't
+//      be matched at all.
 function annotateFileLinks(source: string): string {
   // Match: optional ./ then segment(s) ending in .<ext> with
   // optional :line suffix. Tight to avoid false positives on URLs,
   // version numbers, and unit-suffixed measurements ('1.4MB',
   // 'v2.1', '3.14', etc.).
   //
-  // Two guards against the classic false positives:
-  //   1. Lookahead `(?=[\w.-]*[a-zA-Z])` requires the filename body
-  //      to contain at least one ASCII letter. Excludes pure-digit
-  //      bodies like '1' (in '1.1') or '3' (in '3.14').
-  //   2. Extension must START with a letter `[a-zA-Z][\w]{0,7}`.
-  //      Excludes pure-numeric extensions like '0' (in 'v1.0') and
-  //      keeps real ones (md, ts, tsx, jpeg, mp4).
-  // Together these reject '1.1', '1.4MB', 'v1.0' while still matching
-  // 'README.md', 'app.ts:42', './src/index.tsx', 'logo.svg'.
-  const FILE_RE = /(?<![\w/[(])((?:\.\.?\/)?(?:[\w.-]+\/)*(?=[\w.-]*[a-zA-Z])[\w.-]+\.[a-zA-Z][\w]{0,7})(?::(\d+))?(?![\w/])/g;
+  // Three guards against the classic false positives:
+  //   1. Lookbehind rejects after URL/domain neighbors and hyphens:
+  //      `(?<![\w/[(\-.])` — a `-` or `.` before our match means
+  //      we're inside a domain like `leadmind-dashboard.pages.dev`,
+  //      not at a path boundary.
+  //   2. Lookahead `(?=[\w.-]*[a-zA-Z])` requires the filename body
+  //      to contain at least one ASCII letter.
+  //   3. Extension must START with a letter `[a-zA-Z][\w]{0,7}`.
+  // Together these reject '1.1', '1.4MB', 'v1.0', and any host
+  // segment of a URL while still matching 'README.md', 'app.ts:42',
+  // './src/index.tsx', 'logo.svg'.
+  const FILE_RE =
+    /(?<![\w/[(\-.])((?:\.\.?\/)?(?:[\w.-]+\/)*(?=[\w.-]*[a-zA-Z])[\w.-]+\.[a-zA-Z][\w]{0,7})(?::(\d+))?(?![\w/])/g;
+
+  // URL pattern — http(s) or bare-host. Anything matching this is
+  // passed through unmodified. Pre-pass split BEFORE the FILE_RE
+  // runs so we can't accidentally wrap segments of a URL.
+  const URL_RE = /(https?:\/\/[^\s<>)\]]+)/g;
+
   // Split into fenced/non-fenced segments. Fenced regions pass
   // through verbatim.
-  const parts = source.split(/(```[\s\S]*?```)/g);
-  return parts
+  const fencedParts = source.split(/(```[\s\S]*?```)/g);
+  return fencedParts
     .map((part, i) => {
       if (i % 2 === 1) return part; // fenced — leave alone
-      return part.replace(FILE_RE, (match, p, line) => {
-        // Avoid double-wrapping if it's already a markdown link
-        // target — a clumsy heuristic but cheap.
-        return `[${match}](qcode-file:${p}${line ? ':' + line : ''})`;
-      });
+      // Within non-fenced text, split on URL boundaries; URLs pass
+      // through, only non-URL text runs FILE_RE.
+      const urlParts = part.split(URL_RE);
+      return urlParts
+        .map((seg, j) => {
+          // Odd indices are the URL captures themselves — pass through.
+          if (j % 2 === 1) return seg;
+          return seg.replace(FILE_RE, (match, p, line) => {
+            return `[${match}](qcode-file:${p}${line ? ':' + line : ''})`;
+          });
+        })
+        .join('');
     })
     .join('');
 }

@@ -23,25 +23,38 @@ const SKILLS_DIR_REL = '.qcode/skills';
  *  claude-code spawn; only writes when the file is missing or its
  *  content has drifted from what we ship in this build.
  *
- *  Why per-app-version: when we update the skill content (better
- *  templates, new patterns, fixed recipes), we want users to get
- *  the new file the next time they launch. A simple SHA check on
- *  the first byte gives us "is the bundled content the live one"
- *  — fast, no manual versioning.
- *
  *  Returns the absolute paths of files written / verified, or null
- *  on web (no fs access). */
+ *  on web (no fs access).
+ *
+ *  Failure modes are LOGGED rather than silently swallowed (an
+ *  earlier bug: tauri-plugin-fs path differences between Tauri 1
+ *  and Tauri 2 caused the write to throw silently, leaving the
+ *  skill pointer in the system prompt referencing files that
+ *  didn't exist on disk — agent tried to Read them, got "File
+ *  does not exist", and fell back to ad-hoc heuristics). */
 export async function ensureSkillsOnDisk(): Promise<string[] | null> {
   if (!isTauri()) return null;
   try {
     const { homeDir } = await import('@tauri-apps/api/path');
-    const { exists, mkdir, readTextFile, writeTextFile } = await import(
-      '@tauri-apps/plugin-fs'
-    );
+    const fs = await import('@tauri-apps/plugin-fs');
     const home = await homeDir();
-    const dir = `${home}/${SKILLS_DIR_REL}`;
-    if (!(await exists(dir))) {
-      await mkdir(dir, { recursive: true });
+    // Tauri's path APIs sometimes drop the trailing slash, sometimes
+    // keep it. Normalize.
+    const homeClean = home.replace(/\/+$/, '');
+    const dir = `${homeClean}/${SKILLS_DIR_REL}`;
+    let dirExists = false;
+    try {
+      dirExists = await fs.exists(dir);
+    } catch (e) {
+      console.warn('[skill-bundle] exists() check failed for', dir, e);
+    }
+    if (!dirExists) {
+      try {
+        await fs.mkdir(dir, { recursive: true });
+      } catch (e) {
+        console.error('[skill-bundle] mkdir failed for', dir, e);
+        return null;
+      }
     }
     const skills: Array<{ name: string; content: string }> = [
       { name: 'video-creator.md', content: QLAUD_VIDEO_CREATOR_SKILL },
@@ -52,23 +65,34 @@ export async function ensureSkillsOnDisk(): Promise<string[] | null> {
     for (const s of skills) {
       const path = `${dir}/${s.name}`;
       let needsWrite = true;
-      if (await exists(path)) {
-        try {
-          const current = await readTextFile(path);
-          if (current === s.content) needsWrite = false;
-        } catch {
-          /* read failed — overwrite */
+      try {
+        if (await fs.exists(path)) {
+          try {
+            const current = await fs.readTextFile(path);
+            if (current === s.content) needsWrite = false;
+          } catch {
+            /* read failed — overwrite */
+          }
         }
+      } catch (e) {
+        console.warn('[skill-bundle] exists() check failed for', path, e);
       }
       if (needsWrite) {
-        await writeTextFile(path, s.content);
+        try {
+          await fs.writeTextFile(path, s.content);
+          console.log('[skill-bundle] wrote', path, `${s.content.length} chars`);
+        } catch (e) {
+          console.error('[skill-bundle] writeTextFile failed for', path, e);
+          // Continue to the next skill — one failure shouldn't take
+          // out the others.
+          continue;
+        }
       }
       written.push(path);
     }
     return written;
-  } catch {
-    // fs failure is non-fatal — the skill pointer falls back to a
-    // graceful explanation when the agent can't find the file.
+  } catch (e) {
+    console.error('[skill-bundle] ensureSkillsOnDisk failed', e);
     return null;
   }
 }

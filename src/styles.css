@@ -54,6 +54,20 @@
     -webkit-user-select: text;
     user-select: text;
   }
+  /* Chat content needs to be selectable so users can copy a single
+   * sentence, a URL, or a snippet from a model reply. The body-wide
+   * user-select:none is intentional (kills sloppy text-drag during
+   * tauri-drag-region drags), but the chat surface opts back in.
+   *
+   * Selectors target everything inside chat message bubbles + the
+   * markdown renderer + code blocks. data-qcode-selectable="true"
+   * is the explicit opt-in marker on the chat surface root so we
+   * can extend coverage later without expanding the global selector. */
+  [data-qcode-selectable='true'],
+  [data-qcode-selectable='true'] * {
+    -webkit-user-select: text;
+    user-select: text;
+  }
   /* iOS Safari auto-zooms the page when an input's font-size is
    * smaller than 16px and the user taps to focus. The zoom doesn't
    * reset cleanly when the keyboard hides, leaving the layout
