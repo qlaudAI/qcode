@@ -46,49 +46,105 @@ If the file is absent:
   • Otherwise ASK ONCE: "Want me to host this for you (qlaud-managed, free until your usage hits the plan limit, custom domain {slug}.qlaud.app), or deploy to your own Cloudflare account?"
 Write the answer to .qcode/deploy.json and proceed.
 
-FRAMEWORK SUPPORT in managed mode (as of this writing):
-  • worker — single bundled JS module exporting default { fetch }.
-            Auto-provisions per-app D1; bound as env.DB.
-  • static — pure HTML/CSS/JS asset bundle. CF Workers Static Assets
-            handles serving; per-app D1 still provisioned but unused
-            unless you mix in a worker later.
-  • vite   — same as static but with SPA fallback (any 404 →
-            /index.html). Use this for client-side-routed Vite/React
-            SPAs.
-  • next   — NOT YET SUPPORTED in managed; needs Pages-style functions.
-            Falls back to byo-cloudflare via wrangler.
+MANAGED MODE — UNIVERSAL FRAMEWORK SUPPORT
 
-If the project is Worker-shaped, prefer managed worker. If it's a
-static site or SPA, prefer managed static/vite. Only fall back to BYO
-for Next.js (managed) until Pages-style support lands.
+The qlaud managed deploy is shape-driven, not framework-bound. Three
+bundle shapes; pick whichever your framework's build produces:
+
+  A. Main only        → pure CF Worker (Hono, Elysia, custom backend,
+                        no static assets)
+  B. Assets only      → static site / SPA (Vite, Astro static,
+                        Eleventy, Hugo, plain HTML)
+  C. Main + assets    → hybrid SSR/SSG (Next.js, Nuxt, SvelteKit,
+                        Astro SSR, Remix, Solid Start)
+
+manifest.framework is just a label (any /^[a-z][a-z0-9-]*$/ string).
+manifest.spa_fallback=true on shape B activates 404 → /index.html
+client-side routing.
 
 ────────────────────────────────────────────────────────────────────
-STEP 1 — Identify what we're shipping
+STEP 1 — Detect framework + identify the build
 
-Inspect the project. Decision tree:
+Walk the project; pick the matching row. Run the build command, then
+the deploy step (STEP 3+) uploads the named output.
 
-  Has next.config.{js,ts,mjs} or app/ + page.tsx?
-    → Next.js. Deploy via @cloudflare/next-on-pages.
-       output: Cloudflare Pages with edge runtime.
+  Detected by              framework=     Build → output
+  ─────────────────────────────────────────────────────────────────
+  next.config.*            "next"         bunx @opennextjs/cloudflare
+                                          build
+                                          → .open-next/worker.js
+                                          + .open-next/assets/    (C)
 
-  Has vite.config.{js,ts} + a frontend framework (React/Vue/Svelte)?
-    → SPA. Deploy via wrangler pages deploy <dist-dir>.
-       output: Cloudflare Pages, static.
+  astro.config.* w/        "astro"        bun run build
+   adapter-cloudflare                     → dist/_worker.js
+                                          + dist/_astro/ etc.     (C)
+  astro.config.* (static)  "astro"        bun run build
+                                          → dist/                 (B)
 
-  Has wrangler.toml or wrangler.jsonc + src/index.ts that exports a fetch handler?
-    → Cloudflare Worker. Deploy via wrangler deploy.
+  svelte.config.* w/       "sveltekit"    bun run build  (needs
+   @sveltejs/                             @sveltejs/adapter-
+   adapter-cloudflare                     cloudflare)
+                                          → .svelte-kit/cloudflare/
+                                            _worker.js + assets    (C)
 
-  Has wrangler.toml AND a Pages project?
-    → Pages-with-Functions. Deploy via wrangler pages deploy.
+  nuxt.config.*            "nuxt"         NITRO_PRESET=cloudflare-
+                                          module bun run build
+                                          → .output/server/index.mjs
+                                          + .output/public/        (C)
 
-  Has only static HTML/CSS/JS files?
-    → Static site. Deploy via wrangler pages deploy.
+  remix.config.* OR        "remix"        bun run build  (CF preset)
+   vite.config + remix                    → build/server/index.js
+   plugin                                 + build/client/          (C)
 
-  None of the above?
-    → ASK the user what they intend before scaffolding. Don't guess.
+  solid.config.*           "solid-start"  SOLID_START_PRESET=
+                                          cloudflare-workers
+                                          bun run build
+                                          → .output/server/index.mjs
+                                          + .output/public/        (C)
+
+  vite.config.* +          "vite"         bun run build
+   React/Vue/Svelte/                      → dist/
+   Solid (SPA, no SSR)                    + manifest.spa_fallback:
+                                          true                     (B)
+
+  wrangler.toml +          "worker"       bunx wrangler@latest
+   src/index.ts                           deploy --dry-run
+                                          --outdir=/tmp/qlaud-build
+                                          → /tmp/qlaud-build/
+                                            index.js               (A)
+
+  Hono w/o wrangler.toml   "hono"         bunx wrangler@latest
+                                          deploy --dry-run
+                                          --outdir=/tmp/qlaud-build
+                                          src/index.ts
+                                          → /tmp/qlaud-build/
+                                            index.js               (A)
+
+  Eleventy (.eleventy.js)  "eleventy"     bunx @11ty/eleventy
+                                          → _site/                 (B)
+
+  Hugo (config.{toml,      "hugo"         hugo
+   yaml,json})                            → public/                (B)
+
+  index.html only          "static"       (already built)
+                                          → ./                     (B)
+
+  None of the above        ?              ASK the user.
+
+Shape legend: (A) main only, (B) assets only, (C) main + assets.
+
+NOTE on adapters: SvelteKit, Astro SSR, Remix, Nuxt, and Solid Start
+need a CF-specific adapter installed before building. Check
+package.json. If missing:
+  bun add -D @sveltejs/adapter-cloudflare    # for SvelteKit
+  bun add -D @astrojs/cloudflare             # for Astro SSR
+  # etc.
+Update the framework's config to enable the adapter. Show the user
+the diff before applying.
 
 Detect the package manager (bun.lock → bun, pnpm-lock.yaml → pnpm,
-yarn.lock → yarn, otherwise npm). Use it consistently for install + build.
+yarn.lock → yarn, otherwise npm). Use it consistently for install +
+build.
 
 ────────────────────────────────────────────────────────────────────
 MODE A — qlaud-managed (default for non-technical users)
@@ -143,21 +199,54 @@ for those.
    re-use them and don't allocate new slugs.
 
 3. Deploy via multipart POST. Server runs the full provision-and-
-   publish ceremony and streams SSE progress events back.
+   publish ceremony and streams SSE progress events back. Multipart
+   shape depends on the bundle type from STEP 1:
 
-     APP_ID=$(jq -r .appId < .qcode/deploy.json)
+   SHAPE A — main only (worker, hono):
      curl -s -N -X POST "https://api.qlaud.ai/v1/apps/$APP_ID/deploy" \\
        -H "x-api-key: $ANTHROPIC_API_KEY" \\
        -F 'manifest={"framework":"worker","main":"index.js","compatibility_date":"'$(date +%Y-%m-%d)'"};type=application/json' \\
        -F 'index.js=@/tmp/qlaud-build/index.js;filename=index.js;type=application/javascript+module'
 
+   SHAPE B — assets only (vite SPA, astro static, eleventy, hugo,
+   plain static). Set spa_fallback=true for client-routed SPAs:
+     curl -s -N -X POST "https://api.qlaud.ai/v1/apps/$APP_ID/deploy" \\
+       -H "x-api-key: $ANTHROPIC_API_KEY" \\
+       -F 'manifest={"framework":"vite","spa_fallback":true,"compatibility_date":"'$(date +%Y-%m-%d)'"};type=application/json' \\
+       -F 'assets/index.html=@dist/index.html;filename=index.html' \\
+       -F 'assets/assets/main.js=@dist/assets/main.js;filename=main.js' \\
+       # ... one -F per file in dist/
+
+   SHAPE C — hybrid main + assets (next, sveltekit, nuxt, astro SSR,
+   remix, solid-start). manifest.main names the worker entry; assets/
+   fields carry the static files:
+     curl -s -N -X POST "https://api.qlaud.ai/v1/apps/$APP_ID/deploy" \\
+       -H "x-api-key: $ANTHROPIC_API_KEY" \\
+       -F 'manifest={"framework":"next","main":"worker.js","compatibility_date":"'$(date +%Y-%m-%d)'"};type=application/json' \\
+       -F 'worker.js=@.open-next/worker.js;filename=worker.js;type=application/javascript+module' \\
+       -F 'assets/_next/static/main.js=@.open-next/assets/_next/static/main.js;filename=main.js' \\
+       -F 'assets/index.html=@.open-next/assets/index.html;filename=index.html' \\
+       # ... assets per file
+
+   Programmatic per-file -F generation (assemble then exec curl):
+     # for shape B / C — loop dist/ or .open-next/assets/
+     ARGS=()
+     while IFS= read -r -d '' f; do
+       rel="\${f#$BUILD_DIR/}"
+       ARGS+=(-F "assets/\$rel=@\$f;filename=$(basename \"\$rel\")")
+     done < <(cd "\$BUILD_DIR" && find . -type f -print0)
+     curl ... "\${ARGS[@]}"
+
    IMPORTANT details:
-     • The "filename=index.js" suffix on the file part is REQUIRED.
-       Without it the server can't match the multipart entry to
-       manifest.main and rejects with "main file missing".
-     • -N tells curl not to buffer the SSE stream so progress
-       lines surface as they arrive.
-     • The form field name (left of the @) must match manifest.main.
+     • filename=<basename> on every -F is REQUIRED. Without it the
+       server can't match the multipart entry by name.
+     • -N tells curl not to buffer the SSE stream so progress lines
+       surface as they arrive.
+     • Per-file size cap: 25MB. Total bundle cap: 25MB Free /
+       100MB Pro+.
+     • CF dedupes assets globally by hash — re-deploys where files
+       didn't change upload nothing (you'll see the "0 new files"
+       message in the SSE stream).
 
 4. Parse the SSE response. The server emits this exact sequence:
      event: progress  data: {"phase":"received","message":"...","percent":5}
