@@ -46,7 +46,21 @@ If the file is absent:
   • Otherwise ASK ONCE: "Want me to host this for you (qlaud-managed, free until your usage hits the plan limit, custom domain {slug}.qlaud.app), or deploy to your own Cloudflare account?"
 Write the answer to .qcode/deploy.json and proceed.
 
-LIMITATION: managed mode currently supports framework="worker" ONLY (a single bundled JS module). Static sites + Next.js + Vite SPAs need byo-cloudflare for now — the managed deploy doesn't accept Pages-style asset bundles yet. If the project is Worker-shaped, prefer managed; otherwise fall back to BYO. This evolves; check by trying the managed deploy and reading the error if it rejects the framework.
+FRAMEWORK SUPPORT in managed mode (as of this writing):
+  • worker — single bundled JS module exporting default { fetch }.
+            Auto-provisions per-app D1; bound as env.DB.
+  • static — pure HTML/CSS/JS asset bundle. CF Workers Static Assets
+            handles serving; per-app D1 still provisioned but unused
+            unless you mix in a worker later.
+  • vite   — same as static but with SPA fallback (any 404 →
+            /index.html). Use this for client-side-routed Vite/React
+            SPAs.
+  • next   — NOT YET SUPPORTED in managed; needs Pages-style functions.
+            Falls back to byo-cloudflare via wrangler.
+
+If the project is Worker-shaped, prefer managed worker. If it's a
+static site or SPA, prefer managed static/vite. Only fall back to BYO
+for Next.js (managed) until Pages-style support lands.
 
 ────────────────────────────────────────────────────────────────────
 STEP 1 — Identify what we're shipping
@@ -187,6 +201,42 @@ for those.
    Server tracks applied migrations per-app in a _qlaud_migrations
    table inside the user's D1, so re-deploys are idempotent. The
    "migrating_db" phase runs the unapplied ones.
+
+─── Static / Vite SPA managed deploys ───────────────────────────
+
+Same /v1/apps + /v1/apps/:id/deploy endpoints as the worker path,
+but the multipart layout and manifest differ:
+
+  manifest = {
+    framework: "static" | "vite",   // vite enables SPA 404→index.html
+    main: "<unused — server generates one>",
+    compatibility_date: "YYYY-MM-DD"
+  }
+
+Build the project (Vite SPA: bun run build → dist/; pure static:
+already done). Then construct multipart with the manifest plus EVERY
+file in the dist directory under "assets/<relative-path>" form fields:
+
+  curl -s -N -X POST "https://api.qlaud.ai/v1/apps/$APP_ID/deploy" \\
+    -H "x-api-key: $ANTHROPIC_API_KEY" \\
+    -F 'manifest={"framework":"vite","main":"index.js","compatibility_date":"'$(date +%Y-%m-%d)'"};type=application/json' \\
+    -F 'assets/index.html=@dist/index.html;filename=index.html' \\
+    -F 'assets/assets/main.js=@dist/assets/main.js;filename=main.js' \\
+    -F 'assets/style.css=@dist/style.css;filename=style.css'
+    # ...one -F per file in dist/
+
+Or programmatically (bash):
+  cd dist && find . -type f -print0 | xargs -0 -I{} echo "  -F 'assets{}=@{};filename={}'"
+  # then assemble the curl command from that list
+
+CF Static Assets dedupes globally by file hash, so re-deploys where
+nothing changed upload nothing — only the manifest. Per-file size
+cap is 25MB; total bundle cap matches the per-tier bundle cap (25MB
+Free / 100MB Pro+).
+
+The SSE event sequence gains an "uploading_assets" phase before
+"uploading_script" for static deploys — surface it like the others.
+Everything else (D1 provisioning, env merging, finalize) is identical.
 
 8. Optional: include plain (non-secret) env vars in manifest.vars:
 
