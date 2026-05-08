@@ -8,6 +8,7 @@ import {
   Menu,
   PanelRight,
   Plus,
+  Rocket,
   Search as SearchIcon,
   Settings,
   Sparkles,
@@ -1023,6 +1024,19 @@ function Titlebar({
         <div className="hidden sm:block">
           <SpendBar profile={profile} qcodeMe={qcodeMe} onRefresh={onRefreshBalance} />
         </div>
+        {/* "Apps" pill — one-click access to the qlaud-managed apps
+         *  the user has deployed (or will deploy via "deploy" in chat).
+         *  Hidden on the smallest widths to keep the title bar from
+         *  wrapping; reachable via Settings → Apps as a fallback. */}
+        <button
+          onClick={() => openExternal('https://qlaud.ai/apps')}
+          className="hidden items-center gap-1.5 rounded border border-border/60 bg-background/70 px-2 py-1 text-[11px] font-medium text-foreground/80 transition-colors hover:border-foreground/30 hover:bg-background sm:flex"
+          title="Your deployed apps"
+          aria-label="Open apps dashboard"
+        >
+          <Rocket className="h-3 w-3" />
+          <span>Apps</span>
+        </button>
         {onPickRightRailView && (
           <RightRailMenu
             active={rightRailView ?? null}

@@ -265,8 +265,26 @@ for those.
    the prompt sit silent for 20+ seconds while the deploy streams.
    Print each phase so the user sees forward motion.
 
-5. On success — print the live URL. Tell the user "your app is live
-   at https://<slug>.qlaud.app — try it." Optionally offer to open it.
+5. On success — print this exact handoff block at the end of your
+   reply, with no extra preamble. Markdown links render as clickable
+   chips in the qcode chat surface.
+
+       ✨ **Live at <https://\${SLUG}.qlaud.app>**
+
+       [→ Open in browser](https://\${SLUG}.qlaud.app) · [⚙ Manage in dashboard](https://qlaud.ai/apps/\${APP_ID})
+
+       Want to make changes? Just edit the code and say "deploy" again —
+       qlaud reuses the same slug + database, so the URL stays the same.
+
+   Substitute the actual slug + app id from the SSE complete event +
+   .qcode/deploy.json. The block intentionally:
+     • Leads with the URL so the user can click within 1 second
+     • Surfaces the dashboard link so they know where to manage env
+       vars, browse the database, see deployment history
+     • Reassures them that re-deploying is a one-word ask
+   The qcode title bar also has a permanent "Apps" link → qlaud.ai/apps
+   so users always have a one-click path back to manage their deploys
+   without retyping anything.
 
 6. On error — surface error.message verbatim. The server returns
    structured codes:
