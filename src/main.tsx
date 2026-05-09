@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { QueryClientProvider } from '@tanstack/react-query';
 
 import { App } from './App';
+import { PlayPage } from './ui/PlayPage';
 import { initAnalytics, posthog } from './lib/analytics';
 import { consumeAuthCallback, hydrateAuth } from './lib/auth';
 import { hydrateThreadsFromCache, queryClient } from './lib/queries';
@@ -45,10 +46,21 @@ async function boot() {
   // Seed the threads query from localStorage so the sidebar paints
   // instantly on cold start while the remote refetch runs in the bg.
   hydrateThreadsFromCache();
+  // /play — Cloudflare Sandbox SDK-backed playground. Routes here
+  // intentionally bypass the regular qcode chat surface (no thread,
+  // no workspace folder, no engine-spawning sidecar). The PlayPage
+  // owns its own lifecycle: mint sandbox → run hardcoded scaffold
+  // pipeline → show preview iframe. Detected via plain pathname
+  // check rather than wiring a router — the rest of the app uses
+  // window.location for thread-id parsing, keeping that pattern
+  // consistent here means one less abstraction to learn.
+  const isPlay =
+    typeof window !== 'undefined' &&
+    window.location.pathname.replace(/\/+$/, '') === '/play';
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
       <QueryClientProvider client={queryClient}>
-        <App />
+        {isPlay ? <PlayPage /> : <App />}
       </QueryClientProvider>
     </React.StrictMode>,
   );
