@@ -2206,6 +2206,54 @@ function BlockRow({
     // message stream — no per-block card. Hide it here so the user
     // sees one canonical source of truth, not a tool log + a panel.
     if (block.call.name === 'todo_write') return null;
+
+    // claude-code's plan mode emits an 'ExitPlanMode' tool_call with
+    // input.plan = the markdown plan. The default ToolCallCard would
+    // hide it (input is invisible in the generic renderer; output is
+    // empty for ExitPlanMode since it's a control-flow tool, not a
+    // data-returning one). Render the plan body as proper markdown
+    // so the user can actually read what claude proposes — the whole
+    // point of plan mode is reviewability.
+    //
+    // Case-insensitive match: claude-code engine emits 'ExitPlanMode'
+    // (PascalCase); the legacy engine emits 'exit_plan_mode'
+    // (snake_case) and is handled separately via the ApprovalCard
+    // path. This branch covers both for robustness.
+    const isExitPlan =
+      block.call.name === 'ExitPlanMode' ||
+      block.call.name === 'exit_plan_mode';
+    if (isExitPlan) {
+      const planText = extractPlanFromInput(block.call.input);
+      return (
+        <div id={`tool-${block.call.id}`} className="flex scroll-mt-4 pl-10">
+          <div className="min-w-0 flex-1">
+            <PlanProposalCard plan={planText} />
+          </div>
+        </div>
+      );
+    }
+
+    // claude-code's AskUserQuestion tool — currently disallowed in
+    // the sandbox spawn (see apps/edge/src/routes/sandbox.ts) because
+    // we don't have a bidirectional --resume path to feed the
+    // answer back. If a future spawn path enables it, render the
+    // question + a "answer in your next message" hint so the user
+    // knows what to do; their next prompt becomes claude's input on
+    // the resumed turn.
+    const isAskUser =
+      block.call.name === 'AskUserQuestion' ||
+      block.call.name === 'ask_user_question';
+    if (isAskUser) {
+      const question = extractQuestionFromInput(block.call.input);
+      return (
+        <div id={`tool-${block.call.id}`} className="flex scroll-mt-4 pl-10">
+          <div className="min-w-0 flex-1">
+            <QuestionCard question={question} />
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div id={`tool-${block.call.id}`} className="flex scroll-mt-4 pl-10">
         <div className="min-w-0 flex-1">
@@ -2502,6 +2550,14 @@ function phraseForTool(name: string, input: unknown): string {
   const inp = (input ?? {}) as Record<string, unknown>;
   const str = (key: string): string =>
     typeof inp[key] === 'string' ? (inp[key] as string) : '';
+  // claude-code emits PascalCase tool names (Read, Write, Bash,
+  // ExitPlanMode, AskUserQuestion); the legacy engine emits
+  // snake_case (read_file, write_file, bash, exit_plan_mode).
+  // Lowercase + strip underscores once so a single switch covers
+  // both engines' variants.
+  const norm = name.toLowerCase().replace(/_/g, '');
+  if (norm === 'exitplanmode') return 'Submitting plan for review…';
+  if (norm === 'askuserquestion') return 'Asking you a question…';
   switch (name) {
     case 'read_file':
       return `Reading ${truncate(str('path'), 50) || 'file'}…`;
@@ -2726,6 +2782,112 @@ function TypingDots({ activity }: { activity: string | null }) {
           {quip}
         </span>
       )}
+    </div>
+  );
+}
+
+// ─── Plan-mode proposal card ───────────────────────────────────────
+//
+// Renders claude's ExitPlanMode tool call as a proper markdown card
+// instead of a generic tool box. Plan mode's whole value is the
+// user being able to read + judge the plan before it executes —
+// the generic ToolCallCard hides input (the plan content lives
+// there) so the plan was effectively invisible until this card
+// existed.
+//
+// V1 just renders the markdown and a hint to switch to Agent mode.
+// V2 will add a one-click "Approve and execute" button that flips
+// the mode toggle + auto-sends an "execute the plan" follow-up turn.
+
+function extractPlanFromInput(input: unknown): string {
+  // claude-code wraps the plan as { plan: '...markdown...' } in its
+  // ExitPlanMode tool input. Legacy engine uses the same shape.
+  // Defensive against malformed inputs (string vs missing).
+  if (!input || typeof input !== 'object') {
+    return typeof input === 'string' ? input : '';
+  }
+  const v = (input as Record<string, unknown>).plan;
+  if (typeof v === 'string') return v;
+  // Fallback: stringify the whole thing so SOMETHING shows up. Better
+  // than a blank card.
+  try {
+    return '```json\n' + JSON.stringify(input, null, 2) + '\n```';
+  } catch {
+    return '';
+  }
+}
+
+function PlanProposalCard({ plan }: { plan: string }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-emerald-500/40 bg-emerald-50/40 dark:bg-emerald-950/20">
+      <header className="flex items-center justify-between gap-2 border-b border-emerald-500/30 bg-emerald-100/40 px-3 py-2 dark:bg-emerald-900/30">
+        <div className="flex items-center gap-2">
+          <Check className="h-3.5 w-3.5 shrink-0 text-emerald-700 dark:text-emerald-400" />
+          <span className="text-[12px] font-medium text-emerald-900 dark:text-emerald-200">
+            Plan ready for review
+          </span>
+        </div>
+        <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
+          Plan mode
+        </span>
+      </header>
+      <div className="max-h-[520px] overflow-auto px-4 py-3 text-[13px] leading-relaxed">
+        {plan ? (
+          <Markdown source={plan} />
+        ) : (
+          <p className="text-muted-foreground">
+            (claude submitted an empty plan — try refining the prompt)
+          </p>
+        )}
+      </div>
+      <footer className="border-t border-emerald-500/20 bg-emerald-50/30 px-3 py-2 text-[11px] text-muted-foreground dark:bg-emerald-950/20">
+        Switch the mode toggle from <span className="font-medium">Plan</span> to{' '}
+        <span className="font-medium">Agent</span> and ask claude to execute
+        the plan.
+      </footer>
+    </div>
+  );
+}
+
+// ─── AskUserQuestion card ─────────────────────────────────────────
+//
+// claude can pause execution and ask the user a clarifying question
+// via the AskUserQuestion tool. Currently disallowed in the sandbox
+// spawn (see apps/edge/src/routes/sandbox.ts:--disallowedTools=
+// AskUserQuestion) because v1 has no bidirectional --resume path to
+// deliver the answer back. If/when that lands, this card renders
+// the question prominently so the user knows they need to answer
+// in their next message.
+
+function extractQuestionFromInput(input: unknown): string {
+  if (!input || typeof input !== 'object') {
+    return typeof input === 'string' ? input : '';
+  }
+  // claude-code's AskUserQuestion tool uses { question: '...' };
+  // legacy snake_case variant uses { prompt: '...' }. Try both.
+  const obj = input as Record<string, unknown>;
+  const q = obj.question ?? obj.prompt ?? obj.text;
+  return typeof q === 'string' ? q : '';
+}
+
+function QuestionCard({ question }: { question: string }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20">
+      <header className="flex items-center gap-2 border-b border-amber-500/30 bg-amber-100/40 px-3 py-2 dark:bg-amber-900/30">
+        <span className="text-sm" aria-hidden>
+          ❔
+        </span>
+        <span className="text-[12px] font-medium text-amber-900 dark:text-amber-200">
+          Claude has a question
+        </span>
+      </header>
+      <div className="px-4 py-3 text-[13px] leading-relaxed text-foreground">
+        {question || '(no question text)'}
+      </div>
+      <footer className="border-t border-amber-500/20 bg-amber-50/30 px-3 py-2 text-[11px] text-muted-foreground dark:bg-amber-950/20">
+        Type your answer in the composer below — claude will pick it up on
+        the next turn.
+      </footer>
     </div>
   );
 }
