@@ -259,14 +259,19 @@ export async function runEngineSandboxAgent(
         stderr?: string;
       };
       if (w.type === 'qcode_bootstrap') {
+        // Honest copy: the 25s install pays per COLD container, not
+        // one-time globally. After 10 min idle the container sleeps;
+        // the next turn from a stale tab pays this again. Will go
+        // to ~0s once the qcode-engine prebuilt image ships with
+        // claude baked in.
         const text =
           w.subtype === 'install_start'
-            ? 'Setting up the agent (one-time, ~25s)…'
+            ? 'Spinning up your sandbox (~25s)…'
             : w.subtype === 'install_done'
-              ? 'Agent ready.'
+              ? 'Sandbox ready.'
               : w.subtype === 'install_failed'
-                ? `Agent install failed: ${w.stderr ?? 'unknown'}`
-                : `Agent: ${w.subtype ?? 'progress'}`;
+                ? `Sandbox setup failed: ${w.stderr ?? 'unknown'}`
+                : `Sandbox: ${w.subtype ?? 'progress'}`;
         opts.onEvent({ type: 'text', text: text + '\n' });
         return;
       }
