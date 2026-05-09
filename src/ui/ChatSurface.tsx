@@ -887,6 +887,10 @@ export function ChatSurface({
           },
           model,
           qcodeThreadId: myThread,
+          // mode is 'agent' or 'plan' here (engineMode==='sandbox-agent'
+          // is gated on mode!=='chat' in the dispatcher above). Type
+          // narrowing is fine; cast through the union to satisfy TS.
+          mode: mode === 'plan' ? 'plan' : 'agent',
           // workspace passed for contract uniformity; the sandbox
           // engine ignores it (cwd is /workspace inside the
           // container).

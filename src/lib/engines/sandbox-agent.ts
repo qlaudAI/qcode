@@ -52,6 +52,11 @@ export type RunSandboxAgentOpts = {
   onSessionId?: (id: string) => void;
   model: string;
   qcodeThreadId?: string | null;
+  /** 'agent' (default) → claude with --dangerously-skip-permissions
+   *  for full toolkit. 'plan' → claude with --permission-mode plan
+   *  (read-only tools, model proposes, user flips to agent to
+   *  execute). Mirrors desktop's settings.autoApprove dispatch. */
+  mode?: 'agent' | 'plan';
   /** Ignored on web — sandbox container's cwd is /workspace. The
    *  field stays in the contract so the dispatcher can pass through
    *  whatever ChatSurface has without branching. */
@@ -137,6 +142,11 @@ export async function runEngineSandboxAgent(
           prompt: promptText,
           model: opts.model,
           thread_id: opts.qcodeThreadId ?? null,
+          // 'agent' or 'plan' — server flips the permission flag
+          // ('--dangerously-skip-permissions' vs '--permission-mode
+          // plan') accordingly. Defaults to 'agent' on the server
+          // when omitted, matching today's behavior.
+          mode: opts.mode ?? 'agent',
         }),
         signal: opts.signal,
       },
