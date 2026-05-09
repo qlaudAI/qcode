@@ -89,7 +89,11 @@ const STEPS: Step[] = [
     id: 'expose',
     label: 'Generating your live URL',
     async run(ctx) {
-      const preview = await getRuntime().exposePort(3000, {
+      // 8080 not 3000 — the Sandbox SDK reserves port 3000 for its
+      // control plane (exposing it returns SecurityError). The
+      // demo server in /opt/playground/serve.ts also defaults to
+      // 8080 to match.
+      const preview = await getRuntime().exposePort(8080, {
         name: 'demo-server',
       });
       ctx.setPreviewUrl(preview.url);

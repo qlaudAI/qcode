@@ -855,15 +855,23 @@ export function App() {
             model={model}
             onModelChange={onModelChange}
             mode={mode}
-            hasWorkspace={!!workspace}
-            workspaceName={workspace?.name}
+            // Web (non-Tauri) ALWAYS has a workspace — the sandbox
+            // container's /workspace dir. Without this, the chat
+            // surface gates on `hasWorkspace` and shows the "open
+            // a folder" stub on web forever (there's no folder
+            // picker in the browser). Desktop still depends on a
+            // user-picked folder.
+            hasWorkspace={!!workspace || !isTauri()}
+            workspaceName={workspace?.name ?? (!isTauri() ? 'sandbox' : undefined)}
             onOpenFolder={async () => {
               const w = await tryOpenFolder();
               if (w) setWorkspace(w);
             }}
             rightRailView={rightRailView}
             onCloseRightRail={() => setRightRailView(null)}
-            workspacePath={workspace?.path}
+            // Same default as the agent endpoint mounts inside the
+            // container (apps/edge/src/routes/sandbox.ts).
+            workspacePath={workspace?.path ?? (!isTauri() ? '/workspace' : undefined)}
           />
         </main>
       </div>

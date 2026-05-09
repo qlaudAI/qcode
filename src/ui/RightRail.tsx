@@ -34,6 +34,7 @@ import { isTauri, openExternal, openLocalPath } from '../lib/tauri';
 
 import { cn } from '../lib/cn';
 import { readWorkspaceDiff, type FileDiff } from '../lib/git-info';
+import { getRuntime } from '../lib/runtime';
 import { useQcodeMeQuery, useQcodeUsageQuery } from '../lib/queries';
 import {
   bucketByDay,
@@ -583,6 +584,37 @@ function DetectedUrlsDropdown({
   );
 }
 
+// If `u` looks like a localhost dev-server URL, return the port the
+// agent's process is listening on. Used by PreviewView to ask the
+// runtime for a public-facing URL via exposePort — on sandbox this
+// returns an `<port>-sandbox-<id>-<token>.sbx.qlaud.app` URL the
+// user's browser can actually reach; on tauri it round-trips back
+// to localhost (the user already has direct network access). Both
+// runtimes go through the same code path so the iframe doesn't have
+// to branch on `isTauri()` at the call site.
+function localhostPort(u: string): number | null {
+  try {
+    const parsed = new URL(u);
+    if (
+      parsed.hostname !== 'localhost' &&
+      parsed.hostname !== '127.0.0.1' &&
+      parsed.hostname !== '0.0.0.0' &&
+      parsed.hostname !== '::1'
+    ) {
+      return null;
+    }
+    if (parsed.port) {
+      const p = Number.parseInt(parsed.port, 10);
+      return Number.isFinite(p) ? p : null;
+    }
+    // Implicit port — http=80, https=443. Dev servers practically
+    // always set an explicit port so this branch is mostly defensive.
+    return parsed.protocol === 'https:' ? 443 : 80;
+  } catch {
+    return null;
+  }
+}
+
 function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
   // Two sources for what to load in the iframe, in priority order:
   //   1. lastNavigatedUrl — the agent explicitly called
@@ -672,6 +704,85 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
   const [loadedUrl, setLoadedUrl] = useState(autoSource);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
+  // Runtime is selected once per mount — selection logic lives in
+  // ../lib/runtime (Tauri vs sandbox vs web-noop). Memoizing here
+  // means port-mapping effects don't re-run when the parent
+  // re-renders (every block stream tick would otherwise refresh
+  // the dep array via a new object identity).
+  const runtime = useMemo(() => getRuntime(), []);
+
+  // Port → public URL cache. Populated by exposePort calls below.
+  // On sandbox, exposePort hits the worker (~100-300ms); on tauri
+  // it resolves synchronously with a localhost URL. Caching here
+  // keeps the iframe from re-querying every reload, and means
+  // switching between detected URLs on the same port is instant.
+  const [portMappings, setPortMappings] = useState<Map<number, string>>(
+    () => new Map(),
+  );
+
+  // Track in-flight exposePort calls in a ref (not state) — flipping
+  // it doesn't need to trigger a render, and we want the dedupe
+  // check to be synchronous within a single tick. Without this,
+  // two effects firing back-to-back (e.g., loadedUrl changes twice
+  // quickly) would each fire their own request for the same port.
+  const inFlightPortsRef = useRef<Set<number>>(new Set());
+
+  // When loadedUrl is a localhost URL we don't yet have a public
+  // mapping for, ask the runtime to expose the port. The mapping
+  // lands in state, the iframeSrc memo picks it up, and the iframe
+  // src updates without any further plumbing.
+  useEffect(() => {
+    if (!loadedUrl) return;
+    const port = localhostPort(loadedUrl);
+    if (port === null) return;
+    if (portMappings.has(port)) return;
+    if (inFlightPortsRef.current.has(port)) return;
+    inFlightPortsRef.current.add(port);
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await runtime.exposePort(port);
+        if (cancelled) return;
+        setPortMappings((prev) => {
+          if (prev.has(port)) return prev;
+          const next = new Map(prev);
+          next.set(port, result.url);
+          return next;
+        });
+      } catch (e) {
+        // exposePort can fail when the sandbox container is still
+        // booting or the worker is unreachable. The iframe falls
+        // back to a clear empty state; don't toast — the agent
+        // typically prints the URL again on the next dev-server
+        // restart and the effect will retry.
+        console.warn(
+          'PreviewView: exposePort failed for port',
+          port,
+          e,
+        );
+      } finally {
+        inFlightPortsRef.current.delete(port);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadedUrl, runtime, portMappings]);
+
+  // True iff we're showing a localhost URL on the sandbox runtime
+  // and haven't yet received the public mapping. The iframe area
+  // renders a small spinner in this state — without it, the iframe
+  // would briefly try to load the raw localhost URL against the
+  // user's machine, which is guaranteed to fail in the cloud
+  // playground.
+  const isPendingPortMapping = useMemo(() => {
+    if (!loadedUrl) return false;
+    if (runtime.kind !== 'sandbox') return false;
+    const port = localhostPort(loadedUrl);
+    if (port === null) return false;
+    return !portMappings.has(port);
+  }, [loadedUrl, runtime.kind, portMappings]);
+
   // Auto-load when the agent navigates OR a dev server boots on a
   // detected port. Keeps the panel in sync with what's actually
   // running without forcing the user to retype the URL.
@@ -697,44 +808,67 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
     setTimeout(() => setLoadedUrl(current), 0);
   }
 
-  // Two macOS-specific footguns when loading dev URLs in the
-  // WebView, both surfacing as "wrong page in preview":
+  // Build the URL the iframe actually loads from `loadedUrl`. Three
+  // cases:
   //
-  //   1. `localhost` resolves to `::1` (IPv6 loopback) on macOS
-  //      by default. Vite + most dev servers bind to `127.0.0.1`
-  //      (IPv4) only — so loading `http://localhost:5173/` either
-  //      fails or hits a STALE process from a prior session that
-  //      had bound IPv6. Forcing 127.0.0.1 sidesteps the entire
-  //      AAAA-vs-A resolution path.
+  //   A. Non-localhost URL (e.g. https://example.com). Use as-is +
+  //      cache-bust query.
   //
-  //   2. WebView caches by origin, and `localhost` and `127.0.0.1`
-  //      are different origins. A cached page for one stays valid
-  //      across server restarts that change the underlying content
-  //      at the same port. Adding a per-load cache-buster query
-  //      param forces a fresh fetch every time the iframe loads.
+  //   B. Localhost URL with a public mapping cached. Graft the
+  //      user's path/query/hash onto the public origin so deep
+  //      links the agent navigated to ("Local: http://localhost:
+  //      3000/dashboard") survive the rewrite. The public URL is
+  //      reachable from the user's browser; the original localhost
+  //      one isn't (in sandbox mode the dev server is in a CF
+  //      container, not on the user's machine).
   //
-  // Normalize for iframe loading only — keep the user's typed
-  // URL display intact so they see what they typed in the URL bar.
-  // Vite + Next + every dev server we test ignore unknown query
-  // params, so `?_qcode=<ts>` is safe. */
+  //   C. Localhost URL, sandbox runtime, mapping not yet available.
+  //      Return '' and let the JSX below render a spinner. We
+  //      explicitly do NOT try to load the raw localhost URL — it
+  //      would just hit nothing-listening on the user's host.
+  //
+  //   D. Localhost URL, tauri runtime, mapping not yet available
+  //      (rare: exposePort resolves synchronously). Apply the
+  //      legacy macOS-IPv6-vs-IPv4 normalization (force 127.0.0.1)
+  //      and cache-bust — same behavior as the pre-runtime-routing
+  //      preview pane on desktop.
   const iframeSrc = useMemo(() => {
     if (!loadedUrl) return '';
-    let normalized = loadedUrl;
+    let parsed: URL;
     try {
-      const parsed = new URL(loadedUrl);
-      if (parsed.hostname === 'localhost') {
-        parsed.hostname = '127.0.0.1';
-      }
-      // Cache-bust on every (re)load so a stale cached page from a
-      // prior dev-server instance can't shadow the current content.
-      // Stripped on display in the URL input — this is iframe-only.
-      parsed.searchParams.set('_qcode', String(Date.now()));
-      normalized = parsed.toString();
+      parsed = new URL(loadedUrl);
     } catch {
-      // Not a parseable URL — fall through with the raw value.
+      return loadedUrl;
     }
-    return normalized;
-  }, [loadedUrl]);
+
+    const port = localhostPort(loadedUrl);
+    if (port !== null) {
+      const mapped = portMappings.get(port);
+      if (mapped) {
+        // Case B — graft path/query/hash onto the public origin.
+        try {
+          const out = new URL(mapped);
+          out.pathname = parsed.pathname;
+          out.search = parsed.search;
+          out.hash = parsed.hash;
+          out.searchParams.set('_qcode', String(Date.now()));
+          return out.toString();
+        } catch {
+          return mapped;
+        }
+      }
+      if (runtime.kind === 'sandbox') {
+        // Case C — pending mapping, JSX shows the spinner.
+        return '';
+      }
+      // Case D — tauri fallback.
+      if (parsed.hostname === 'localhost') parsed.hostname = '127.0.0.1';
+    }
+
+    // Case A (or D continuation) — cache-bust and ship.
+    parsed.searchParams.set('_qcode', String(Date.now()));
+    return parsed.toString();
+  }, [loadedUrl, portMappings, runtime.kind]);
 
   return (
     <div className="flex h-full flex-col">
@@ -795,16 +929,25 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
         )}
       </div>
       {loadedUrl ? (
-        <iframe
-          ref={iframeRef}
-          src={iframeSrc}
-          className="min-h-0 w-full flex-1 border-0 bg-white"
-          // Allow same-origin so cookies/storage work for localhost
-          // dev. Don't allow scripts to escape the frame (default
-          // sandbox). For dev servers this covers the typical case.
-          sandbox="allow-same-origin allow-scripts allow-forms"
-          referrerPolicy="no-referrer"
-        />
+        isPendingPortMapping ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground/70" />
+            <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+              Exposing port through the sandbox…
+            </p>
+          </div>
+        ) : (
+          <iframe
+            ref={iframeRef}
+            src={iframeSrc}
+            className="min-h-0 w-full flex-1 border-0 bg-white"
+            // Allow same-origin so cookies/storage work for localhost
+            // dev. Don't allow scripts to escape the frame (default
+            // sandbox). For dev servers this covers the typical case.
+            sandbox="allow-same-origin allow-scripts allow-forms"
+            referrerPolicy="no-referrer"
+          />
+        )
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
           <Play className="h-5 w-5 text-muted-foreground/60" />
@@ -1204,8 +1347,6 @@ function classifyMedia(name: string): MediaKind | null {
 }
 
 async function scanWorkspaceMedia(root: string): Promise<MediaItem[]> {
-  if (!isTauri()) return [];
-
   // Shell out to `find` rather than walking via Tauri's readDir.
   //
   // Why: Tauri 2's plugin-fs readDir has surfaced cases on macOS
@@ -1253,10 +1394,13 @@ async function scanWorkspaceMedia(root: string): Promise<MediaItem[]> {
 
   let stdout = '';
   try {
-    const { runBashSession } = await import('../lib/legacy/bash-session');
-    const r = await runBashSession({
-      workspace: root,
-      command: cmd,
+    // Route through the runtime so this works on both Tauri (local
+    // bash session) and sandbox (worker /exec → CF Sandbox SDK).
+    // Same find+stat pipeline either way; the BSD/GNU detection
+    // inside `cmd` covers Tauri-on-macOS, while the container is
+    // Linux so the GNU branch lights up automatically there.
+    const r = await getRuntime().exec(cmd, {
+      cwd: root,
       timeoutMs: 8_000,
     });
     stdout = r.stdout;

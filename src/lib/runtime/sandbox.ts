@@ -25,6 +25,7 @@ import {
   terminateSandboxSession,
 } from './sandbox-session';
 import type {
+  DirEntry,
   ExecOptions,
   ExecResult,
   PreviewUrl,
@@ -126,6 +127,16 @@ class SandboxRuntime implements Runtime {
       path,
       recursive: options?.recursive,
     });
+  }
+
+  async readDir(path: string): Promise<DirEntry[]> {
+    // Worker shells out to `find -mindepth 1 -maxdepth 1 -printf …`
+    // and returns the parsed listing. We deliberately don't pre-
+    // filter dotfiles or apply gitignore here — that's
+    // workspace.readDir's job. Keep this layer dumb so the agent's
+    // own Glob tool can also rely on it without surprises.
+    const r = await call<{ entries: DirEntry[] }>('/fs/readdir', { path });
+    return r.entries ?? [];
   }
 
   async exposePort(

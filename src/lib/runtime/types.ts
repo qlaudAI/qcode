@@ -51,6 +51,17 @@ export interface ExecOptions {
   env?: Record<string, string>;
 }
 
+/** One immediate child of a directory. Minimal shape: just enough
+ *  to render a tree row and decide whether to recurse. Symlinks
+ *  surface as files (isDirectory=false) — the FileTree doesn't
+ *  follow them, and the agent's Bash tool can resolve when needed.
+ *  Add `kind: 'dir' | 'file' | 'symlink'` here when a caller needs
+ *  the distinction. */
+export interface DirEntry {
+  name: string;
+  isDirectory: boolean;
+}
+
 /** Preview URL exposed for a port the user's app is listening on.
  *  Same shape on both runtimes:
  *    - tauri.ts   → http://localhost:<port> (+ optional 127.0.0.1 fallback)
@@ -94,6 +105,15 @@ export interface Runtime {
 
   /** Create a directory. `recursive: true` matches `mkdir -p`. */
   mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+
+  /** List immediate children of a directory. Returns the raw shape
+   *  without the workspace.ts filtering layer (gitignore, hidden
+   *  files, sort) — that policy lives at the call site so each
+   *  surface (FileTree vs media scanner vs agent's Glob) can opt
+   *  into the rules it actually wants.
+   *  Throws on non-existent path / permission denied; callers
+   *  decide whether that's fatal. */
+  readDir(path: string): Promise<DirEntry[]>;
 
   /** Expose an open port and return a publicly reachable URL. On
    *  Tauri this is a glorified `http://localhost:<port>` since the

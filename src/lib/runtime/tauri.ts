@@ -11,6 +11,7 @@
 import { runBashSession } from '../legacy/bash-session';
 import { isTauri } from '../tauri';
 import type {
+  DirEntry,
   ExecOptions,
   ExecResult,
   PreviewUrl,
@@ -84,6 +85,21 @@ class TauriRuntime implements Runtime {
     if (!isTauri()) throw new Error('tauri runtime: mkdir requires desktop');
     const { mkdir } = await import('@tauri-apps/plugin-fs');
     await mkdir(path, { recursive: options?.recursive });
+  }
+
+  async readDir(path: string): Promise<DirEntry[]> {
+    if (!isTauri()) throw new Error('tauri runtime: readDir requires desktop');
+    const { readDir } = await import('@tauri-apps/plugin-fs');
+    const entries = await readDir(path);
+    // Note: this is the raw tauri-plugin-fs surface — no gitignore
+    // filtering, no hidden-file dropouts, no sort. workspace.readDir
+    // wraps with that policy. The macOS-dotfile bug fix lives there
+    // too (only the Tauri path is affected; sandbox `find` always
+    // returns dotfiles).
+    return entries.map((e) => ({
+      name: e.name,
+      isDirectory: e.isDirectory,
+    }));
   }
 
   async exposePort(

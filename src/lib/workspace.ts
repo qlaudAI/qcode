@@ -460,15 +460,46 @@ async function walkAll(
 }
 
 /** Read the immediate children of a folder. Used by the file tree
- *  on expand. Returns an empty array if not in Tauri or on error. */
+ *  on expand. Returns an empty array on error.
+ *
+ *  Routing:
+ *    - Tauri  → tauri-plugin-fs.readDir + the macOS-dotfile fallback
+ *               below. Workspace-scoped gitignore matcher applies.
+ *    - /play  → runtime.readDir → worker /fs/readdir (find shell-out).
+ *               Hidden-file fallback isn't needed (find always lists
+ *               them); gitignore matcher SKIPPED on sandbox because
+ *               its only build path is via getMatcher which reads
+ *               .gitignore through plugin-fs. We could plumb that
+ *               through Runtime.readFile too, but the playground's
+ *               value prop is "see your generated files" — showing
+ *               .gitignore + node_modules is fine for now.
+ *    - web no-op → throws via runtime; we catch and return []. */
 export async function readDir(path: string): Promise<FileNode[]> {
+  // Browser /play mode: route through the runtime. No matcher (see
+  // header comment); the `shouldHide` fallback covers the worst
+  // offenders (.git, node_modules listed but tree row is harmless).
   if (!isTauri()) {
-    // Browser-mode: no fs access. Show a stub so the tree renders.
-    return [
-      { name: 'src', path: `${path}/src`, isDir: true },
-      { name: 'package.json', path: `${path}/package.json`, isDir: false },
-      { name: 'README.md', path: `${path}/README.md`, isDir: false },
-    ];
+    try {
+      const { getRuntime } = await import('./runtime');
+      const entries = await getRuntime().readDir(path);
+      return entries
+        .map((e) => ({
+          name: e.name,
+          path: `${path}/${e.name}`,
+          isDir: e.isDirectory,
+        }))
+        .filter((e) => !shouldHide(e.name))
+        .sort((a, b) => {
+          if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+          return a.name.localeCompare(b.name, 'en');
+        });
+    } catch {
+      // web-noop runtime or sandbox unreachable — return empty so
+      // the tree shows a folder with no children rather than
+      // crashing the rail. The sandbox.ts call() throws with a
+      // useful message that lands in the console.
+      return [];
+    }
   }
   // Resolve the active workspace root by stripping the requested
   // path back to its current-workspace prefix; if the user happens

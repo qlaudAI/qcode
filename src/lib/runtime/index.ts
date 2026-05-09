@@ -11,11 +11,15 @@
 //   2. If we're inside Tauri (`isTauri()`), use the Tauri impl.
 //      This is the default for the desktop app — fastest path,
 //      direct fs / shell access, no network tax.
-//   3. Otherwise we're in a plain browser tab without an explicit
-//      opt-in. Return a no-op impl that throws on every call.
-//      The web build (qcode-web.pages.dev) currently doesn't have
-//      a remote runtime to connect to outside of /play, so any
-//      caller that ends up here is a bug worth surfacing loudly.
+//   3. Otherwise (qcode-web root path, no /play opt-in) → sandbox
+//      runtime. Originally this branch returned a web-noop stub —
+//      qcode-web has nothing local to run against, so there was
+//      no runtime to pick. With the sandbox-agent engine in place
+//      every web user IS implicitly running inside a CF sandbox
+//      session, so routing the runtime there too keeps File Tree /
+//      preview / media in sync with what the agent is editing.
+//      Pre-sandbox callers that never expected a runtime can still
+//      opt out via setRuntimeOverride(null no-op) at the test seam.
 //
 // Why module-local memoization: every consumer (FileTree, agent
 // loop, RightRail) calls getRuntime() per render — without the
@@ -61,9 +65,17 @@ export function getRuntime(): Runtime {
 
   if (isTauri()) return getTauriRuntime();
 
-  // Plain web build, no /play opt-in. Return a stub that fails fast
-  // on use — better than silently no-op'ing fs writes and confusing
-  // the user about why their changes aren't saved.
+  // qcode-web (any path that's not /play) → sandbox by default.
+  // Every web turn already mints a sandbox session via sandbox-agent
+  // .ts; the runtime just routes ad-hoc fs/preview calls through
+  // the same container so what the user SEES (FileTree, preview
+  // iframe, media) matches what the agent is doing.
+  if (typeof window !== 'undefined') {
+    return getSandboxRuntime();
+  }
+
+  // SSR / non-window context (vitest, prerender). No runtime to
+  // talk to; the no-op throws if anyone calls it.
   return WEB_NOOP;
 }
 
@@ -104,10 +116,19 @@ const WEB_NOOP: Runtime = {
   async exposePort() {
     throw new Error('runtime: not available in web build');
   },
+  async readDir() {
+    throw new Error('runtime: not available in web build');
+  },
 };
 
 // Re-export the contract types so consumers don't have to know
 // about the file split.
-export type { ExecOptions, ExecResult, PreviewUrl, Runtime } from './types';
+export type {
+  DirEntry,
+  ExecOptions,
+  ExecResult,
+  PreviewUrl,
+  Runtime,
+} from './types';
 // Export terminateSandbox so /play unmount handlers can clean up.
 export { getSandboxSessionId, terminateSandbox } from './sandbox';
