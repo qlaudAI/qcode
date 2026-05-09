@@ -125,7 +125,19 @@ export async function runEngineSandboxAgent(
           'x-api-key': apiKey,
           'content-type': 'application/json',
         },
-        body: JSON.stringify({ prompt: promptText, model: opts.model }),
+        // thread_id triggers the server-side GitLab persistence
+        // path: clone-or-init the per-thread repo before running
+        // claude, push after. When the server's GITLAB_TOKEN_
+        // QCODE_USERS secret is unset (or thread_id is omitted),
+        // the server runs the agent without persistence — same
+        // behavior as before this commit. Sending thread_id
+        // unconditionally makes the migration to persistence a
+        // server-side flag flip with zero client coordination.
+        body: JSON.stringify({
+          prompt: promptText,
+          model: opts.model,
+          thread_id: opts.qcodeThreadId ?? null,
+        }),
         signal: opts.signal,
       },
     );
