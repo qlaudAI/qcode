@@ -19,6 +19,11 @@
 // quota lives at the user level on the worker side.
 
 import { getKey } from '../auth';
+import {
+  ensureSandboxSession,
+  getSandboxSessionId,
+  terminateSandboxSession,
+} from './sandbox-session';
 import type {
   ExecOptions,
   ExecResult,
@@ -29,48 +34,11 @@ import type {
 const BASE =
   (import.meta.env.VITE_QLAUD_BASE as string | undefined) ?? 'https://api.qlaud.ai';
 
-/** Lazily-minted session id. Lives in module scope so multiple
- *  consumers (FileTree, ChatSurface, RightRail) all see the same
- *  container. Nullable because the first call has to mint it. */
-let sessionId: string | null = null;
-let mintInFlight: Promise<string> | null = null;
-
-/** Mint or return the cached session id. Concurrency-safe — if two
- *  callers race the mint, both await the same promise so we don't
- *  end up with two unused containers (and two billing entries). */
-async function ensureSession(): Promise<string> {
-  if (sessionId) return sessionId;
-  if (mintInFlight) return mintInFlight;
-  mintInFlight = (async () => {
-    const apiKey = getKey();
-    if (!apiKey) {
-      throw new Error('sandbox runtime: sign in required (no api key)');
-    }
-    const res = await fetch(`${BASE}/v1/sandbox/sessions`, {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({}),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`sandbox mint failed (${res.status}): ${text.slice(0, 200)}`);
-    }
-    const data = (await res.json()) as { session_id?: string };
-    if (!data.session_id) {
-      throw new Error('sandbox mint: response missing session_id');
-    }
-    sessionId = data.session_id;
-    return sessionId;
-  })();
-  try {
-    return await mintInFlight;
-  } finally {
-    mintInFlight = null;
-  }
-}
+// Session minting + lifecycle moved to ./sandbox-session so the
+// agent engine (engines/sandbox-agent.ts) can mint without dragging
+// the whole Runtime contract through. Re-export ensureSession here
+// as a private alias to keep the call sites below readable.
+const ensureSession = ensureSandboxSession;
 
 /** Wrap fetch with auth + JSON-body convention used by every
  *  sandbox endpoint. Throws with a useful error message on non-2xx
@@ -188,25 +156,9 @@ export function getSandboxRuntime(): Runtime {
  *  enough cleanup, and forcing a synchronous teardown on unload
  *  would block the page transition. */
 export async function terminateSandbox(): Promise<void> {
-  const id = sessionId;
-  if (!id) return;
-  const apiKey = getKey();
-  if (!apiKey) return;
-  sessionId = null;
   cached = null;
-  await fetch(
-    `${BASE}/v1/sandbox/sessions/${encodeURIComponent(id)}`,
-    {
-      method: 'DELETE',
-      headers: { 'x-api-key': apiKey },
-    },
-  ).catch(() => {
-    /* best-effort — server idles us out anyway */
-  });
+  await terminateSandboxSession();
 }
 
-/** For diagnostics / UI badges. Returns the active session id
- *  without minting one. */
-export function getSandboxSessionId(): string | null {
-  return sessionId;
-}
+/** Re-export for callers that still import from './sandbox'. */
+export { getSandboxSessionId };

@@ -826,12 +826,27 @@ export function ChatSurface({
       // erroring. The user gets pure conversation; once they open
       // a folder, the claude-code engine takes over for tool-using
       // turns. Mirrors the web experience for chat-only usage.
+      // Three engine paths from a single picker:
+      //   - claude-code   → Tauri sidecar (desktop only; needs workspace
+      //                     folder; the original Engine Mode v0 path).
+      //   - sandbox-agent → Cloudflare Sandbox SDK over HTTP (web build
+      //                     only; container's /workspace replaces the
+      //                     local folder; lazy-bootstraps claude on
+      //                     first session turn). Same JSON-line wire
+      //                     format as desktop, so ChatSurface's
+      //                     reducer doesn't change.
+      //   - qcode-legacy  → fallback chat-only path (desktop without a
+      //                     folder, or web outside /play). No tools.
+      //
+      // The selector: prefer claude-code on desktop with a folder,
+      // sandbox-agent on web (where there's no Tauri but we have a
+      // server-side container), qcode-legacy as universal fallback.
       const engineMode =
-        settingsAtSend.engine === 'claude-code' &&
-        isTauri() &&
-        !!workspace?.path
+        settingsAtSend.engine === 'claude-code' && isTauri() && !!workspace?.path
           ? 'claude-code'
-          : 'qcode-legacy';
+          : settingsAtSend.engine === 'claude-code' && !isTauri()
+            ? 'sandbox-agent'
+            : 'qcode-legacy';
 
       if (engineMode === 'claude-code') {
         const { runEngineClaudeCode, getClaudeSessionId, setClaudeSessionId } =
@@ -844,6 +859,32 @@ export function ChatSurface({
           // workspace is non-null here — engineMode === 'claude-code'
           // gates on !!workspace?.path above.
           workspace: workspace!.path,
+          content: userContent,
+          signal: abortRef.current.signal,
+          onEvent: sharedOnEvent,
+        });
+      } else if (engineMode === 'sandbox-agent') {
+        const { runEngineSandboxAgent } = await import(
+          '../lib/engines/sandbox-agent'
+        );
+        await runEngineSandboxAgent({
+          // No claude --resume on the sandbox engine yet; sessionId
+          // is repurposed for the sandbox container id (set inside
+          // the engine via onSessionId callback). Pass null so the
+          // engine mints a fresh one if needed.
+          sessionId: null,
+          onSessionId: () => {
+            // Sandbox session id isn't useful to ChatSurface state
+            // for v1 — it lives in the runtime/sandbox-session
+            // module. Persisting it would require a separate
+            // ledger; punt until the multi-turn refactor.
+          },
+          model,
+          qcodeThreadId: myThread,
+          // workspace passed for contract uniformity; the sandbox
+          // engine ignores it (cwd is /workspace inside the
+          // container).
+          workspace: workspace?.path ?? '/workspace',
           content: userContent,
           signal: abortRef.current.signal,
           onEvent: sharedOnEvent,
