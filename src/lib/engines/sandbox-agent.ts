@@ -292,6 +292,74 @@ export async function runEngineSandboxAgent(
         });
         return;
       }
+      // GitLab persistence lifecycle events. Surfacing them in the
+      // chat is the diagnostic difference between "we silently lost
+      // your work" and "the platform reported a clean retry path".
+      // These events are emitted by apps/edge/src/routes/sandbox.ts
+      // around the clone (resume_*), end-of-turn push (push_*), and
+      // mid-turn checkpoint timer (checkpoint_*). The chat surface
+      // already tolerates `text` events at any position, so they
+      // appear as system-style status lines under the assistant
+      // turn without bloating the message history.
+      if (w.type === 'qcode_persist') {
+        const sub = w.subtype ?? '';
+        const wp = w as unknown as {
+          subtype?: string;
+          project_path?: string;
+          message?: string;
+          slug?: string;
+        };
+        const path = wp.project_path ?? wp.slug ?? '';
+        const text =
+          sub === 'resume_start'
+            ? `↻ Restoring workspace from gitlab.com/${path}…`
+            : sub === 'resume_done'
+              ? `✓ Workspace restored from gitlab.com/${path}`
+              : sub === 'resume_failed'
+                ? `⚠ Restore failed: ${wp.message ?? 'unknown'} — starting with empty workspace`
+                : sub === 'create_start'
+                  ? `+ Creating new gitlab repo: ${wp.slug ?? ''}`
+                  : sub === 'create_done'
+                    ? `✓ Workspace tracking initialized at gitlab.com/${path}`
+                    : sub === 'checkpoint_ok'
+                      ? `✓ Checkpoint pushed`
+                      : sub === 'push_failed'
+                        ? `⚠ Push failed at end-of-turn: ${wp.message ?? 'unknown'} — work may be lost`
+                        : sub === 'push_done'
+                          ? `✓ Final push to gitlab.com/${path}`
+                          : `Sandbox persist: ${sub}`;
+        opts.onEvent({ type: 'text', text: text + '\n' });
+        return;
+      }
+      // Resume decision — emitted right after we decide whether to
+      // pass --resume to claude. Tells us if claude SHOULD have
+      // memory of the prior conversation or is starting fresh.
+      if (w.type === 'qcode_resume') {
+        const wr = w as unknown as {
+          subtype?: string;
+          session_id?: string;
+          reason?: string;
+        };
+        const text =
+          wr.subtype === 'resumed'
+            ? `↻ Resuming claude session ${wr.session_id ?? '(unknown)'}`
+            : wr.subtype === 'fresh'
+              ? `+ Starting fresh claude session (${wr.reason ?? 'no prior sid'})`
+              : `Resume: ${wr.subtype ?? 'unknown'}`;
+        opts.onEvent({ type: 'text', text: text + '\n' });
+        return;
+      }
+      // Egress probe results — already shipped on worker side.
+      // Surface for diagnosis even though we expect ok in steady
+      // state; harmless to show.
+      if (w.type === 'qcode_egress_ok') {
+        // Quiet on success — no chat noise unless something fails.
+        return;
+      }
+      if (w.type === 'qcode_keepalive') {
+        // Internal connection-keepalive — never user-visible.
+        return;
+      }
     }
 
     if (ev.type === 'system' && ev.subtype === 'init') {
