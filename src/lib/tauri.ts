@@ -65,6 +65,41 @@ export async function openExternal(url: string): Promise<void> {
   await open(url);
 }
 
+/** Open a local file in the OS default app (Preview, QuickTime, Music,
+ *  the user's image viewer, etc.). Why a separate helper from
+ *  openExternal: tauri-plugin-shell's `open()` enforces a URL-validation
+ *  regex (`^((mailto:\w+)|(tel:\w+)|(https?:\/\/\w+)).+`) — bare
+ *  filesystem paths fail it and the call rejects without ever launching
+ *  the app. Shelling out to the platform-native opener (`open` on macOS,
+ *  `xdg-open` on Linux, `start` via `cmd` on Windows) sidesteps the
+ *  validation entirely while reusing the shell:allow-execute permissions
+ *  already granted in capabilities/default.json. */
+export async function openLocalPath(absPath: string): Promise<void> {
+  if (!isTauri()) {
+    // No filesystem access from a plain browser — best we can do is
+    // surface a noop. The Media tab's web build already filters out
+    // local-only rows so this branch is unreachable in practice.
+    return;
+  }
+  const platform = await getPlatform();
+  const { Command } = await import('@tauri-apps/plugin-shell');
+  if (platform === 'windows') {
+    // `start` is a cmd.exe builtin; invoke via `cmd /c start "" <path>`.
+    // The empty quoted string is a no-op title arg — without it cmd
+    // would treat the (potentially quoted) path as the title and
+    // refuse to open the file.
+    const cmd = Command.create('cmd', ['/c', 'start', '', absPath]);
+    await cmd.execute();
+    return;
+  }
+  // macOS + Linux: shell out to a single-line wrapper so we can pick
+  // `open` vs `xdg-open` based on what's on PATH (matches what the
+  // Media row would do interactively in a terminal).
+  const opener = platform === 'macos' ? 'open' : 'xdg-open';
+  const cmd = Command.create('sh', ['-c', `${opener} "$0"`, absPath]);
+  await cmd.execute();
+}
+
 // ─── Window dragging ─────────────────────────────────────────────
 //
 // macOS WKWebView with `transparent: true` + `titleBarStyle: Overlay`

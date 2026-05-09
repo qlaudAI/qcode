@@ -30,7 +30,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { isTauri, openExternal } from '../lib/tauri';
+import { isTauri, openExternal, openLocalPath } from '../lib/tauri';
 
 import { cn } from '../lib/cn';
 import { readWorkspaceDiff, type FileDiff } from '../lib/git-info';
@@ -1624,31 +1624,66 @@ function MediaRow({
   // assetProtocol.scope=["**"]. Falls back to empty string on web
   // build (no Tauri runtime); rows still render the type icon.
   //
-  // Construct the asset URL inline — convertFileSrc just URI-encodes
-  // and prefixes http://asset.localhost/. Avoiding the require()
-  // import means the web build doesn't pull tauri internals.
-  const previewSrc = useMemo(() => {
-    if (!item.absPath || !isTauri()) return '';
-    // Strip leading slash so encodeURI doesn't double-encode the
-    // first one; rejoin under the asset.localhost host.
-    const trimmed = item.absPath.replace(/^\//, '');
-    return `http://asset.localhost/${encodeURI(trimmed)}`;
+  // Drive the URL through Tauri's `convertFileSrc()` instead of
+  // hand-rolling the prefix. Why: the rolled prefix worked on macOS
+  // (http://asset.localhost/<path>) but Tauri's WebView on
+  // Windows/Linux uses different schemes (https://asset.localhost/…
+  // and asset://localhost/… respectively) plus a different encoding
+  // (encodeURIComponent — slashes become %2F). convertFileSrc emits
+  // the right shape per platform; thumbnails were silently broken on
+  // every non-mac install before this. The prior comment claimed we
+  // were avoiding a require() — convertFileSrc is a pure JS helper
+  // (no native bridge), so the dynamic-import cost is one ~1KB chunk
+  // shared with the rest of the tauri/api/core surface.
+  const [previewSrc, setPreviewSrc] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    if (!item.absPath || !isTauri()) {
+      setPreviewSrc('');
+      return;
+    }
+    void (async () => {
+      try {
+        const { convertFileSrc } = await import('@tauri-apps/api/core');
+        if (cancelled) return;
+        setPreviewSrc(convertFileSrc(item.absPath));
+      } catch (err) {
+        // Asset protocol module failed to load — log + fall back to
+        // the empty thumbnail (icon-only row). Same as the !isTauri
+        // branch above; rendering doesn't break.
+        console.error('[media] convertFileSrc failed', item.absPath, err);
+        if (!cancelled) setPreviewSrc('');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [item.absPath]);
   // Click target depends on origin:
-  //   • local-only: openExternal(absPath) → OS default app (macOS:
-  //     Preview / QuickTime / Music; Linux: xdg-open; Windows: start)
-  //     Same effect as the user typing `open <file>` in Terminal.
+  //   • local-only: openLocalPath(absPath) → OS default app (macOS:
+  //     Preview / QuickTime / Music; Linux: xdg-open; Windows: start).
+  //     Note: NOT openExternal — tauri-plugin-shell's open() rejects
+  //     bare filesystem paths against a URL-only validation regex, so
+  //     a click here was silently no-op'ing in v172 (alpha.171 had a
+  //     similar issue under different cover). openLocalPath shells
+  //     out via `sh -c 'open "$0"'`, which the shell:allow-execute
+  //     capability already permits.
   //   • cloud-only: openExternal(cloudUrl) → opens the qlaud download
   //     URL in the user's browser (signed/authed; the download
-  //     endpoint reads the api key on the request)
-  //   • both: prefer local (cheaper, no network)
+  //     endpoint reads the api key on the request).
+  //   • both: prefer local (cheaper, no network).
   const onClick = () => {
     if (item.origin === 'cloud' && item.cloudUrl) {
       void openExternal(item.cloudUrl);
       return;
     }
     if (item.absPath) {
-      void openExternal(item.absPath);
+      void openLocalPath(item.absPath).catch((err) => {
+        // Surface failures in the devtools so a regression here
+        // doesn't go unnoticed (the previous silent-failure mode is
+        // exactly what made the v172 bug invisible to users).
+        console.error('[media] openLocalPath failed', item.absPath, err);
+      });
     }
   };
 

@@ -125,22 +125,39 @@ export async function uploadArtifactToCloud(opts: {
   const kind = kindFromMime(mime);
 
   // Step 1: init.
-  const initRes = await fetch(`${BASE}/v1/artifacts/init`, {
-    method: 'POST',
-    headers: {
-      'x-api-key': apiKey,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      thread_id: opts.threadId,
-      kind,
-      mime,
-      byte_size: byteSize,
-      original_name: opts.name,
-    }),
-  });
+  let initRes: Response;
+  try {
+    initRes = await fetch(`${BASE}/v1/artifacts/init`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        thread_id: opts.threadId,
+        kind,
+        mime,
+        byte_size: byteSize,
+        original_name: opts.name,
+      }),
+    });
+  } catch (e) {
+    // Network failure (offline, CSP block, DNS). Logging the raw
+    // exception in devtools is the only way to diagnose connect-src
+    // CSP rejections — fetch swallows them into a generic TypeError
+    // with no detail in the message.
+    console.error('[artifact-upload] init fetch failed', e);
+    throw new Error(
+      `network error during init: ${e instanceof Error ? e.message : 'unknown'}`,
+    );
+  }
   if (!initRes.ok) {
     const text = await initRes.text().catch(() => '');
+    console.error(
+      '[artifact-upload] init non-2xx',
+      initRes.status,
+      text.slice(0, 500),
+    );
     throw new Error(`init failed (${initRes.status}): ${text.slice(0, 200)}`);
   }
   // Server returns { artifact_id, upload_url, r2_key, ... } from
@@ -154,21 +171,46 @@ export async function uploadArtifactToCloud(opts: {
     download_url?: string;
   };
   if (!initJson.artifact_id || !initJson.upload_url) {
+    console.error('[artifact-upload] init missing fields', initJson);
     throw new Error('init response missing artifact_id / upload_url');
   }
 
   // Step 2: upload bytes. The worker's PUT endpoint is bearer-
   // authed too — same key.
-  const putRes = await fetch(initJson.upload_url, {
-    method: 'PUT',
-    headers: {
-      'x-api-key': apiKey,
-      'content-type': mime,
-    },
-    body: new Blob([bytes as BlobPart], { type: mime }),
-  });
+  //
+  // Body shape: pass the raw Uint8Array so the WebView's fetch builds
+  // a fixed-length octet body with no streaming. Tauri 2's macOS
+  // WKWebView previously dropped Content-Length when handed a Blob
+  // that wraps a Uint8Array (the worker then saw `c.req.raw.body` as
+  // null and rejected the upload), so we keep this explicit. Cast
+  // through `BodyInit` because TypeScript's lib.dom types still allow
+  // ArrayBufferView in body but the typedef here doesn't unify with
+  // Uint8Array<ArrayBuffer> generic — a one-line cast over a debate
+  // about generics on a 4MB upload is cleaner.
+  let putRes: Response;
+  try {
+    putRes = await fetch(initJson.upload_url, {
+      method: 'PUT',
+      headers: {
+        'x-api-key': apiKey,
+        'content-type': mime,
+        'content-length': String(byteSize),
+      },
+      body: bytes as unknown as BodyInit,
+    });
+  } catch (e) {
+    console.error('[artifact-upload] PUT fetch failed', e);
+    throw new Error(
+      `network error during upload: ${e instanceof Error ? e.message : 'unknown'}`,
+    );
+  }
   if (!putRes.ok) {
     const text = await putRes.text().catch(() => '');
+    console.error(
+      '[artifact-upload] PUT non-2xx',
+      putRes.status,
+      text.slice(0, 500),
+    );
     throw new Error(`upload failed (${putRes.status}): ${text.slice(0, 200)}`);
   }
 
