@@ -201,7 +201,7 @@ export function ChatSurface({
    *  clicks "Retry with Sonnet" on a plan_limit_exceeded error
    *  and we both switch the picker AND re-trigger the send. */
   onModelChange?: (slug: string) => void;
-  mode?: 'agent' | 'plan';
+  mode?: 'chat' | 'agent' | 'plan';
   threadId: string | null;
   ensureThreadId: () => Promise<string>;
   onTurnLanded?: (info: {
@@ -828,25 +828,29 @@ export function ChatSurface({
       // erroring. The user gets pure conversation; once they open
       // a folder, the claude-code engine takes over for tool-using
       // turns. Mirrors the web experience for chat-only usage.
-      // Three engine paths from a single picker:
+      // Three engine paths picked from (mode × platform):
       //   - claude-code   → Tauri sidecar (desktop only; needs workspace
       //                     folder; the original Engine Mode v0 path).
-      //   - sandbox-agent → Cloudflare Sandbox SDK over HTTP (web build
-      //                     only; container's /workspace replaces the
-      //                     local folder; lazy-bootstraps claude on
-      //                     first session turn). Same JSON-line wire
-      //                     format as desktop, so ChatSurface's
-      //                     reducer doesn't change.
-      //   - qcode-legacy  → fallback chat-only path (desktop without a
-      //                     folder, or web outside /play). No tools.
+      //   - sandbox-agent → Cloudflare Sandbox SDK over HTTP (web build,
+      //                     agent or plan mode; container's /workspace
+      //                     replaces the local folder; lazy-bootstraps
+      //                     claude on first session turn). Same
+      //                     JSON-line wire format as desktop, so the
+      //                     reducer in this file doesn't change.
+      //   - qcode-legacy  → cheap chat-only path (mode='chat' anywhere,
+      //                     OR desktop without a folder). Just streams
+      //                     /v1/messages; no tools, no sandbox cost.
       //
-      // The selector: prefer claude-code on desktop with a folder,
-      // sandbox-agent on web (where there's no Tauri but we have a
-      // server-side container), qcode-legacy as universal fallback.
-      const engineMode =
-        settingsAtSend.engine === 'claude-code' && isTauri() && !!workspace?.path
+      // Mode gating: 'chat' NEVER provisions a sandbox or spawns a
+      // sidecar — the user explicitly opted into 'agent'/'plan' for
+      // those. Keeps default-mode usage cheap and matches user
+      // intent ("I'm just having a conversation" vs "build me X").
+      const wantsRealAgent = mode === 'agent' || mode === 'plan';
+      const engineMode = !wantsRealAgent
+        ? 'qcode-legacy'
+        : isTauri() && !!workspace?.path
           ? 'claude-code'
-          : settingsAtSend.engine === 'claude-code' && !isTauri()
+          : !isTauri()
             ? 'sandbox-agent'
             : 'qcode-legacy';
 
@@ -895,7 +899,15 @@ export function ChatSurface({
         await runThreadAgent({
           threadId: myThread,
           model,
-          mode,
+          // Legacy agent only knows 'agent' | 'plan' — our new 'chat'
+          // mode is a SUPER-mode that means "don't provision a
+          // sandbox/sidecar; just stream /v1/messages." For the
+          // legacy path's own internal switches (read-only tool
+          // gating etc.) it maps cleanly to 'agent'. The dispatcher
+          // above already routed us here BECAUSE mode==='chat', so
+          // passing 'agent' is benign — there are no tools in this
+          // path either way.
+          mode: mode === 'chat' ? 'agent' : mode,
           workspace: workspace?.path ?? null,
           content: userContent,
           // Read at send time so toggling the setting takes effect on
@@ -3406,7 +3418,7 @@ function Composer({
    *  so the user catches "I'm on main, not feat/X" before sending. */
   branch?: string | null;
   /** Active mode — drives the secondary pill ("Plan" / "Agent"). */
-  mode?: 'agent' | 'plan';
+  mode?: 'chat' | 'agent' | 'plan';
   onSend: (v: string, opts?: { parallel?: boolean }) => void;
   onStop: () => void;
   busy: boolean;

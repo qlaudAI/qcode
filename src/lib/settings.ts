@@ -11,7 +11,26 @@ const STORAGE_KEY = 'qcode.settings';
  *  steers it toward investigation + proposal. Useful for safe
  *  exploration of unfamiliar code or when the user wants to
  *  approve every step manually before any tools fire. */
-export type AgentMode = 'agent' | 'plan';
+// Three modes the user can pick per-thread:
+//   chat  — pure conversation, no sandbox provisioned, no tools.
+//           Cheap (just /v1/messages roundtrips). Default for new
+//           threads. Use for "explain X", "review this code I'm
+//           pasting", architecture chats, etc.
+//   agent — full coding agent. Sandbox container minted lazily on
+//           desktop = local fs sidecar; on web = Cloudflare
+//           Sandbox container. Tool calls happen for real
+//           (read/write/bash/etc). Pick when you want to BUILD.
+//   plan  — agent's read-only sibling. Same toolkit minus
+//           write/bash; the model proposes a plan, you flip to
+//           agent to execute. Useful for trust-but-verify flows
+//           where you want to see the diff before anything lands.
+//
+// The dispatcher in ChatSurface routes chat → qcode-legacy
+// (existing /v1/threads streaming, no sandbox), agent/plan →
+// claude-code or sandbox-agent depending on isTauri(). Picking
+// chat on web doesn't provision a sandbox, which keeps the cost
+// model: only paying for compute on real coding sessions.
+export type AgentMode = 'chat' | 'agent' | 'plan';
 
 /** Theme preference. 'system' (default) follows the OS dark-mode
  *  pref via prefers-color-scheme; 'light' / 'dark' force the
@@ -167,7 +186,12 @@ const DEFAULT_SUBAGENT_MODEL = 'claude-haiku-4-5';
 const DEFAULTS: Settings = {
   defaultModel: DEFAULT_MODEL,
   autoUpdate: true,
-  mode: 'agent',
+  // Default to 'chat' so first-time users get a fast, cheap
+  // conversation experience and only opt into the agent (which
+  // mints a sandbox / spawns a sidecar) when they want to build.
+  // Power users who'd prefer to land in 'agent' mode by default
+  // can flip it via the toggle and it sticks for the next thread.
+  mode: 'chat',
   // Default ON. The four meta-tools (qlaud_search_tools,
   // qlaud_get_tool_schemas, qlaud_multi_execute,
   // qlaud_manage_connections) are pure-discovery — search/schemas

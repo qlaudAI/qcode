@@ -1197,23 +1197,22 @@ function ModeToggle({
   value: AgentMode;
   onChange: (next: AgentMode) => void;
 }) {
-  // Web only does chat-style streaming via /v1/threads — there's no
-  // workspace, no read-only tool gating, no exit_plan_mode tool. The
-  // Agent/Plan toggle was carrying a desktop concept onto the web
-  // surface where neither mode means anything different. Show a
-  // static "Chat" badge instead so users aren't picking between two
-  // identical modes. Desktop keeps the real toggle.
-  if (!isTauri()) {
-    return (
-      <div
-        className="flex items-center rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10.5px] font-medium text-foreground/80"
-        title="Chat — qcode on the web. Open the desktop app for the full coding agent."
-      >
-        Chat
-      </div>
-    );
-  }
+  // Three modes, both on desktop and on web:
+  //   Chat  — pure conversation, no sandbox/sidecar provisioned, no
+  //           tools. Cheapest path; default for new threads.
+  //   Agent — full agent: sandbox container on web / Tauri sidecar
+  //           on desktop. Tools fire for real.
+  //   Plan  — agent's read-only sibling. Same toolkit minus
+  //           write/bash; the model proposes a plan before you
+  //           switch to Agent to execute.
+  //
+  // Web previously rendered a static "Chat" badge here because there
+  // was no real agent — the qcode-legacy flow ignored Plan. With the
+  // sandbox-agent engine now backing the web build, all three modes
+  // do something distinct on web too. Same toggle UI as desktop.
   const isPlan = value === 'plan';
+  const isAgent = value === 'agent';
+  const isChat = value === 'chat';
   return (
     <div
       role="radiogroup"
@@ -1222,16 +1221,25 @@ function ModeToggle({
         'flex items-center rounded-full border p-0.5 ' +
         (isPlan
           ? 'border-amber-500/40 bg-amber-500/5'
-          : 'border-border/60 bg-background/70')
+          : isAgent
+            ? 'border-primary/40 bg-primary/5'
+            : 'border-border/60 bg-background/70')
       }
       title={
         isPlan
           ? 'Plan mode — read-only tools only. The model proposes; you switch to Agent to execute.'
-          : 'Agent mode — full toolkit. Write/edit/bash require approval.'
+          : isAgent
+            ? 'Agent mode — full toolkit. Provisions a sandbox container on web; runs locally on desktop.'
+            : 'Chat mode — fast conversation, no sandbox. Switch to Agent to actually build.'
       }
     >
       <Segment
-        active={value === 'agent'}
+        active={isChat}
+        onClick={() => onChange('chat')}
+        label="Chat"
+      />
+      <Segment
+        active={isAgent}
         onClick={() => onChange('agent')}
         label="Agent"
       />
@@ -1409,16 +1417,24 @@ function Sidebar({
           </span>
           <Kbd>⌘N</Kbd>
         </button>
-        <button
-          onClick={onOpenFolder}
-          className="group flex w-full items-center justify-between rounded-lg border border-border/60 bg-background/60 px-2.5 py-1.5 text-[13px] font-medium text-foreground/90 shadow-sm transition-all duration-150 hover:border-foreground/20 hover:bg-background hover:shadow active:scale-[0.985]"
-        >
-          <span className="flex items-center gap-2">
-            <FolderOpen className="h-3.5 w-3.5 text-muted-foreground transition-colors group-hover:text-foreground" />
-            {workspace ? 'Switch folder' : 'Open folder'}
-          </span>
-          <Kbd>⌘O</Kbd>
-        </button>
+        {/* "Open folder" only makes sense on desktop — on web the
+         *  workspace is a Cloudflare Sandbox container that we mint
+         *  on first chat turn (no folder picker, no local fs). The
+         *  button used to fire the WebNotSupportedModal which pushed
+         *  the desktop download — confusing and stale now that the
+         *  web build runs the full agent. Hide it instead. */}
+        {isTauri() && (
+          <button
+            onClick={onOpenFolder}
+            className="group flex w-full items-center justify-between rounded-lg border border-border/60 bg-background/60 px-2.5 py-1.5 text-[13px] font-medium text-foreground/90 shadow-sm transition-all duration-150 hover:border-foreground/20 hover:bg-background hover:shadow active:scale-[0.985]"
+          >
+            <span className="flex items-center gap-2">
+              <FolderOpen className="h-3.5 w-3.5 text-muted-foreground transition-colors group-hover:text-foreground" />
+              {workspace ? 'Switch folder' : 'Open folder'}
+            </span>
+            <Kbd>⌘O</Kbd>
+          </button>
+        )}
         {/* Filter input. Hidden when there are <3 threads — for an
          *  empty/near-empty list there's nothing to find. Visible
          *  the moment the sidebar gets meaningful, which mirrors
@@ -2086,11 +2102,12 @@ function Kbd({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Surfaces when the user hits something the web build can't do
-// (folder picker today; future entries: native file watch, OS
-// keychain, etc.). The previous behavior was a window.prompt() that
-// looked broken because no path the user typed was actually
-// readable. This explains why and points to the desktop app.
+// Surfaces when the user hits something the web build can't do —
+// today only the local-filesystem folder picker (the chat agent
+// itself works on web via the sandbox container). Old copy framed
+// the web as 'chat-only' and pushed desktop hard; with the agent
+// now running on the web build, we reframe: 'desktop is for LOCAL
+// files, web is the full agent on a remote sandbox.'
 function WebNotSupportedModal({
   open,
   onClose,
@@ -2109,12 +2126,13 @@ function WebNotSupportedModal({
           <Download className="h-5 w-5" />
         </div>
         <h2 className="mt-4 text-lg font-semibold tracking-tight">
-          Get the desktop app for full power
+          Open a local folder? Use desktop.
         </h2>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          Browsers can&rsquo;t read arbitrary local folders, so qcode on the web is
-          chat-only. Download the desktop app to open a workspace, run shell
-          commands, edit files, and use the full agent loop.
+          The web build runs the full agent in a sandboxed container —
+          shell, file ops, and live preview URLs all work. To point
+          the agent at a folder on YOUR machine, install the desktop
+          app. You can keep using the web in the meantime.
         </p>
         <div className="mt-5 flex flex-col gap-2 sm:flex-row">
           <a
