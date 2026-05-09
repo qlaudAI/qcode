@@ -168,15 +168,17 @@ const SAMPLE_PROMPTS = [
   'Draft cold emails to 20 founders building AI dev tools', // → Sales
 ];
 
-// Web build has no workspace + no tools — the engineers can't
-// actually grep / run tests / deploy. Frame prompts that play to
-// chat-only strengths: paste-in code review, conceptual questions,
-// architecture discussions.
+// Web build now has a real agent (Cloudflare Sandbox under the
+// hood — see engines/sandbox-agent.ts). Same toolkit as desktop:
+// shell, file ops, port-expose. Sample prompts lean toward
+// "build something" to showcase the wedge — these are the prompts
+// that produce a live URL within ~90 seconds and convert visitors
+// into installs / signups.
 const WEB_SAMPLE_PROMPTS = [
-  'Review this code for bugs (paste it after)',
-  'Plan how I should structure my next API',
-  'Audit this snippet for OWASP issues (paste it after)',
-  'Explain the tradeoffs of App Router vs Pages Router',
+  'Build me a SaaS landing page with email capture',
+  'Scaffold a Vite + React app and start the dev server',
+  'Make a one-page portfolio site for a designer named Maya',
+  'Set up a simple API with Hono, expose it on a live URL',
 ];
 
 export function ChatSurface({
@@ -3175,31 +3177,33 @@ function EmptyState({
   // useful, so demanding the choice up front is better than letting
   // the user discover that mid-prompt.
   if (!hasWorkspace) {
-    // Web build can't open a folder — browsers don't get raw fs
-    // access. Show a chat-only welcome with sample prompts and a
-    // download CTA, instead of an "Open folder" button that leads
-    // to a confusing modal.
+    // Web build now has a real agent — qcode-web mints a Cloudflare
+    // Sandbox container on first turn and runs claude inside it.
+    // Same toolkit as desktop (file ops, shell, port-expose), just
+    // executing on a remote container's /workspace instead of a
+    // local folder. The "no workspace" empty state copy reflects
+    // that: project IS the sandbox; no folder picker, no download
+    // gate, just sample prompts to spark a build.
     if (!isTauri()) {
       return (
         <div className="flex flex-col items-center pt-6 text-center sm:pt-12">
           <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
           <h2 className="mt-5 text-xl font-semibold tracking-tight sm:mt-6 sm:text-2xl">
-            Welcome to qcode chat
+            What do you want to build?
           </h2>
           <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
-            You&rsquo;re on the web build — chat-only. Ask anything you can
-            answer with text: code review on snippets you paste, design
-            questions, debugging help. To run shell commands, edit files,
-            or open a folder, get the desktop app.
+            qcode runs in a sandboxed container — full agent, real shell,
+            real files, live preview URLs you can share. Type a prompt or
+            pick one below.
           </p>
           <a
             href="https://qlaud.ai/qcode"
             target="_blank"
             rel="noopener"
-            className="mt-6 inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90"
+            className="mt-6 inline-flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground"
           >
-            <Download className="h-4 w-4" />
-            Download qcode for desktop
+            <Download className="h-3 w-3" />
+            Or download desktop for local filesystem access
           </a>
           <div className="mt-10 grid w-full max-w-2xl gap-2 text-left">
             {WEB_SAMPLE_PROMPTS.map((s) => (

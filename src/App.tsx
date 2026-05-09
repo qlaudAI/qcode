@@ -1486,20 +1486,38 @@ function Sidebar({
                 your filesystem stays private until you say otherwise.
               </p>
             ) : (
-              <div className="mt-2 rounded-md border border-border/60 bg-muted/30 p-3">
-                <p className="text-xs leading-relaxed text-muted-foreground">
-                  Web mode is chat-only — browsers can&rsquo;t read local
-                  folders. Get the desktop app to open a workspace, run
-                  shell commands, and edit files.
-                </p>
+              // Web build: workspace = a Cloudflare Sandbox container
+              // we mint on the first chat turn. The user doesn't pick
+              // a folder — there isn't one. We show the connection
+              // state + a desktop upsell for users who want local
+              // filesystem access. Container's /workspace is the
+              // implicit project root for everything the agent does.
+              <div className="mt-2 space-y-2">
+                <div className="rounded-md border border-emerald-500/20 bg-emerald-500/5 p-3">
+                  <div className="flex items-center gap-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                    <span className="relative flex h-1.5 w-1.5">
+                      <span className="absolute inset-0 animate-ping rounded-full bg-emerald-400/60" />
+                      <span className="relative h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                    </span>
+                    Sandbox ready
+                  </div>
+                  <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                    Your project lives in an isolated container at{' '}
+                    <code className="rounded bg-muted px-1 py-0.5 font-mono text-[10px]">
+                      /workspace
+                    </code>
+                    . The agent can run shell commands, write files,
+                    and expose ports — same toolkit as desktop.
+                  </p>
+                </div>
                 <a
                   href="https://qlaud.ai/qcode"
                   target="_blank"
                   rel="noopener"
-                  className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-primary hover:underline"
+                  className="inline-flex items-center gap-1.5 text-[10px] text-muted-foreground hover:text-foreground"
                 >
                   <Download className="h-3 w-3" />
-                  Download qcode →
+                  Download desktop for local files
                 </a>
               </div>
             )}

@@ -204,18 +204,18 @@ const DEFAULTS: Settings = {
 
 /** Coerce stored engine value to the platform's canonical choice.
  *  Ignores user-stored values entirely — the "engine" concept is
- *  no longer user-configurable (see Engine docs). Tauri =
- *  claude-code, web = qcode-legacy. Idempotent: repeat calls return
- *  the same answer for the same platform. */
+ *  no longer user-configurable (see Engine docs).
+ *
+ *  Both desktop (Tauri) and web now run the SAME 'claude-code'
+ *  engine — the dispatcher in ChatSurface picks the spawn site
+ *  (Tauri sidecar vs Cloudflare Sandbox SSE) based on isTauri().
+ *  qcode-legacy stays as a string union member for the migration
+ *  window so old localStorage values don't crash, but no fresh
+ *  install ever returns it from this function.
+ *
+ *  Idempotent: same answer for the same platform. */
 function coerceEngine(): Engine {
-  // Tauri detection: window.__TAURI_INTERNALS__ is set by the
-  // Tauri runtime in the desktop webview. Same probe isTauri()
-  // uses, but inlined here to avoid a circular import (settings.ts
-  // is imported very early). Web build = no Tauri = qcode-legacy.
-  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-    return 'claude-code';
-  }
-  return 'qcode-legacy';
+  return 'claude-code';
 }
 
 /** Coerce the stored autoApprove value to a tri-state mode. Handles
