@@ -1,9 +1,13 @@
 // Runtime factory. Pick the right impl per environment + opt-in.
 //
 // Selection rules (in order):
-//   1. If `?play=1` is in the URL, force the sandbox impl.
-//      The /play landing page sets this so a user who Try-It-Now's
-//      on the marketing site lands directly in playground mode.
+//   1. If the path is `/play` (or `?play=1` query is set), force the
+//      sandbox impl. The /play landing page IS the playground entry,
+//      and main.tsx already routes that pathname to PlayPage — the
+//      runtime needs to match. Earlier this only checked the query
+//      param, which silently fell through to the web-noop and
+//      surfaced as a confusing "runtime: not available in web build"
+//      error on the very first step of the demo.
 //   2. If we're inside Tauri (`isTauri()`), use the Tauri impl.
 //      This is the default for the desktop app — fastest path,
 //      direct fs / shell access, no network tax.
@@ -41,11 +45,16 @@ export function setRuntimeOverride(rt: Runtime | null): void {
 export function getRuntime(): Runtime {
   if (override) return override;
 
-  // Browser opt-in: ?play=1 → sandbox runtime even in Tauri (lets
-  // a desktop user test the playground path without rebuilding).
+  // /play page (browser) → sandbox runtime, regardless of whether
+  // we're inside Tauri (so a desktop user can also test the
+  // playground path by typing /play). Either pathname=/play or the
+  // legacy ?play=1 query escape hatch trips it. Same logic as
+  // main.tsx's isPlay check; centralizing here means a single
+  // source of truth for "are we in playground mode?".
   if (typeof window !== 'undefined') {
+    const path = window.location.pathname.replace(/\/+$/, '');
     const params = new URLSearchParams(window.location.search);
-    if (params.get('play') === '1') {
+    if (path === '/play' || params.get('play') === '1') {
       return getSandboxRuntime();
     }
   }
@@ -61,9 +70,12 @@ export function getRuntime(): Runtime {
 /** Convenience reflection — was the active runtime selected
  *  because the user is on the /play page? Useful for UI badges
  *  ("Sandbox · 10:00 left") that should only appear in playground
- *  mode. */
+ *  mode. Mirrors getRuntime()'s selection logic above so the badge
+ *  doesn't lie when only one of the two checks trips. */
 export function isPlayMode(): boolean {
   if (typeof window === 'undefined') return false;
+  const path = window.location.pathname.replace(/\/+$/, '');
+  if (path === '/play') return true;
   return new URLSearchParams(window.location.search).get('play') === '1';
 }
 
