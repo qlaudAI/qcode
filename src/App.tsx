@@ -23,6 +23,7 @@ import {
   startSignIn,
 } from './lib/auth';
 import { handleTitleBarMouseDown, isTauri, openExternal, WebNotSupportedError } from './lib/tauri';
+import { SANDBOX_AGENT_ENABLED } from './lib/feature-flags';
 import { posthog } from './lib/analytics';
 import { startDeepLinkListener } from './lib/deep-link';
 import {
@@ -115,7 +116,16 @@ function parseThreadIdFromPath(): string | null {
 export function App() {
   const [authed, setAuthed] = useState<boolean>(() => Boolean(getKey()));
   const [model, setModel] = useState<string>(() => getSettings().defaultModel);
-  const [mode, setMode] = useState<AgentMode>(() => getSettings().mode);
+  // Mode init — when SANDBOX_AGENT_ENABLED is false (web build,
+  // currently), force 'chat' regardless of what's in localStorage.
+  // Otherwise a desktop user who set Agent mode and then opens
+  // qcode-web on the same browser would see Agent selected with no
+  // way to interact (we hide the toggle for non-Chat on web).
+  const [mode, setMode] = useState<AgentMode>(() => {
+    const saved = getSettings().mode;
+    if (!SANDBOX_AGENT_ENABLED && saved !== 'chat') return 'chat';
+    return saved;
+  });
   const [workspace, setWorkspace] = useState<Workspace | null>(() =>
     getCurrentWorkspace(),
   );
@@ -208,8 +218,14 @@ export function App() {
   }, []);
 
   const onModeChange = useCallback((next: AgentMode) => {
-    setMode(next);
-    patchSettings({ mode: next });
+    // Defense: if a caller (deep link, restored state, etc.) tries
+    // to set Agent/Plan on a surface where the sandbox is gated off,
+    // silently coerce to 'chat'. The toggle UI is already hidden in
+    // that case, but localStorage round-trips could otherwise re-
+    // surface the disabled state.
+    const safe = !SANDBOX_AGENT_ENABLED && next !== 'chat' ? 'chat' : next;
+    setMode(safe);
+    patchSettings({ mode: safe });
     posthog.capture('mode_toggled', { mode: next });
   }, []);
 
@@ -909,23 +925,29 @@ export function App() {
             model={model}
             onModelChange={onModelChange}
             mode={mode}
-            // Web (non-Tauri) ALWAYS has a workspace — the sandbox
-            // container's /workspace dir. Without this, the chat
-            // surface gates on `hasWorkspace` and shows the "open
-            // a folder" stub on web forever (there's no folder
-            // picker in the browser). Desktop still depends on a
-            // user-picked folder.
-            hasWorkspace={!!workspace || !isTauri()}
-            workspaceName={workspace?.name ?? (!isTauri() ? 'sandbox' : undefined)}
+            // hasWorkspace gating:
+            //   - Desktop: depends on whether the user picked a folder
+            //   - Web with sandbox enabled: pretend there's a workspace
+            //     (the container's /workspace dir)
+            //   - Web with sandbox gated off: no workspace concept on
+            //     web; chat-only mode doesn't need one
+            hasWorkspace={
+              !!workspace || (!isTauri() && SANDBOX_AGENT_ENABLED)
+            }
+            workspaceName={
+              workspace?.name ??
+              (!isTauri() && SANDBOX_AGENT_ENABLED ? 'sandbox' : undefined)
+            }
             onOpenFolder={async () => {
               const w = await tryOpenFolder();
               if (w) setWorkspace(w);
             }}
             rightRailView={rightRailView}
             onCloseRightRail={() => setRightRailView(null)}
-            // Same default as the agent endpoint mounts inside the
-            // container (apps/edge/src/routes/sandbox.ts).
-            workspacePath={workspace?.path ?? (!isTauri() ? '/workspace' : undefined)}
+            workspacePath={
+              workspace?.path ??
+              (!isTauri() && SANDBOX_AGENT_ENABLED ? '/workspace' : undefined)
+            }
           />
         </main>
       </div>
@@ -1259,7 +1281,7 @@ function ModeToggle({
   value: AgentMode;
   onChange: (next: AgentMode) => void;
 }) {
-  // Three modes, both on desktop and on web:
+  // Three modes:
   //   Chat  — pure conversation, no sandbox/sidecar provisioned, no
   //           tools. Cheapest path; default for new threads.
   //   Agent — full agent: sandbox container on web / Tauri sidecar
@@ -1268,13 +1290,33 @@ function ModeToggle({
   //           write/bash; the model proposes a plan before you
   //           switch to Agent to execute.
   //
-  // Web previously rendered a static "Chat" badge here because there
-  // was no real agent — the qcode-legacy flow ignored Plan. With the
-  // sandbox-agent engine now backing the web build, all three modes
-  // do something distinct on web too. Same toggle UI as desktop.
+  // Gated by SANDBOX_AGENT_ENABLED:
+  //   - Desktop: always shows all three modes.
+  //   - Web: Agent + Plan hidden until the sandbox flow is reliable
+  //     enough to ship to all users. Web shows a static "Chat" pill
+  //     instead of a toggle so users aren't confused by a single-
+  //     option radiogroup. Set localStorage.qcode.flags.sandboxAgent
+  //     to '1' to re-enable for testing.
   const isPlan = value === 'plan';
   const isAgent = value === 'agent';
   const isChat = value === 'chat';
+
+  if (!SANDBOX_AGENT_ENABLED) {
+    // Web (or any surface where sandbox is gated off): just show
+    // a "Chat" indicator. Not interactive — this isn't a toggle,
+    // it's a label saying "this is what you're using." Same visual
+    // weight as the toggle so the titlebar layout doesn't shift
+    // between platforms.
+    return (
+      <div
+        className="flex items-center rounded-full border border-border/60 bg-background/70 px-3 py-1 text-[11.5px] text-muted-foreground"
+        title="Chat mode — sandbox coding agent coming soon. Use the desktop app for full agent."
+      >
+        Chat
+      </div>
+    );
+  }
+
   return (
     <div
       role="radiogroup"
@@ -2087,7 +2129,13 @@ function RightRailMenu({
     return () => document.removeEventListener('mousedown', onDoc);
   }, [open]);
 
-  const entries: Array<{
+  // The full menu is sandbox/agent-driven — tasks/plan/files/
+  // terminal/preview/diff all surface state that only a real agent
+  // turn populates. On web with the sandbox gated off, every one of
+  // those views is empty by design, so we show only Usage (which
+  // works regardless — it just reads token telemetry from /v1/qcode/me).
+  // Re-engages the full set when SANDBOX_AGENT_ENABLED flips on.
+  const fullEntries: Array<{
     view: RightRailView;
     label: string;
     hint?: string;
@@ -2101,6 +2149,9 @@ function RightRailMenu({
     { view: 'diff', label: 'Diff', hint: '⇧⌘D' },
     { view: 'usage', label: 'Usage' },
   ];
+  const entries = SANDBOX_AGENT_ENABLED
+    ? fullEntries
+    : fullEntries.filter((e) => e.view === 'usage');
 
   return (
     <div className="relative" data-rightrail-menu>

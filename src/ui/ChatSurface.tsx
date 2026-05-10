@@ -20,6 +20,7 @@ import {
 import { AnimatePresence, motion } from 'motion/react';
 
 import { isTauri, openExternal } from '../lib/tauri';
+import { SANDBOX_AGENT_ENABLED } from '../lib/feature-flags';
 import { posthog } from '../lib/analytics';
 
 import { runThreadAgent, type AgentEvent } from '../lib/legacy/agent';
@@ -846,11 +847,18 @@ export function ChatSurface({
       // those. Keeps default-mode usage cheap and matches user
       // intent ("I'm just having a conversation" vs "build me X").
       const wantsRealAgent = mode === 'agent' || mode === 'plan';
+      // Gate the sandbox path. When SANDBOX_AGENT_ENABLED is false
+      // (web build, current default), Agent + Plan from any source
+      // (saved settings, deep link) fall through to qcode-legacy
+      // instead of trying to spin up a container that's gated off.
+      // The mode toggle in App.tsx already coerces user-facing
+      // selections to 'chat'; this is the safety net for
+      // programmatic paths.
       const engineMode = !wantsRealAgent
         ? 'qcode-legacy'
         : isTauri() && !!workspace?.path
           ? 'claude-code'
-          : !isTauri()
+          : !isTauri() && SANDBOX_AGENT_ENABLED
             ? 'sandbox-agent'
             : 'qcode-legacy';
 
