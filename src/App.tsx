@@ -664,7 +664,39 @@ export function App() {
   const createMutation = useCreateThreadMutation();
   const ensureThreadId = useCallback(async (): Promise<string> => {
     if (currentId) return currentId;
-    const result = await createMutation.mutateAsync({ workspace, model });
+    // Decide whether the new thread inherits the currently-active
+    // workspace. Default behavior PRE-feature-gating was: yes,
+    // always attach. That meant every "New chat" click on web
+    // landed inside whatever workspace happened to be selected in
+    // the sidebar — which surprised users who clicked New chat
+    // expecting a fresh standalone conversation.
+    //
+    // Policy now:
+    //   - Web (SANDBOX_AGENT_ENABLED=false): NEVER attach a
+    //     workspace. Web is chat-only; the workspace concept is a
+    //     leftover sidebar artifact from desktop sync. New chats
+    //     belong in the CHATS section.
+    //   - User explicitly clicked New chat (⌘N or sidebar button):
+    //     don't attach, even on desktop. They wanted a fresh chat,
+    //     not "another chat in this folder."
+    //   - Desktop user typing into composer with an active folder
+    //     and no explicit New-chat click: attach. Matches the
+    //     desktop expectation that "chats in this folder" is a
+    //     real grouping.
+    //
+    // FUTURE: when the user upgrades a chat to "coding agent" mode
+    // (via Agent toggle or auto-detected intent), we'll PATCH the
+    // thread's metadata to associate it with a workspace silently.
+    // That move-to-workspace flow doesn't exist yet; for now,
+    // explicitly-attached-or-not is the only state.
+    const shouldAttachWorkspace =
+      SANDBOX_AGENT_ENABLED &&
+      !userExplicitlyClearedRef.current &&
+      !!workspace;
+    const result = await createMutation.mutateAsync({
+      workspace: shouldAttachWorkspace ? workspace : null,
+      model,
+    });
     setCurrentId(result.summary.id);
     return result.summary.id;
   }, [currentId, model, workspace, createMutation]);
