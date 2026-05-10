@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronRight,
   Download,
@@ -320,6 +320,14 @@ export function App() {
     if (!workspace) return;
     if (currentId) return;
     if (!threadsQuery.data) return;
+    // GATE: when the user just clicked "New chat" (or ⌘N), we want
+    // them to LAND on the empty composer, not be silently bounced
+    // back to the most-recent thread — even if that thread is
+    // untitled and looks identical to a fresh chat. This ref is set
+    // by newThread() and cleared by switchThread() / the first
+    // turn-landed callback. Initial mount path (workspace just
+    // resolved, ref is still false): auto-select fires correctly.
+    if (userExplicitlyClearedRef.current) return;
     const match = threadsQuery.data
       .filter(
         (t) =>
@@ -498,12 +506,27 @@ export function App() {
   // (a real thread on qlaud's side) and the sidebar showed all of
   // them. Now: clicking creates nothing; the first message creates
   // a thread with the user's prompt as its seed title.
+  // True after the user EXPLICITLY clicked "New chat" (or pressed
+  // ⌘N) and before they've sent the first message of that fresh
+  // chat. Used to suppress the workspace auto-select effect below
+  // — without this, clicking new-chat lands the user on the most
+  // recently-active thread for the workspace, which (when that
+  // thread has no title yet) looks identical to a fresh empty
+  // state. User thinks they're in a new chat; they're not. Reset
+  // by (a) actually starting a thread via the first send, (b)
+  // switchThread picking a specific row.
+  const userExplicitlyClearedRef = useRef(false);
   const newThread = useCallback(async () => {
+    userExplicitlyClearedRef.current = true;
     setCurrentId(null);
   }, []);
 
   const switchThread = useCallback(
     (id: string) => {
+      // Explicit thread pick — user no longer "just clicked new
+      // chat", so the auto-select gate can re-engage on future
+      // workspace changes.
+      userExplicitlyClearedRef.current = false;
       setCurrentId(id);
       // Tie workspace to the thread. The thread's workspaceId
       // (post-split) or workspacePath (legacy) is canonical —
@@ -648,6 +671,10 @@ export function App() {
       threadId: string;
       assistantSeq: number | null;
     }) => {
+      // First message of a "new chat" intent has now landed — the
+      // explicit-clear flag served its purpose. Reset so future
+      // workspace switches re-engage the auto-select.
+      userExplicitlyClearedRef.current = false;
       const list =
         queryClient.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
       const existing = list.find((s) => s.id === info.threadId);
