@@ -45,6 +45,7 @@ import {
   useCreateThreadMutation,
   useDeleteThreadMutation,
   useThreadsQuery,
+  prefetchThreadMessages,
 } from './lib/queries';
 import {
   getRemoteThreadMessages,
@@ -447,6 +448,34 @@ export function App() {
       console.warn('[workspace-sync] boot hydrate failed:', e);
     });
   }, [authed]);
+
+  // Boot-time prefetch of the active thread's messages.
+  //
+  // The URL-derived currentId resolves synchronously on first render,
+  // but the messages query only fires when ChatSurface mounts and
+  // calls useThreadMessagesQuery. That's a 200-400ms gap between
+  // "user lands on /thread-id" and "messages start rendering" —
+  // visible as a blank chat surface during initial paint.
+  //
+  // Kicking off the prefetch here, in parallel with auth-hydrate +
+  // workspace-hydrate, means by the time ChatSurface mounts the
+  // query is either cached or in-flight. Net effect: chat content
+  // appears within the first frame the chat surface renders, not
+  // after a round-trip.
+  //
+  // Same for any threads the user is likely to click next — could
+  // prefetch the top 3 most-recent for the active workspace too,
+  // but that's a tax on the threads endpoint we don't need to pay
+  // until measurements show value. ThreadList's onMouseEnter
+  // prefetch covers the rest.
+  useEffect(() => {
+    if (!authed) return;
+    if (!currentId) return;
+    void prefetchThreadMessages(currentId).catch(() => {
+      /* network/auth failure — query will retry when ChatSurface
+         mounts. Non-fatal. */
+    });
+  }, [authed, currentId]);
 
   // Mid-session re-hydrate. The worker auto-provisions a sandbox
   // workspace on the user's first agent turn (handleSandboxAgent in
