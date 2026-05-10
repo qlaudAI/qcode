@@ -308,8 +308,71 @@ export async function runEngineSandboxAgent(
           project_path?: string;
           message?: string;
           slug?: string;
+          // Workspace info — set on resume_start / resume_done /
+          // create_done by the worker so we can register the
+          // workspace into the local registry as soon as it's
+          // provisioned, instead of waiting for a page refresh
+          // to re-hydrate. Mirrors desktop's "user opens folder
+          // → workspace appears in sidebar instantly" UX.
+          workspace_id?: string;
+          workspace_path?: string;
+          workspace_name?: string;
         };
         const path = wp.project_path ?? wp.slug ?? '';
+
+        // Register the workspace into local state the moment we
+        // learn about it. Desktop does this when the user picks a
+        // folder; web does it here, when the worker auto-provisions
+        // a sandbox workspace for a chat. registerWorkspace dedups
+        // by id (same id = update lastUsedAt instead of duplicating)
+        // so this is safe to call on every event including repeated
+        // resume_start events on the same workspace. Fire-and-forget
+        // server sync because the workspace IS already on the
+        // server (the worker created it); this just bumps
+        // last_used_at across devices.
+        if (
+          wp.workspace_id &&
+          wp.workspace_path &&
+          wp.workspace_name &&
+          (sub === 'resume_start' ||
+            sub === 'resume_done' ||
+            sub === 'create_done')
+        ) {
+          // Async-import to avoid pulling workspace + sync deps into
+          // the engine's hot path on cold start.
+          void (async () => {
+            try {
+              const ws = await import('../workspace');
+              const sync = await import('../workspace-sync');
+              ws.registerWorkspace({
+                id: wp.workspace_id,
+                path: wp.workspace_path!,
+                name: wp.workspace_name!,
+              });
+              // Touch on server so the cross-device sort puts this
+              // workspace at the top.
+              if (wp.workspace_id) void sync.syncTouchWorkspace(wp.workspace_id);
+              // Fire a window event the App-level hydrate effect
+              // listens for, as a belt-and-suspenders re-fetch in
+              // case multiple tabs have stale local state.
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(
+                  new CustomEvent('qcode:sandbox-workspace-registered', {
+                    detail: {
+                      id: wp.workspace_id,
+                      path: wp.workspace_path,
+                      name: wp.workspace_name,
+                    },
+                  }),
+                );
+              }
+            } catch {
+              // Non-fatal — sidebar will reconcile on next refresh
+              // via hydrateWorkspacesFromServer. We just lose the
+              // instant-update UX for this turn.
+            }
+          })();
+        }
         const text =
           sub === 'resume_start'
             ? `↻ Restoring workspace from gitlab.com/${path}…`

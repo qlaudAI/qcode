@@ -424,6 +424,33 @@ export function App() {
     });
   }, [authed]);
 
+  // Mid-session re-hydrate. The worker auto-provisions a sandbox
+  // workspace on the user's first agent turn (handleSandboxAgent in
+  // apps/edge/src/routes/sandbox.ts — INSERT INTO workspaces). The
+  // engine forwards a `qcode:sandbox-workspace-registered` window
+  // event in sandbox-agent.ts the moment that lands. Re-running
+  // hydrate here picks up the new row without forcing a page reload.
+  // Without this, web users saw the workspace "disappear" after
+  // each agent turn — really it was just never entering local state.
+  useEffect(() => {
+    if (!authed) return;
+    function onWorkspaceRegistered() {
+      void hydrateWorkspacesFromServer().catch((e) => {
+        console.warn('[workspace-sync] mid-session hydrate failed:', e);
+      });
+    }
+    window.addEventListener(
+      'qcode:sandbox-workspace-registered',
+      onWorkspaceRegistered,
+    );
+    return () => {
+      window.removeEventListener(
+        'qcode:sandbox-workspace-registered',
+        onWorkspaceRegistered,
+      );
+    };
+  }, [authed]);
+
   // Inline media preview from chat-message file links. The Markdown
   // FileLink component dispatches qcode:open-media-preview when the
   // user clicks a media file in agent output. Flip the right rail
