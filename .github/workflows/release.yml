@@ -292,6 +292,19 @@ jobs:
     needs: build
     if: success()
     steps:
+      # gh CLI uses repo metadata from the local git config (or
+      # GH_REPO env) to know which repo to query. Without checkout,
+      # `gh release view` errors with "fatal: not a git repository"
+      # — which is exactly what failed run 25621012576 in.
+      # Sparse checkout because we don't need source files; just
+      # the .git folder so gh can resolve the repo.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            .github
+          sparse-checkout-cone-mode: false
+
       - name: Resolve tag + assets
         id: rel
         env:
