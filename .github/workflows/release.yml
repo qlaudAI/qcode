@@ -309,6 +309,11 @@ jobs:
         id: rel
         env:
           GH_TOKEN: ${{ github.token }}
+          # Belt-and-suspenders: explicit repo override so `gh` doesn't
+          # depend on local git config detection. Even if the checkout
+          # step above somehow doesn't expose .git/config the way `gh`
+          # expects, the explicit GH_REPO short-circuits the lookup.
+          GH_REPO: ${{ github.repository }}
         run: |
           TAG="${GITHUB_REF_NAME:-}"
           if [ -z "$TAG" ]; then
