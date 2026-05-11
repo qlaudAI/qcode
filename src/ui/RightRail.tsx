@@ -28,7 +28,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { isTauri, openExternal, openLocalPath } from '../lib/tauri';
 
@@ -727,6 +727,13 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
   // quickly) would each fire their own request for the same port.
   const inFlightPortsRef = useRef<Set<number>>(new Set());
 
+  // Per-port error state — set when an exposePort call fails or
+  // times out, cleared on the next successful retry. Drives the
+  // "preview unavailable" affordance instead of an infinite spinner.
+  const [portErrors, setPortErrors] = useState<Map<number, string>>(
+    () => new Map(),
+  );
+
   // When loadedUrl is a localhost URL we don't yet have a public
   // mapping for, ask the runtime to expose the port. The mapping
   // lands in state, the iframeSrc memo picks it up, and the iframe
@@ -741,7 +748,20 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
     let cancelled = false;
     (async () => {
       try {
-        const result = await runtime.exposePort(port);
+        // 15s timeout — exposePort on a healthy container resolves
+        // in ~100-300ms. Anything longer than 15s is almost always
+        // the sandbox container being asleep / killed / unreachable,
+        // and the user is better served by a visible "preview
+        // unavailable" message than an indefinite spinner.
+        const result = await Promise.race([
+          runtime.exposePort(port),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error('exposePort timeout after 15s')),
+              15_000,
+            ),
+          ),
+        ]);
         if (cancelled) return;
         setPortMappings((prev) => {
           if (prev.has(port)) return prev;
@@ -749,17 +769,32 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
           next.set(port, result.url);
           return next;
         });
+        // Clear any prior error for this port on success.
+        setPortErrors((prev) => {
+          if (!prev.has(port)) return prev;
+          const next = new Map(prev);
+          next.delete(port);
+          return next;
+        });
       } catch (e) {
+        if (cancelled) return;
         // exposePort can fail when the sandbox container is still
-        // booting or the worker is unreachable. The iframe falls
-        // back to a clear empty state; don't toast — the agent
-        // typically prints the URL again on the next dev-server
-        // restart and the effect will retry.
+        // booting, idle / asleep (10-min sleepAfter), or the worker
+        // is unreachable. Record the error so the iframe shows a
+        // useful state instead of an infinite spinner. The agent
+        // typically retries with a fresh dev-server boot, and the
+        // next localhost URL it prints will re-fire this effect.
+        const msg = e instanceof Error ? e.message : String(e);
         console.warn(
           'PreviewView: exposePort failed for port',
           port,
-          e,
+          msg,
         );
+        setPortErrors((prev) => {
+          const next = new Map(prev);
+          next.set(port, msg);
+          return next;
+        });
       } finally {
         inFlightPortsRef.current.delete(port);
       }
@@ -780,8 +815,36 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
     if (runtime.kind !== 'sandbox') return false;
     const port = localhostPort(loadedUrl);
     if (port === null) return false;
-    return !portMappings.has(port);
-  }, [loadedUrl, runtime.kind, portMappings]);
+    if (portMappings.has(port)) return false;
+    // If we already errored on this port, stop showing the spinner —
+    // the error-state JSX below renders instead.
+    if (portErrors.has(port)) return false;
+    return true;
+  }, [loadedUrl, runtime.kind, portMappings, portErrors]);
+
+  // Error-state flag — drives the "preview unavailable" panel.
+  const currentPortError = useMemo<string | null>(() => {
+    if (!loadedUrl) return null;
+    if (runtime.kind !== 'sandbox') return null;
+    const port = localhostPort(loadedUrl);
+    if (port === null) return null;
+    return portErrors.get(port) ?? null;
+  }, [loadedUrl, runtime.kind, portErrors]);
+
+  // Manual retry — clear the error for the current port so the
+  // exposePort effect re-fires. Used by the "Try again" button in
+  // the error state.
+  const retryExpose = useCallback(() => {
+    if (!loadedUrl) return;
+    const port = localhostPort(loadedUrl);
+    if (port === null) return;
+    setPortErrors((prev) => {
+      if (!prev.has(port)) return prev;
+      const next = new Map(prev);
+      next.delete(port);
+      return next;
+    });
+  }, [loadedUrl]);
 
   // Auto-load when the agent navigates OR a dev server boots on a
   // detected port. Keeps the panel in sync with what's actually
@@ -929,7 +992,31 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
         )}
       </div>
       {loadedUrl ? (
-        isPendingPortMapping ? (
+        currentPortError ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+            <p className="text-[12px] font-medium text-foreground">
+              Preview unavailable
+            </p>
+            <p className="max-w-[26rem] text-[11.5px] leading-relaxed text-muted-foreground">
+              Couldn't reach the dev server at <span className="font-mono">{loadedUrl}</span>.
+              Usually this means the sandbox has idled out, or the
+              process exited (dev servers must run in the background —
+              <span className="font-mono">{' '}bun run dev … &</span>).
+              Ask the agent to start the server again, then click Try
+              again.
+            </p>
+            <p className="font-mono text-[10.5px] text-muted-foreground/70">
+              {currentPortError}
+            </p>
+            <button
+              type="button"
+              onClick={retryExpose}
+              className="rounded border border-border/60 bg-background px-3 py-1 text-[11px] font-medium text-foreground/85 transition-colors hover:border-foreground/30 hover:bg-muted"
+            >
+              Try again
+            </button>
+          </div>
+        ) : isPendingPortMapping ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground/70" />
             <p className="text-[11.5px] leading-relaxed text-muted-foreground">
