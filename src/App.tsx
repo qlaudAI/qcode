@@ -731,9 +731,26 @@ export function App() {
       isTauri() &&
       !userExplicitlyClearedRef.current &&
       !!workspace;
+    // TEMP diagnostic — strip after the "new chat reuses old sandbox"
+    // ticket is closed. Tells us whether the client is the culprit
+    // (sending workspace_id in metadata) or whether the server is
+    // somehow picking up the old workspace despite a clean payload.
+    console.log('[ensureThreadId] new-thread-create', {
+      isTauri: isTauri(),
+      userExplicitlyCleared: userExplicitlyClearedRef.current,
+      hasWorkspace: !!workspace,
+      workspaceId: workspace?.id,
+      workspacePath: workspace?.path,
+      shouldAttachWorkspace,
+      sendingWorkspaceToServer: shouldAttachWorkspace ? workspace?.id ?? null : null,
+    });
     const result = await createMutation.mutateAsync({
       workspace: shouldAttachWorkspace ? workspace : null,
       model,
+    });
+    console.log('[ensureThreadId] new-thread-created', {
+      newThreadId: result.summary.id,
+      newThreadWorkspaceId: result.summary.workspaceId,
     });
     setCurrentId(result.summary.id);
     return result.summary.id;
