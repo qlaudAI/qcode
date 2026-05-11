@@ -374,6 +374,57 @@ export function App() {
     if (match) setCurrentId(match.id);
   }, [workspace, currentId, threadsQuery.data]);
 
+  // Thread → workspace sync. Runs whenever currentId changes (URL
+  // reload, popstate back/forward, programmatic setCurrentId outside
+  // switchThread) and ensures the App-level `workspace` state
+  // matches the active thread's workspace metadata.
+  //
+  // Why this exists separate from switchThread: switchThread() runs
+  // the same resolution but ONLY when the user clicks a sidebar row.
+  // The cold-reload path (currentId initialized from URL) and the
+  // browser back/forward path (popstate handler) both skip
+  // switchThread, so without this effect the composer's workspace
+  // pill, the file tree, and the bash cwd all stayed pointed at the
+  // PREVIOUS chat's workspace — exactly the "folder name in the
+  // chat text area is wrong after reload" symptom the user reported.
+  //
+  // Resolution mirrors switchThread (1→4 priority); the only
+  // difference is we don't write activeWorkspaceId here because
+  // that's the user-facing "open this folder" intent, not a
+  // derived-from-thread sync.
+  useEffect(() => {
+    if (!currentId) return;
+    const list = threadsQuery.data ?? [];
+    const t = list.find((x) => x.id === currentId);
+    if (!t) return;
+    let resolved: Workspace | null = null;
+    if (t.workspaceId) resolved = getWorkspaceById(t.workspaceId);
+    if (!resolved && t.workspacePath) resolved = getWorkspaceByPath(t.workspacePath);
+    if (!resolved && t.workspacePath) {
+      const wsName = t.workspaceName || deriveWorkspaceName(t.workspacePath);
+      resolved = registerWorkspace({
+        path: t.workspacePath,
+        name: wsName,
+        ...(t.gitlabProjectPath
+          ? { gitlabProjectPath: t.gitlabProjectPath }
+          : {}),
+      });
+    }
+    if (resolved) {
+      // Only setState when it would actually change — avoids a
+      // re-render loop given workspace is one of the deps below.
+      if (resolved.path !== workspace?.path || resolved.id !== workspace?.id) {
+        setWorkspace(resolved);
+      }
+    }
+    // Note: we DON'T clear workspace when the thread has no
+    // workspace metadata. On web every active chat has a sandbox
+    // workspace; the absence of metadata usually just means the
+    // first qcode_persist event hasn't landed yet. Keeping the
+    // last-known workspace until the agent stamps the metadata
+    // beats flickering through a null state.
+  }, [currentId, threadsQuery.data, workspace?.path, workspace?.id]);
+
   // Backfill the registry from any thread that arrives with a
   // workspacePath we don't know about yet. Two scenarios this
   // covers:
