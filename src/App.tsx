@@ -319,12 +319,30 @@ export function App() {
   // identical-looking list would never re-run this check and the
   // active currentId could point at a thread that's been deleted
   // server-side — next send fails with not_found.
+  //
+  // CRITICAL: gate on isFetchedAfterMount, NOT just on .data being
+  // truthy. hydrateThreadsFromCache() seeds threadsQuery.data from
+  // localStorage SYNCHRONOUSLY at boot, so on a hard reload of
+  // /{threadId} the cached list may not yet include a thread that
+  // was created mid-session (or on another device since the last
+  // sync). Without this gate the effect would fire on the stale
+  // cached data, decide "URL thread isn't in the list, fall back
+  // to data[0]", silently rewrite the URL away from the thread the
+  // user actually wants — the exact bug behind "reloading /chatId
+  // doesn't load the messages". With it, we wait for the genuine
+  // server response before deciding a thread is gone.
   useEffect(() => {
+    if (!threadsQuery.isFetchedAfterMount) return;
     if (!threadsQuery.data) return;
     if (currentId && !threadsQuery.data.some((t) => t.id === currentId)) {
       setCurrentId(threadsQuery.data[0]?.id ?? null);
     }
-  }, [threadsQuery.data, threadsQuery.dataUpdatedAt, currentId]);
+  }, [
+    threadsQuery.data,
+    threadsQuery.dataUpdatedAt,
+    threadsQuery.isFetchedAfterMount,
+    currentId,
+  ]);
 
   // Workspace-aware auto-select. When a workspace becomes active
   // but no thread is selected (fresh load on web, post-delete,
