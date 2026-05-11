@@ -710,25 +710,25 @@ export function App() {
     // expecting a fresh standalone conversation.
     //
     // Policy now:
-    //   - Web (SANDBOX_AGENT_ENABLED=false): NEVER attach a
-    //     workspace. Web is chat-only; the workspace concept is a
-    //     leftover sidebar artifact from desktop sync. New chats
-    //     belong in the CHATS section.
-    //   - User explicitly clicked New chat (⌘N or sidebar button):
-    //     don't attach, even on desktop. They wanted a fresh chat,
-    //     not "another chat in this folder."
+    //   - Web (any flag state): NEVER auto-attach. Web users get
+    //     a fresh sandbox per chat by default. They can explicitly
+    //     opt INTO continuity via the WorkspaceBadge "Fork to new
+    //     chat in this workspace" action (forkThreadInWorkspace
+    //     calls createMutation directly with the desired workspace,
+    //     bypassing this ensureThreadId path). Without this guard
+    //     "+ New chat" stuck the user back into the previous chat's
+    //     sandbox — the very bug we removed the workspace concept
+    //     on web to avoid in the first place, re-introduced when
+    //     the sandbox flag flipped.
+    //   - Desktop + explicit New-chat click (⌘N or sidebar +): don't
+    //     attach. They wanted a fresh chat, not "another chat in
+    //     this folder."
     //   - Desktop user typing into composer with an active folder
     //     and no explicit New-chat click: attach. Matches the
     //     desktop expectation that "chats in this folder" is a
     //     real grouping.
-    //
-    // FUTURE: when the user upgrades a chat to "coding agent" mode
-    // (via Agent toggle or auto-detected intent), we'll PATCH the
-    // thread's metadata to associate it with a workspace silently.
-    // That move-to-workspace flow doesn't exist yet; for now,
-    // explicitly-attached-or-not is the only state.
     const shouldAttachWorkspace =
-      SANDBOX_AGENT_ENABLED &&
+      isTauri() &&
       !userExplicitlyClearedRef.current &&
       !!workspace;
     const result = await createMutation.mutateAsync({
