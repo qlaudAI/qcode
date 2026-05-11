@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { cn } from './lib/cn';
 import { QlaudMark } from './ui/QlaudMark';
+import { WorkspaceBadge } from './ui/WorkspaceBadge';
 
 import {
   clearAuth,
@@ -383,6 +384,14 @@ export function App() {
         // from corrupted metadata) skips through to the path
         // derivation rather than rendering blank.
         name,
+        // Seed the GitLab path so the header badge has it on first
+        // thread open (without waiting for a fresh agent turn to
+        // re-emit qcode_persist). Skipped when absent — desktop
+        // threads, or web threads that haven't successfully
+        // pushed yet, leave the registry entry without a link.
+        ...(t.gitlabProjectPath
+          ? { gitlabProjectPath: t.gitlabProjectPath }
+          : {}),
       });
       // Fire-and-forget server-side registration so other devices
       // see this workspace too. Idempotent on the server: if a row
@@ -730,6 +739,69 @@ export function App() {
     return result.summary.id;
   }, [currentId, model, workspace, createMutation]);
 
+  // ─── Active-thread workspace (drives header badge) ──────────────
+  //
+  // The chat header's WorkspaceBadge shows the workspace tied to the
+  // CURRENTLY OPEN thread, not the app-level `workspace` state.
+  // Reason: on web, every chat has its own auto-provisioned
+  // workspace (different from the most-recently-registered one in
+  // the global state). Reading from the thread summary keeps the
+  // badge accurate even when the user hops between chats.
+  //
+  // Resolution priority:
+  //   1. The workspace registry (has the gitlabProjectPath that the
+  //      sandbox-agent engine stamped on the first qcode_persist
+  //      event). This is what we want — full info.
+  //   2. Synthesized from thread.workspaceId/Path/Name metadata.
+  //      Missing the GitLab link, but at least the name and fork
+  //      action work.
+  //   3. null — no workspace yet (chat-only thread, or thread
+  //      hasn't fired its first agent turn so no metadata).
+  const activeThreadWorkspace = useMemo<Workspace | null>(() => {
+    if (!currentId) return null;
+    const ts = threads.find((t) => t.id === currentId);
+    if (!ts) return null;
+    if (ts.workspaceId) {
+      const fromRegistry = getWorkspaceById(ts.workspaceId);
+      if (fromRegistry) {
+        // If the registry hasn't picked up gitlabProjectPath yet
+        // (e.g. badge renders before the hydration effect runs) but
+        // the thread summary has it, overlay it. Idempotent — same
+        // value if both present.
+        if (ts.gitlabProjectPath && !fromRegistry.gitlabProjectPath) {
+          return { ...fromRegistry, gitlabProjectPath: ts.gitlabProjectPath };
+        }
+        return fromRegistry;
+      }
+    }
+    if (ts.workspacePath) {
+      return {
+        ...(ts.workspaceId ? { id: ts.workspaceId } : {}),
+        path: ts.workspacePath,
+        name: ts.workspaceName || deriveWorkspaceName(ts.workspacePath),
+        ...(ts.gitlabProjectPath
+          ? { gitlabProjectPath: ts.gitlabProjectPath }
+          : {}),
+      };
+    }
+    return null;
+  }, [currentId, threads]);
+
+  // Fork — mint a new thread reusing the active thread's workspace_id
+  // so the next agent turn clones the same GitLab repo into the
+  // sandbox container. Server-side: when the new thread has
+  // metadata.workspace_id set, handleSandboxAgent's auto-provision
+  // branch is skipped, the existing-workspace branch runs, and the
+  // clone restores prior /workspace state.
+  const forkThreadInWorkspace = useCallback(async () => {
+    if (!activeThreadWorkspace) return;
+    const result = await createMutation.mutateAsync({
+      workspace: activeThreadWorkspace,
+      model,
+    });
+    setCurrentId(result.summary.id);
+  }, [activeThreadWorkspace, model, createMutation]);
+
   // ChatSurface reports back when a turn lands. Title strategy:
   //   1. Synchronous: derive a quick title from the user's first
   //      prompt to drop the "New chat" placeholder instantly.
@@ -917,6 +989,8 @@ export function App() {
         profile={profile}
         qcodeMe={qcodeMeQuery.data ?? null}
         workspaceName={workspace?.name}
+        activeThreadWorkspace={activeThreadWorkspace}
+        onFork={forkThreadInWorkspace}
         onRefreshBalance={refreshBalance}
         onOpenSettings={() => setSettingsOpen(true)}
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
@@ -1063,6 +1137,8 @@ function Titlebar({
   profile,
   qcodeMe,
   workspaceName,
+  activeThreadWorkspace,
+  onFork,
   onRefreshBalance,
   onOpenSettings,
   onToggleSidebar,
@@ -1076,7 +1152,18 @@ function Titlebar({
   onRefreshBalance: () => void;
   profile: { email: string; user_id: string; balance_usd?: number } | null;
   qcodeMe: import('./lib/qcode-me').QcodeMe | null;
+  /** Fallback display name for the title bar (the app-level workspace
+   *  state). Used when no thread is open / before the badge has a
+   *  thread workspace to render. Hidden once the badge takes over. */
   workspaceName?: string;
+  /** Workspace tied to the currently-open thread — drives the
+   *  WorkspaceBadge popover (GitLab link + Fork action). Null when
+   *  no thread is open or the thread hasn't fired its first agent
+   *  turn yet (no workspace metadata to resolve from). */
+  activeThreadWorkspace: Workspace | null;
+  /** Mints a new thread reusing the same workspace_id — see App.tsx
+   *  forkThreadInWorkspace for the actual implementation. */
+  onFork: () => void | Promise<void>;
   onOpenSettings: () => void;
   onToggleSidebar?: () => void;
   rightRailView?: RightRailView | null;
@@ -1143,14 +1230,26 @@ function Titlebar({
         <span className="hidden text-sm font-semibold tracking-tight sm:inline">
           qcode
         </span>
-        {workspaceName && (
+        {/* Workspace badge — clickable popover when a thread is
+         *  open (links to the backing GitLab repo + fork action).
+         *  Falls back to a plain name span when there's no active
+         *  thread workspace yet (chat-only / pre-first-turn). */}
+        {activeThreadWorkspace ? (
+          <>
+            <span className="mx-1 hidden text-muted-foreground/60 md:inline">/</span>
+            <WorkspaceBadge
+              workspace={activeThreadWorkspace}
+              onFork={onFork}
+            />
+          </>
+        ) : workspaceName ? (
           <>
             <span className="mx-2 hidden text-muted-foreground/60 md:inline">/</span>
             <span className="hidden truncate text-xs text-muted-foreground md:inline">
               {workspaceName}
             </span>
           </>
-        )}
+        ) : null}
       </div>
 
       {/* Empty middle region — flex-1 expands to fill all space

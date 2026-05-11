@@ -202,6 +202,16 @@ export function useThreadsQuery(opts: {
           typeof meta.workspace_path === 'string' ? meta.workspace_path : undefined;
         const wsName =
           typeof meta.workspace_name === 'string' ? meta.workspace_name : undefined;
+        // gitlab_project_path is stamped by the worker at end-of-turn
+        // push (apps/edge/src/routes/sandbox.ts). Surfaced so the
+        // header workspace badge can render the GitLab link on first
+        // thread open without waiting for a fresh agent turn to
+        // re-emit it. Empty on desktop threads + threads that
+        // haven't pushed yet.
+        const gitlabProjectPath =
+          typeof meta.gitlab_project_path === 'string'
+            ? meta.gitlab_project_path
+            : undefined;
         // workspaceId is a per-device registry link — server only
         // carries the originating client's id as a hint, and
         // different devices have their own ids. We resolve in
@@ -227,6 +237,7 @@ export function useThreadsQuery(opts: {
           ...(wsId ? { workspaceId: wsId } : {}),
           ...(wsPath ? { workspacePath: wsPath } : {}),
           ...(wsName ? { workspaceName: wsName } : {}),
+          ...(gitlabProjectPath ? { gitlabProjectPath } : {}),
           // pinnedAt is local-first (live/cached prefer); server
           // metadata is the cross-device fallback, set via PATCH
           // when the user pins. Same priority shape as titleSource —

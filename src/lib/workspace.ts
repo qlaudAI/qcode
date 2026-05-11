@@ -54,6 +54,14 @@ export type Workspace = {
    *  picked from the sidebar). Drives the "recent first" ordering
    *  in the sidebar's WORKSPACES section. */
   lastUsedAt?: number;
+  /** GitLab project path (e.g. `qcode-users/jane-myapp-ab12`) that
+   *  backs this workspace's sandbox in qcode-web. Set when the
+   *  sandbox-agent engine emits a qcode_persist event carrying the
+   *  server-side project_path. Surfaced in the header badge so the
+   *  user can open their generated repo on gitlab.com directly. Null
+   *  on desktop workspaces (no GitLab backing — the source of truth
+   *  is the local folder). */
+  gitlabProjectPath?: string;
 };
 
 type WorkspaceRegistry = {
@@ -236,6 +244,13 @@ export function registerWorkspace(input: {
    *  back to a fresh local id if omitted (offline-first registers
    *  before sync). */
   id?: string;
+  /** GitLab project path (e.g. `qcode-users/jane-myapp-ab12`)
+   *  that backs this workspace's sandbox. Only set in qcode-web
+   *  via the sandbox-agent engine; desktop omits. Stamped here so
+   *  the header workspace badge can link out without an extra
+   *  server round-trip. Idempotent: an empty-string or omitted
+   *  value never overwrites a previously-set path. */
+  gitlabProjectPath?: string;
 }): Workspace {
   const reg = readRegistry();
   const now = Date.now();
@@ -250,6 +265,12 @@ export function registerWorkspace(input: {
     if (input.id && existing.id !== input.id) {
       existing.id = input.id;
     }
+    // Once a workspace has a GitLab path, keep it. Only set on
+    // first sighting (or upgrade) — never clobber an existing
+    // value with empty/missing.
+    if (input.gitlabProjectPath && !existing.gitlabProjectPath) {
+      existing.gitlabProjectPath = input.gitlabProjectPath;
+    }
     writeRegistry(reg);
     return existing;
   }
@@ -259,6 +280,9 @@ export function registerWorkspace(input: {
     name: input.name,
     createdAt: now,
     lastUsedAt: now,
+    ...(input.gitlabProjectPath
+      ? { gitlabProjectPath: input.gitlabProjectPath }
+      : {}),
   };
   reg.workspaces.push(created);
   writeRegistry(reg);

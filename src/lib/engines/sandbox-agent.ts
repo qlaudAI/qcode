@@ -431,6 +431,16 @@ export async function runEngineSandboxAgent(
                 id: wp.workspace_id,
                 path: wp.workspace_path!,
                 name: wp.workspace_name!,
+                // Persist the GitLab path so the header workspace
+                // badge can deep-link to the user's generated repo
+                // without an extra round-trip. Only populated when
+                // the server actually has a sandbox-repo row for
+                // this workspace — for resume_failed / create_start
+                // pre-events the path is absent and we skip the
+                // upgrade (idempotent in registerWorkspace).
+                ...(wp.project_path
+                  ? { gitlabProjectPath: wp.project_path }
+                  : {}),
               });
               // Touch on server so the cross-device sort puts this
               // workspace at the top.
@@ -445,6 +455,7 @@ export async function runEngineSandboxAgent(
                       id: wp.workspace_id,
                       path: wp.workspace_path,
                       name: wp.workspace_name,
+                      gitlabProjectPath: wp.project_path,
                     },
                   }),
                 );

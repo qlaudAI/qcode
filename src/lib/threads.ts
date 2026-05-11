@@ -41,6 +41,15 @@ export type ThreadSummary = {
   /** Last segment of the workspace path, cached for sidebar display
    *  so we don't re-derive it on every render. */
   workspaceName?: string;
+  /** GitLab project path (e.g. `qcode-users/jane-myapp-ab12`) of
+   *  the sandbox repo backing this thread's workspace. Server stamps
+   *  it into metadata as `gitlab_project_path` at end-of-turn push;
+   *  surfaced here so the header workspace badge can render its
+   *  "Saved to gitlab.com/<slug>" row immediately on first thread
+   *  open, without waiting for the user to fire another turn. Empty
+   *  on desktop threads (no GitLab backing) and on web threads that
+   *  haven't successfully pushed yet. */
+  gitlabProjectPath?: string;
   /** Where the title came from. 'auto' = first-prompt or LLM-
    *  generated; safe to overwrite on every turn. 'user' = the
    *  user manually renamed it; auto-regen leaves it alone. We
