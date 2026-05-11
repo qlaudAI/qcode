@@ -21,11 +21,13 @@ import { isTauri } from './tauri';
  *    - Desktop (Tauri): TRUE — Agent + Plan run via the local
  *      bundled claude-code engine. No sandbox container needed.
  *      Battle-tested.
- *    - Web (browser):   FALSE — sandbox-agent engine works but
- *      hits a long tail of edge cases (cold-start latency, GitLab
- *      persistence chain, model-specific tool-call reliability).
- *      Gated off until we close the invariants and operationalize
- *      the sandbox properly.
+ *    - Web (browser):   TRUE — enabled after the robustness pass
+ *      closed the failure-mode tail (workspace lock prevents
+ *      concurrent-turn corruption, tool_result truncation caps
+ *      per-turn cost, GitLab persistence invariants 1–3, retry +
+ *      fast-fail on probes). If a regression surfaces, set
+ *      `localStorage.qcode.flags.sandboxAgent = '0'` in devtools
+ *      and reload to hard-disable on this browser.
  *
  *  When this flag is FALSE on a surface:
  *    - Mode toggle hides Agent + Plan (Chat is the only option)
@@ -34,22 +36,22 @@ import { isTauri } from './tauri';
  *    - Sandbox-specific UI (FileTree, Preview iframe, Media tab,
  *      "Sandbox ready" pill) hides on web; desktop keeps all
  *
- *  To re-enable on web for testing: set
- *  `localStorage.qcode.flags.sandboxAgent = '1'` in the browser
- *  devtools and reload. Read-once at module load so refresh is
- *  required after toggling.
+ *  Read-once at module load — refresh required after toggling the
+ *  localStorage override.
  */
 export const SANDBOX_AGENT_ENABLED: boolean = (() => {
   if (isTauri()) return true; // desktop never gated
-  // Web: check for an explicit override before defaulting to off.
+  // Web: emergency kill-switch via localStorage. Lets us tell a
+  // user "set this to '0' and reload" if their browser hits a
+  // pathological state without us having to ship a code rollback.
   if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
     try {
-      if (localStorage.getItem('qcode.flags.sandboxAgent') === '1') {
-        return true;
+      if (localStorage.getItem('qcode.flags.sandboxAgent') === '0') {
+        return false;
       }
     } catch {
       /* localStorage blocked (private browsing) — treat as default */
     }
   }
-  return false;
+  return true;
 })();
