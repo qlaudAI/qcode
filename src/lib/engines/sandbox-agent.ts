@@ -302,9 +302,14 @@ export async function runEngineSandboxAgent(
           sawLockHeldThisTurn = false;
           return;
         }
+        // `||` not `??` — an empty-string `message` or `stderr`
+        // should fall through to the next fallback. `??` only kicks
+        // in on null/undefined and would leak "" up to ChatSurface,
+        // which then shows the generic "Something went wrong before
+        // the model could respond" with no actionable info.
         opts.onEvent({
           type: 'error',
-          message: w.message ?? w.stderr ?? 'sandbox agent error',
+          message: w.message || w.stderr || 'sandbox agent error',
         });
         return;
       }
