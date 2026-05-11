@@ -937,16 +937,37 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
             </p>
           </div>
         ) : (
-          <iframe
-            ref={iframeRef}
-            src={iframeSrc}
-            className="min-h-0 w-full flex-1 border-0 bg-white"
-            // Allow same-origin so cookies/storage work for localhost
-            // dev. Don't allow scripts to escape the frame (default
-            // sandbox). For dev servers this covers the typical case.
-            sandbox="allow-same-origin allow-scripts allow-forms"
-            referrerPolicy="no-referrer"
-          />
+          <div className="flex min-h-0 flex-1 flex-col">
+            <iframe
+              ref={iframeRef}
+              src={iframeSrc}
+              className="min-h-0 w-full flex-1 border-0 bg-white"
+              // Allow same-origin so cookies/storage work for localhost
+              // dev. Don't allow scripts to escape the frame (default
+              // sandbox). For dev servers this covers the typical case.
+              sandbox="allow-same-origin allow-scripts allow-forms"
+              referrerPolicy="no-referrer"
+            />
+            {/* Sandbox-mode footer hint. The CF Sandbox container
+             *  sleeps after ~10 min idle; when the user revisits a
+             *  thread, the dev server they spun up earlier may be
+             *  dead. The iframe can't reliably surface that to us
+             *  (no-cors hides the upstream 502; onError is unreliable
+             *  for sub-document failures). Cheaper UX win: a quiet
+             *  one-line breadcrumb that tells the user what to do
+             *  when the iframe stays blank, without trying to detect
+             *  the state and getting it wrong. Tauri/desktop runtime
+             *  doesn't have this idle problem — the dev server is
+             *  on their own machine — so we only show it on sandbox. */}
+            {runtime.kind === 'sandbox' && (
+              <div className="border-t border-border/40 bg-muted/30 px-2 py-1 text-[10.5px] leading-snug text-muted-foreground">
+                If the preview stays blank, the sandbox dev server may
+                have idled out — ask the agent to restart it (e.g.
+                <span className="ml-0.5 font-mono">{' '}bun dev</span>)
+                and reload above.
+              </div>
+            )}
+          </div>
         )
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">

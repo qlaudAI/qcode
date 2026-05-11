@@ -182,6 +182,14 @@ export async function runEngineSandboxAgent(
   const toolAccum = new Map<number, ToolUseAccum>();
   let totalInput = 0;
   let totalOutput = 0;
+  // When the worker rejects our turn because another session holds
+  // the workspace lock, it emits qcode_lock_held followed by a
+  // back-compat qcode_error carrying the same message. The lock-held
+  // branch sets this flag so the next qcode_error in the SAME turn
+  // is suppressed (otherwise the user sees the same "another tab is
+  // busy" copy twice — once as info, once as error). Cleared after
+  // the consumed qcode_error.
+  let sawLockHeldThisTurn = false;
 
   const handleAnthropicEvent = (av: AnthropicSseEvent) => {
     switch (av.type) {
@@ -286,10 +294,80 @@ export async function runEngineSandboxAgent(
         return;
       }
       if (w.type === 'qcode_error') {
+        // If this qcode_error immediately follows a qcode_lock_held
+        // (same conflict, emitted as a back-compat duplicate), the
+        // lock-held branch already surfaced a user-visible message
+        // and we suppress this one to avoid double-rendering.
+        if (sawLockHeldThisTurn) {
+          sawLockHeldThisTurn = false;
+          return;
+        }
         opts.onEvent({
           type: 'error',
           message: w.message ?? w.stderr ?? 'sandbox agent error',
         });
+        return;
+      }
+      // Workspace lock conflict — another tab (or another device) is
+      // mid-turn on the SAME workspace and our turn was rejected to
+      // prevent /workspace corruption. Distinct from qcode_error: this
+      // isn't a failure, it's a "wait or switch tab" affordance.
+      // Render as a text breadcrumb plus an error fallback so existing
+      // ChatSurface error UI catches the user's attention. Future
+      // improvement: a dedicated inline "Open that tab →" pill.
+      if (w.type === 'qcode_lock_held') {
+        const wl = w as unknown as {
+          held_by_session?: string | null;
+          remaining_ms?: number;
+          message?: string;
+        };
+        const sec = Math.ceil((wl.remaining_ms ?? 0) / 1000);
+        const text =
+          (wl.message ?? `Workspace busy on another session.`) +
+          ` (auto-releases in ~${sec}s)`;
+        opts.onEvent({ type: 'text', text: `⏸ ${text}\n` });
+        sawLockHeldThisTurn = true;
+        return;
+      }
+      // Media artifact registered at end-of-turn. The worker uploaded
+      // a generated file (image/audio/video/pdf) from /workspace to
+      // R2 and inserted a mediaArtifacts row. Fire a window event so
+      // the Media tab (RightRail.tsx MediaView) can refresh its list
+      // without us threading state through. Best-effort: if no one is
+      // listening, the next tab open re-queries /v1/threads/:id/
+      // artifacts and sees it anyway.
+      if (w.type === 'qcode_artifact') {
+        const wa = w as unknown as {
+          subtype?: string;
+          artifact_id?: string;
+          kind?: string;
+          original_name?: string;
+          message?: string;
+        };
+        if (wa.subtype === 'registered') {
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('qcode:artifact-registered', {
+                detail: {
+                  artifact_id: wa.artifact_id,
+                  kind: wa.kind,
+                  original_name: wa.original_name,
+                },
+              }),
+            );
+          }
+          // Quiet breadcrumb so the user knows the file was saved to
+          // their Media tab, not just to disk.
+          opts.onEvent({
+            type: 'text',
+            text: `📎 Saved to Media: ${wa.original_name ?? wa.artifact_id ?? 'file'}\n`,
+          });
+        } else if (wa.subtype === 'register_failed' || wa.subtype === 'register_batch_failed') {
+          opts.onEvent({
+            type: 'text',
+            text: `⚠ Could not register media artifact (${wa.original_name ?? 'batch'}): ${wa.message ?? 'unknown'}\n`,
+          });
+        }
         return;
       }
       // GitLab persistence lifecycle events. Surfacing them in the
