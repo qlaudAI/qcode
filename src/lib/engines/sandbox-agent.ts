@@ -468,7 +468,9 @@ export async function runEngineSandboxAgent(
                         ? `⚠ Push failed at end-of-turn: ${wp.message ?? 'unknown'} — work may be lost`
                         : sub === 'push_done'
                           ? `✓ Final push to gitlab.com/${path}`
-                          : `Sandbox persist: ${sub}`;
+                          : sub === 'setup_failed'
+                            ? `⚠ Persistence setup failed: ${wp.message ?? 'unknown'} — running this turn without GitLab tracking`
+                            : `Sandbox persist: ${sub}${wp.message ? ` — ${wp.message}` : ''}`;
         opts.onEvent({ type: 'text', text: text + '\n' });
         return;
       }
