@@ -313,6 +313,41 @@ export async function runEngineSandboxAgent(
         });
         return;
       }
+      // Container/shell died mid-turn (idled out, OOM, segfault). The
+      // worker detected the SDK error pattern and emitted a
+      // structured event so we can:
+      //   1. Clear the cached session_id (sandbox-session.ts module
+      //      state) — keeping it would have every subsequent turn
+      //      hit the same dead container.
+      //   2. Surface a recoverable error block — the user's data is
+      //      safe in GitLab; they just need to retry to mint a fresh
+      //      container.
+      // Lazy import so the engine path doesn't drag the runtime
+      // session module into its cold-start bundle.
+      if (w.type === 'qcode_session_dead') {
+        const wd = w as unknown as {
+          session_id?: string;
+          message?: string;
+        };
+        void (async () => {
+          try {
+            const sessionMod = await import('../runtime/sandbox-session');
+            await sessionMod.terminateSandboxSession();
+          } catch {
+            // Best-effort — failing to clear the cache just means the
+            // user has to hit retry one more time after a manual
+            // refresh. The error surface below still fires.
+          }
+        })();
+        opts.onEvent({
+          type: 'error',
+          message:
+            wd.message ||
+            'Sandbox container died (idled out, ran out of memory, or crashed). ' +
+              'Your code is safe in GitLab — click Retry to start a fresh container.',
+        });
+        return;
+      }
       // Workspace lock conflict — another tab (or another device) is
       // mid-turn on the SAME workspace and our turn was rejected to
       // prevent /workspace corruption. Distinct from qcode_error: this
