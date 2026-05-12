@@ -375,6 +375,42 @@ export async function runEngineSandboxAgent(
         }
         return;
       }
+      // Conversation context bridge — emitted by the worker when
+      // chat-mode history is injected into claude's system prompt
+      // as a preamble, and at turn start when the unified
+      // thread_messages persistence kicks in. Surface a quiet
+      // one-liner so the user knows their prior chat is being
+      // carried forward (vs. silent context-loss).
+      if (w.type === 'qcode_context') {
+        const wc = w as unknown as {
+          subtype?: string;
+          injected_count?: number;
+          preamble_bytes?: number;
+          starting_seq?: number;
+          prior_history_count?: number;
+          message?: string;
+        };
+        if (wc.subtype === 'history_injected') {
+          const n = wc.injected_count ?? 0;
+          if (n > 0) {
+            opts.onEvent({
+              type: 'text',
+              text: `↪ Bridging ${n} prior message${n === 1 ? '' : 's'} into the agent's context.\n`,
+            });
+          }
+          return;
+        }
+        if (wc.subtype === 'history_fetch_failed') {
+          opts.onEvent({
+            type: 'text',
+            text: `⚠ Couldn't load prior chat history (${wc.message ?? 'unknown'}) — agent may not have context from earlier turns.\n`,
+          });
+          return;
+        }
+        // persist_start is intentionally quiet — turn-start
+        // diagnostic only, not user-facing.
+        return;
+      }
       // GitLab persistence lifecycle events. Surfacing them in the
       // chat is the diagnostic difference between "we silently lost
       // your work" and "the platform reported a clean retry path".
