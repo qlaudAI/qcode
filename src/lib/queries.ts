@@ -309,16 +309,41 @@ export function useThreadMessagesQuery(threadId: string | null) {
     queryFn: () => getRemoteThreadMessages(threadId as string, { limit: 50 }),
     staleTime: Infinity, // server-side compaction owns freshness
     refetchInterval: (query) => {
-      if (!threadId || !isInFlight(threadId)) return false;
+      if (!threadId) return false;
       const data = query.state.data;
-      // hasLanded reads the server's seq directly off each
-      // message — no synthetic indices, no parallel counter to
-      // keep in sync.
-      if (data && hasLanded(threadId, data.messages)) {
-        clearInFlight(threadId);
-        return false;
+
+      // Path 1: LOCAL in-flight tracking — markInFlight() was
+      // called at send-start in this tab. Poll until the assistant
+      // turn we're waiting for lands.
+      if (isInFlight(threadId)) {
+        if (data && hasLanded(threadId, data.messages)) {
+          clearInFlight(threadId);
+          return false;
+        }
+        return 2_000;
       }
-      return 2_000;
+
+      // Path 2: SERVER-DERIVED in-flight — the local tab has no
+      // record of an in-flight turn (e.g., this tab just reloaded
+      // mid-turn, OR another tab/device kicked off a turn we want
+      // to watch). If the latest persisted message is role='user'
+      // with no following assistant, the worker is still in the
+      // middle of writing the response. Poll until an assistant
+      // row lands (which makes last.role='assistant') OR the
+      // sandbox-agent endpoint surfaces a terminal event via the
+      // SSE stream the active tab is consuming.
+      //
+      // Without this, a mid-turn reload sees the half-written
+      // history once and never refetches — user thinks the
+      // conversation "disappeared" even though the worker is
+      // still writing rows in the background.
+      if (data && data.messages.length > 0) {
+        const last = data.messages[data.messages.length - 1];
+        if (last && last.role === 'user') {
+          return 2_000;
+        }
+      }
+      return false;
     },
   });
 }

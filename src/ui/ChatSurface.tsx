@@ -459,12 +459,22 @@ export function ChatSurface({
     if (!messagesQuery.data) return;
     // Normal navigation: skip if we've already rendered this thread
     // once (avoids the post-send overwrite that strips usage pills).
-    // Resume case: when the thread is in-flight (we're polling for
-    // a server-side-finishing turn), bypass the gate — every poll
-    // refetch needs to land in the UI the moment qlaud persists the
-    // new assistant turn, otherwise the user sees the canonical
-    // history frozen at switch-away time.
-    const polling = isInFlight(threadId);
+    // Resume case: when the thread is in-flight, bypass the gate so
+    // every poll refetch lands in the UI the moment qlaud persists
+    // the new assistant turn. Two ways a thread can be in-flight:
+    //   1. LOCAL — markInFlight() was called in this tab at
+    //      send-start.
+    //   2. SERVER-DERIVED — the latest persisted message is
+    //      role='user' with no following assistant. Means the
+    //      worker is still writing the turn (this tab just
+    //      reloaded mid-turn, or another tab kicked it off).
+    // Without the server-derived branch, a mid-turn reload reads
+    // the half-written history once and never refetches, so the
+    // user-visible conversation appears to freeze / disappear.
+    const lastMsg =
+      messagesQuery.data.messages[messagesQuery.data.messages.length - 1];
+    const serverInFlight = lastMsg?.role === 'user';
+    const polling = isInFlight(threadId) || serverInFlight;
     if (!polling && lastLoadedRef.current === threadId) return;
     lastLoadedRef.current = threadId;
     setBlocks(historyToBlocks(messagesQuery.data.messages));
