@@ -49,6 +49,12 @@ import {
   type ThreadSummary,
 } from './threads';
 import type { Workspace } from './workspace';
+import {
+  ensureRemoteChatWorkspace,
+  listRemoteWorkspaces,
+  syncRegisterWorkspace,
+  type RemoteWorkspace,
+} from './workspace-sync';
 
 // ─── Client ────────────────────────────────────────────────────────
 
@@ -88,6 +94,16 @@ export const qk = {
   qcodeUsage: (days: number) => ['qcode-usage', days] as const,
   catalog: ['catalog'] as const,
   mcpServers: ['mcp-servers'] as const,
+  /** Server-authoritative workspace list. Replaces the
+   *  localStorage-only registry in lib/workspace.ts for the
+   *  cross-device view. */
+  workspaces: ['workspaces'] as const,
+  /** User's chat-kind singleton workspace. Returned by
+   *  POST /v1/workspaces {kind:'chat'} — idempotent, always
+   *  resolves to the same row. Cached separately from the full
+   *  list so the boot path can lazily resolve it without
+   *  blocking the sidebar paint. */
+  chatWorkspace: ['workspaces', 'chat'] as const,
 };
 
 // ─── Threads list ──────────────────────────────────────────────────
@@ -747,4 +763,87 @@ export function togglePinThread(id: string): void {
  *  no stale data leaks if a different account signs in next. */
 export function clearAllQueries(): void {
   queryClient.clear();
+}
+
+// ─── Workspaces (server-authoritative, v2) ────────────────────────
+//
+// Replaces the localStorage-only registry in lib/workspace.ts for
+// the cross-device view. The localStorage registry still exists as
+// a folder-specific cache (gitignore matcher, env probe, bash
+// session — all keyed by absolute path), but the canonical list
+// of "workspaces this user has" comes from the server.
+//
+// Three hooks:
+//   useWorkspacesQuery()           — GET /v1/workspaces; full v2 list
+//                                    with kind / local_path / gitlab_*
+//   useChatWorkspaceQuery()        — POST {kind:'chat'} singleton.
+//                                    Idempotent on the server; cached
+//                                    here so subsequent reads are
+//                                    sync.
+//   useCreateLocalWorkspaceMutation
+//                                  — POST {kind:'local'} for the
+//                                    desktop folder-picker flow.
+
+/** Active workspace list, server-canonical. The sidebar should
+ *  switch to this hook in commit 6 (replacing useWorkspaces() from
+ *  lib/use-workspaces.ts). Returns ALL kinds — components that
+ *  only want desktop folders should filter by `w.kind === 'local'`. */
+export function useWorkspacesQuery(opts: { authed: boolean }) {
+  return useQuery<RemoteWorkspace[]>({
+    queryKey: qk.workspaces,
+    enabled: opts.authed,
+    queryFn: () => listRemoteWorkspaces(),
+    // Workspaces change rarely (a few times per user per week).
+    // 60s staleTime + the focus refetch + the SSE thread-events
+    // workspace channel together give effectively-live sync.
+    staleTime: 60_000,
+  });
+}
+
+/** Resolve (and cache) the user's chat-kind singleton workspace.
+ *  Idempotent: subsequent calls return the same row. Called once
+ *  on app boot so new threads can be created against this id
+ *  without a round-trip per create. */
+export function useChatWorkspaceQuery(opts: { authed: boolean }) {
+  return useQuery<RemoteWorkspace | null>({
+    queryKey: qk.chatWorkspace,
+    enabled: opts.authed,
+    queryFn: () => ensureRemoteChatWorkspace(),
+    // The singleton row never disappears once created. Cache long.
+    staleTime: 10 * 60_000,
+  });
+}
+
+/** Create / reactivate a desktop folder workspace server-side.
+ *  Desktop folder-picker flow uses this so the freshly-picked
+ *  folder lands in the cross-device list immediately. The
+ *  localStorage registry still gets a row via the workspace-sync
+ *  hydrate pass — this mutation just makes the canonical row land
+ *  on the server first instead of last. */
+export function useCreateLocalWorkspaceMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { path: string; name: string }) =>
+      syncRegisterWorkspace(input).then((w) => {
+        if (!w) throw new Error('workspace_register_failed');
+        return w;
+      }),
+    onSuccess: (created) => {
+      // Insert / replace into qk.workspaces so the sidebar sees
+      // the new row without waiting for the next refetch.
+      const prev = qc.getQueryData<RemoteWorkspace[]>(qk.workspaces) ?? [];
+      const idx = prev.findIndex((w) => w.id === created.id);
+      const next = idx === -1 ? [created, ...prev] : [...prev];
+      if (idx !== -1) next[idx] = { ...prev[idx]!, ...created };
+      qc.setQueryData<RemoteWorkspace[]>(qk.workspaces, next);
+    },
+  });
+}
+
+/** Invalidate so the next consumer refetches /v1/workspaces. Used
+ *  by SSE thread-events when a workspace row in the cache needs a
+ *  fresh server view (e.g. a workspace was renamed via another
+ *  device). */
+export function invalidateWorkspaces(): Promise<void> {
+  return queryClient.invalidateQueries({ queryKey: qk.workspaces });
 }

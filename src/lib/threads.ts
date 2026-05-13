@@ -75,6 +75,22 @@ export type RemoteThread = {
    *  first user message; null until then (clients render
    *  placeholder). Survives sign-out + cross-device. */
   title: string | null;
+  /** Workspace this thread is pinned to. Canonical column post-
+   *  migration 0030; previously buried in metadata.workspace_id.
+   *  Always populated server-side — POST /v1/threads auto-resolves
+   *  to the user's chat workspace when the caller doesn't specify. */
+  workspace_id: string | null;
+  /** Last-used surface state. 'chat' | 'agent' | 'plan'. Drives the
+   *  ChatSurface mode toggle on reopen without per-device
+   *  localStorage. */
+  default_mode: string | null;
+  /** Last-used model slug. Same role as default_mode for the model
+   *  picker. */
+  default_model: string | null;
+  /** Latest claude --resume sid. Populated by the server on every
+   *  agent turn; surfaced here for diagnostics + debug surfaces.
+   *  Clients rarely need to read this directly. */
+  latest_claude_sid: string | null;
   metadata: unknown;
   created_at: number;
   last_active_at: number;
@@ -113,13 +129,42 @@ async function api<T>(
 
 /** Create a fresh thread on qlaud. Returns the canonical id qcode
  *  uses for every subsequent message + tool-result POST on this
- *  conversation. */
+ *  conversation.
+ *
+ *  v2 contract (post migration 0030): server resolves a
+ *  workspace_id for every thread. Resolution priority:
+ *
+ *    1. explicit `workspaceId` arg → server validates ownership
+ *    2. explicit `kind` arg (currently only 'chat' allowed via
+ *       this surface) → server resolves to the user's chat
+ *       singleton via ensureUserChatWorkspace
+ *    3. neither → server defaults to the user's chat workspace
+ *
+ *  Pass `defaultMode` to seed the thread's last-used surface
+ *  state (chat | agent | plan). When omitted the server defaults
+ *  to 'chat' — safe baseline; promotion to agent happens
+ *  implicitly on the first agent turn (the server then mints a
+ *  sandbox workspace and re-pins the thread). */
 export async function createRemoteThread(opts?: {
+  workspaceId?: string;
+  kind?: 'chat';
+  defaultMode?: 'chat' | 'agent' | 'plan';
+  defaultModel?: string;
+  endUserId?: string;
+  title?: string;
   metadata?: Record<string, unknown>;
 }): Promise<RemoteThread> {
+  const body: Record<string, unknown> = {};
+  if (opts?.workspaceId) body.workspace_id = opts.workspaceId;
+  if (opts?.kind) body.kind = opts.kind;
+  if (opts?.defaultMode) body.default_mode = opts.defaultMode;
+  if (opts?.defaultModel) body.default_model = opts.defaultModel;
+  if (opts?.endUserId) body.end_user_id = opts.endUserId;
+  if (opts?.title !== undefined) body.title = opts.title;
+  if (opts?.metadata !== undefined) body.metadata = opts.metadata;
   return api<RemoteThread>('/v1/threads', {
     method: 'POST',
-    body: JSON.stringify({ metadata: opts?.metadata ?? null }),
+    body: JSON.stringify(body),
   });
 }
 

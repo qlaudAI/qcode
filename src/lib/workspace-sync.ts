@@ -36,10 +36,24 @@ import {
 
 const BASE = (import.meta.env.VITE_QLAUD_BASE as string | undefined) ?? 'https://api.qlaud.ai';
 
-type RemoteWorkspace = {
+/** Server-canonical workspace shape (v2 — post migration 0030).
+ *  `kind` is the discriminator: 'chat' (per-user singleton, no
+ *  backing path), 'local' (desktop folder, local_path required), or
+ *  'sandbox' (web auto-provisioned container, gitlab_project_path
+ *  populated lazily). `path` is kept on the wire by the server for
+ *  one-release back-compat — new readers should use local_path /
+ *  gitlab_project_path explicitly. */
+export type RemoteWorkspace = {
   id: string;
-  path: string;
+  kind: 'chat' | 'local' | 'sandbox';
   name: string;
+  local_path: string | null;
+  gitlab_project_id: number | null;
+  gitlab_project_path: string | null;
+  default_branch: string | null;
+  /** Legacy field — populated from local_path when set, else the
+   *  pre-0030 path column. Drops once every reader migrates. */
+  path: string | null;
   created_at: number;
   last_used_at: number;
 };
@@ -77,12 +91,41 @@ export async function syncRegisterWorkspace(input: {
   name: string;
 }): Promise<RemoteWorkspace | null> {
   try {
+    // v2 contract: send {kind:'local', name, local_path}. Server-side
+    // upsertLocal is idempotent on (userId, local_path) — reactivates
+    // soft-deleted rows and bumps last_used_at on dups. Older
+    // workers (pre-0030 deploy) infer kind='local' from the presence
+    // of `path` in the body, so this body works on both versions.
     return await api<RemoteWorkspace>('/v1/workspaces', {
       method: 'POST',
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        kind: 'local',
+        name: input.name,
+        local_path: input.path,
+        // legacy alias retained for one-release server tolerance
+        path: input.path,
+      }),
     });
   } catch (e) {
     console.warn('[workspace-sync] register failed:', e);
+    return null;
+  }
+}
+
+/** POST /v1/workspaces {kind:'chat'} — find-or-create the user's
+ *  singleton chat workspace. Idempotent: subsequent calls return
+ *  the same row. Used on app boot so the client always has a
+ *  resolved chat workspace id without waiting for the first
+ *  POST /v1/threads (which would auto-resolve to the same row but
+ *  costs a round-trip per thread create). */
+export async function ensureRemoteChatWorkspace(): Promise<RemoteWorkspace | null> {
+  try {
+    return await api<RemoteWorkspace>('/v1/workspaces', {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'chat' }),
+    });
+  } catch (e) {
+    console.warn('[workspace-sync] ensure chat workspace failed:', e);
     return null;
   }
 }
@@ -152,22 +195,32 @@ export async function hydrateWorkspacesFromServer(): Promise<Workspace[]> {
 
   const local = listLocalWorkspaces();
   const localByPath = new Map(local.map((w) => [w.path, w]));
-  const remoteByPath = new Map(remote.map((w) => [w.path, w]));
+  // Local-registry hydration only cares about folder-backed
+  // workspaces. Chat / sandbox workspaces don't have a meaningful
+  // filesystem path — they're surfaced through useWorkspacesQuery
+  // instead of this localStorage registry.
+  const folderRemote = remote.filter(
+    (r) => r.kind === 'local' && typeof (r.local_path ?? r.path) === 'string',
+  );
+  const remoteByPath = new Map(
+    folderRemote.map((w) => [(w.local_path ?? w.path) as string, w]),
+  );
 
   // Apply server rows to local. Newer last_used_at wins on the row;
   // for paths only present on one side we copy them across. Crucially:
   // pass the server's id through so the local registry adopts it,
   // not a freshly-minted local id. Without this, a fresh client
   // (qcode-web with empty localStorage, fresh desktop install) sees
-  // server-tagged threads as orphans because their `metadata.workspace_id`
+  // server-tagged threads as orphans because their `workspace_id`
   // points at the SERVER's id while the local workspace has a NEW
   // id — sidebar's id-match path silently misses them and they fall
   // back to path-matching (slower / fragile when paths differ
   // across devices).
-  for (const r of remote) {
-    const localMatch = localByPath.get(r.path);
+  for (const r of folderRemote) {
+    const rPath = (r.local_path ?? r.path) as string;
+    const localMatch = localByPath.get(rPath);
     if (!localMatch) {
-      registerLocalWorkspace({ id: r.id, path: r.path, name: r.name });
+      registerLocalWorkspace({ id: r.id, path: rPath, name: r.name });
       continue;
     }
     // Both sides have the row. Adopt the server id if the local
@@ -175,7 +228,7 @@ export async function hydrateWorkspacesFromServer(): Promise<Workspace[]> {
     // start matching by id). Bump lastUsedAt to whichever is newer
     // and adopt the server name on rename (server is canonical).
     if (r.id && localMatch.id !== r.id) {
-      registerLocalWorkspace({ id: r.id, path: r.path, name: r.name });
+      registerLocalWorkspace({ id: r.id, path: rPath, name: r.name });
     }
     if (r.last_used_at > (localMatch.lastUsedAt ?? 0)) {
       touchLocalWorkspace(r.id || localMatch.id || '');

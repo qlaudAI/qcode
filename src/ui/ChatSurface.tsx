@@ -42,6 +42,7 @@ import { getSettings } from '../lib/settings';
 import type { ContentBlock, Message } from '../lib/qlaud-client';
 import { type CompactionInfo } from '../lib/threads';
 import { useThreadMessagesQuery } from '../lib/queries';
+import { useThreadEvents } from '../lib/use-thread-events';
 import { QlaudMark } from './QlaudMark';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/legacy/tools';
 import {
@@ -356,6 +357,13 @@ export function ChatSurface({
   // empty server-side anyway. Skip the load while a send is in flight;
   // the next thread-switch covers it.
   const messagesQuery = useThreadMessagesQuery(busy ? null : threadId);
+
+  // Live cross-device sync for this thread. Opens an SSE
+  // subscription against GET /v1/threads/:id/events; the hook
+  // invalidates / patches react-query caches as the server emits
+  // message / thread / workspace frames. Hook is a no-op when
+  // threadId is null (no active thread).
+  useThreadEvents(threadId);
   const lastLoadedRef = useRef<string | null>(null);
   // Thread-switch is now a NO-OP from this surface's POV — every
   // piece of per-thread state (blocks, busy, queued, runId) lives
