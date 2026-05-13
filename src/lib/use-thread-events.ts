@@ -134,8 +134,17 @@ export function useThreadEvents(threadId: string | null): void {
             },
           );
           if (!res.ok || !res.body) {
-            // Auth failure / server 5xx / no body — bail to the
-            // back-off loop. Don't tight-loop on persistent failures.
+            // 4xx is a CLIENT problem — auth revoked, thread
+            // hard-deleted, malformed request. Looping every 2s
+            // forever would burn quota + spam the worker. Bail
+            // permanently; the user has to remount (sign back in,
+            // navigate away) to retry.
+            if (res.status >= 400 && res.status < 500) {
+              cancelled = true;
+              break;
+            }
+            // 5xx / no body / network blip — keep retrying with a
+            // brief backoff.
             await backoff(2_000);
             continue;
           }
