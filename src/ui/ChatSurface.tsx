@@ -63,7 +63,8 @@ import {
   type ToolCallView,
 } from './legacy/ToolCallCard';
 import { RightRail, type RightRailView } from './RightRail';
-import { loadEarlierMessages } from '../lib/queries';
+import { loadEarlierMessages, seedLocalTitle } from '../lib/queries';
+import { titleFromPrompt } from '../lib/threads';
 import {
   clearInFlight,
   isInFlight,
@@ -676,6 +677,18 @@ export function ChatSurface({
     }
     if (!myThread) return;
     lastSendThreadRef.current = myThread;
+
+    // Seed an optimistic sidebar title from the user's first prompt
+    // SO that a mid-turn reload shows a real label instead of the
+    // "New chat" placeholder. seedLocalTitle is a no-op when the
+    // thread already has a server-issued title — protects against
+    // wiping a real LLM-generated title on a 2nd, 3rd, ... message.
+    // The LLM-regen at onTurnLanded still fires and replaces this
+    // placeholder with a content-aware title once the turn lands;
+    // server is still the only PATCH writer.
+    if (userMsg && userMsg.trim().length > 0) {
+      seedLocalTitle(myThread, titleFromPrompt(userMsg));
+    }
     // Pre-mark the thread as already-loaded so the rehydrate
     // effect doesn't refetch + clobber the live blocks the moment
     // busy flips back to false on this thread.

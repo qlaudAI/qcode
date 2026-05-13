@@ -681,6 +681,44 @@ export function patchThread(id: string, patch: Partial<ThreadSummary>): void {
   saveCachedSummaries(next);
 }
 
+/** Seed an OPTIMISTIC local title from the user's first prompt.
+ *  Bypasses patchThread's title-strip — this is the one allowed
+ *  client-side title write, and only fires when:
+ *    1. The thread currently has no server-side title yet
+ *       (existing.title is empty / falsy).
+ *    2. The user just typed their first prompt.
+ *
+ *  Used by ChatSurface.send() at SEND-START so the sidebar shows a
+ *  real title within ~16ms instead of "New chat" until the
+ *  LLM-regen PATCH completes ~5-10s later. The LLM-generated title
+ *  STILL fires (onTurnLanded → updateThreadMetadata → next
+ *  threadsQuery refetch) and overrides this seed with a content-
+ *  aware version. So this is a temporary placeholder, not a
+ *  competing source of truth.
+ *
+ *  Earlier we'd PATCHed the prompt-derived title to the server
+ *  too; that raced with the LLM regen PATCH and sometimes the
+ *  worse "first two words" title won the merge. Local-only avoids
+ *  that race entirely — server is still the sole PATCH writer. */
+export function seedLocalTitle(id: string, title: string): void {
+  const prev = queryClient.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
+  const idx = prev.findIndex((t) => t.id === id);
+  if (idx === -1) return;
+  const existing = prev[idx]!;
+  // Don't overwrite a real server-issued title — only seed when
+  // the slot is still empty (default-placeholder state).
+  if (existing.title && existing.title.length > 0) return;
+  const updated: ThreadSummary = {
+    ...existing,
+    title,
+    titleSource: 'auto',
+  };
+  const next = [...prev];
+  next[idx] = updated;
+  queryClient.setQueryData<ThreadSummary[]>(qk.threads, next);
+  saveCachedSummaries(next);
+}
+
 /** Toggle pin state on a thread. Updates cache immediately for
  *  instant feedback, then fire-and-forget PATCHes server-side
  *  metadata so the pin survives across devices and reinstalls. A
