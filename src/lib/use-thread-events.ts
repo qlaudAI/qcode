@@ -157,7 +157,16 @@ export function useThreadEvents(threadId: string | null): void {
             let next = iter.next();
             while (!next.done) {
               const frame = next.value;
-              if (frame.id) lastEventId = frame.id;
+              // Only message frames carry a numeric seq id usable
+              // as a cursor on reconnect. Thread/workspace frame ids
+              // are tagged strings ("thread:1234", "ws:5678") that
+              // the server's parseCursor rejects → cursor=0 → full
+              // message replay on every reconnect. Track only the
+              // message-frame id so Last-Event-ID resume actually
+              // resumes.
+              if (frame.id && frame.event === 'message') {
+                lastEventId = frame.id;
+              }
               handleFrame(frame, qc, threadId);
               if (frame.event === 'reconnect') {
                 // Server told us to reconnect. Stop reading; outer
