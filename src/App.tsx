@@ -1074,7 +1074,7 @@ export function App() {
         onModeChange={onModeChange}
         profile={profile}
         qcodeMe={qcodeMeQuery.data ?? null}
-        workspaceName={workspace?.name}
+        workspaceName={mode === 'chat' ? undefined : workspace?.name}
         activeThreadWorkspace={activeThreadWorkspace}
         onFork={forkThreadInWorkspace}
         onRefreshBalance={refreshBalance}
@@ -1148,27 +1148,24 @@ export function App() {
             mode={mode}
             // hasWorkspace gating:
             //   - Desktop: depends on whether the user picked a folder
-            //   - Web with sandbox enabled: pretend there's a workspace
-            //     (the container's /workspace dir)
-            //   - Web with sandbox gated off: no workspace concept on
-            //     web; chat-only mode doesn't need one
-            hasWorkspace={
-              !!workspace || (!isTauri() && SANDBOX_AGENT_ENABLED)
-            }
-            workspaceName={
-              workspace?.name ??
-              (!isTauri() && SANDBOX_AGENT_ENABLED ? 'sandbox' : undefined)
-            }
+            //   - Web with sandbox enabled in agent/plan mode: the
+            //     server implicitly provisions a sandbox workspace
+            //     on the first agent turn; pre-promotion we don't
+            //     show "sandbox" as a name because the user shouldn't
+            //     be aware of sandbox/gitlab plumbing
+            //   - Chat mode: no workspace concept regardless of
+            //     surface — chat threads pin to the user's chat
+            //     workspace server-side, but the UI surfaces no pill
+            //     because chat is workspace-less from the user's POV
+            hasWorkspace={mode !== 'chat' && !!workspace}
+            workspaceName={mode === 'chat' ? undefined : workspace?.name}
             onOpenFolder={async () => {
               const w = await tryOpenFolder();
               if (w) setWorkspace(w);
             }}
             rightRailView={rightRailView}
             onCloseRightRail={() => setRightRailView(null)}
-            workspacePath={
-              workspace?.path ??
-              (!isTauri() && SANDBOX_AGENT_ENABLED ? '/workspace' : undefined)
-            }
+            workspacePath={mode === 'chat' ? undefined : workspace?.path}
           />
         </main>
       </div>
@@ -1178,7 +1175,7 @@ export function App() {
        *  pattern. Sits BELOW the sidebar+chat row, so it spans the
        *  full app width. */}
       <StatusBar
-        workspace={workspace}
+        workspace={mode === 'chat' ? null : workspace}
         model={model}
         mode={mode}
         appVersion={APP_VERSION}
