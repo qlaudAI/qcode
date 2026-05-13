@@ -474,67 +474,27 @@ export async function runEngineSandboxAgent(
         };
         const path = wp.project_path ?? wp.slug ?? '';
 
-        // Register the workspace into local state the moment we
-        // learn about it. Desktop does this when the user picks a
-        // folder; web does it here, when the worker auto-provisions
-        // a sandbox workspace for a chat. registerWorkspace dedups
-        // by id (same id = update lastUsedAt instead of duplicating)
-        // so this is safe to call on every event including repeated
-        // resume_start events on the same workspace. Fire-and-forget
-        // server sync because the workspace IS already on the
-        // server (the worker created it); this just bumps
-        // last_used_at across devices.
+        // Workspace registration is now SERVER-CANONICAL — the
+        // worker already minted the workspace row before emitting
+        // these events. We just need to refresh the cross-device
+        // cache so the sidebar / header badge see the new row.
+        // The thread-events SSE subscription (lib/use-thread-events.ts)
+        // also delivers a `workspace` frame whenever a workspace
+        // changes; this invalidate is a belt-and-suspenders refresh
+        // for the case where the user isn't actively subscribed to
+        // this thread's events stream (e.g. backgrounded tab).
         if (
           wp.workspace_id &&
-          wp.workspace_path &&
-          wp.workspace_name &&
           (sub === 'resume_start' ||
             sub === 'resume_done' ||
             sub === 'create_done')
         ) {
-          // Async-import to avoid pulling workspace + sync deps into
-          // the engine's hot path on cold start.
           void (async () => {
             try {
-              const ws = await import('../workspace');
-              const sync = await import('../workspace-sync');
-              ws.registerWorkspace({
-                id: wp.workspace_id,
-                path: wp.workspace_path!,
-                name: wp.workspace_name!,
-                // Persist the GitLab path so the header workspace
-                // badge can deep-link to the user's generated repo
-                // without an extra round-trip. Only populated when
-                // the server actually has a sandbox-repo row for
-                // this workspace — for resume_failed / create_start
-                // pre-events the path is absent and we skip the
-                // upgrade (idempotent in registerWorkspace).
-                ...(wp.project_path
-                  ? { gitlabProjectPath: wp.project_path }
-                  : {}),
-              });
-              // Touch on server so the cross-device sort puts this
-              // workspace at the top.
-              if (wp.workspace_id) void sync.syncTouchWorkspace(wp.workspace_id);
-              // Fire a window event the App-level hydrate effect
-              // listens for, as a belt-and-suspenders re-fetch in
-              // case multiple tabs have stale local state.
-              if (typeof window !== 'undefined') {
-                window.dispatchEvent(
-                  new CustomEvent('qcode:sandbox-workspace-registered', {
-                    detail: {
-                      id: wp.workspace_id,
-                      path: wp.workspace_path,
-                      name: wp.workspace_name,
-                      gitlabProjectPath: wp.project_path,
-                    },
-                  }),
-                );
-              }
+              const { invalidateWorkspaces } = await import('../queries');
+              await invalidateWorkspaces();
             } catch {
-              // Non-fatal — sidebar will reconcile on next refresh
-              // via hydrateWorkspacesFromServer. We just lose the
-              // instant-update UX for this turn.
+              /* non-fatal — SSE will deliver an updated snapshot */
             }
           })();
         }
@@ -588,6 +548,39 @@ export async function runEngineSandboxAgent(
       }
       if (w.type === 'qcode_keepalive') {
         // Internal connection-keepalive — never user-visible.
+        return;
+      }
+      // qcode_workspace_promoted — fired the first time a thread
+      // that started as a chat (or pre-0030 no-workspace-id) gets
+      // promoted to a sandbox workspace on its first agent turn.
+      // Server has already minted the sandbox workspaces row +
+      // re-pinned the thread; we just refresh the cross-device
+      // caches so the sidebar reflects the new row instantly.
+      if (w.type === 'qcode_workspace_promoted') {
+        const wpp = w as unknown as {
+          workspace_id?: string;
+          workspace_name?: string;
+          workspace_kind?: 'sandbox';
+        };
+        void (async () => {
+          try {
+            const { invalidateWorkspaces, queryClient, qk } = await import(
+              '../queries'
+            );
+            await invalidateWorkspaces();
+            // Threads cache also needs a refresh — the promoted
+            // thread's workspace_id changed (chat → sandbox).
+            await queryClient.invalidateQueries({ queryKey: qk.threads });
+          } catch {
+            /* non-fatal — SSE will deliver the updated snapshots */
+          }
+        })();
+        if (wpp.workspace_name) {
+          opts.onEvent({
+            type: 'text',
+            text: `✓ Workspace ready: ${wpp.workspace_name}\n`,
+          });
+        }
         return;
       }
     }

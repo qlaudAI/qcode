@@ -150,19 +150,13 @@ export function useThreadsQuery(opts: {
       // Best-effort orphan cleanup — never blocks the list. If it
       // fails, the list still returns; the next reconcile will retry.
       void purgeEmptyRemoteThreads();
-      // Exclude engine-shadow threads from the sidebar. The qlaud
-      // /v1/messages route creates a parallel thread row keyed by
-      // claude-code's session id (with metadata: { kind: 'engine' })
-      // to track usage server-side — those aren't user-facing chats.
-      // The qcode-tracked thread (created via POST /v1/threads with
-      // workspace metadata) is the canonical sidebar row. Filter
-      // engine shadows out before any title/workspace resolution so
-      // they don't pollute CHATS as "New chat" entries.
-      const allRemote = await listRemoteThreads();
-      const remote = allRemote.filter((r) => {
-        const meta = (r.metadata ?? {}) as Record<string, unknown>;
-        return meta.kind !== 'engine';
-      });
+      // Engine-shadow threads are gone (qlaud_router commit 3
+      // deleted engine-thread-persist.ts — /v1/messages no longer
+      // auto-creates parallel thread rows). The defensive
+      // metadata.kind==='engine' filter that used to live here is
+      // removed: legacy rows that pre-date the deletion still flow
+      // through normally as ordinary threads.
+      const remote = await listRemoteThreads();
       // Title resolution order:
       //   1. Live in-memory Query data — most-recent patches win
       //      (eliminates the race where a refetch landing between
@@ -228,16 +222,15 @@ export function useThreadsQuery(opts: {
           typeof meta.gitlab_project_path === 'string'
             ? meta.gitlab_project_path
             : undefined;
-        // workspaceId is a per-device registry link — server only
-        // carries the originating client's id as a hint, and
-        // different devices have their own ids. We resolve in
-        // priority: server hint → local registry by path. Local
-        // cache is fine here (it's cosmetic per-device state, not
-        // user-visible content).
+        // workspaceId is now a typed server column (canonical
+        // post-0030). Priority: typed column → legacy metadata
+        // stash → live/cached. The metadata fallback exists so
+        // rows written by pre-0030 clients still resolve.
         const wsId =
-          typeof meta.workspace_id === 'string'
+          r.workspace_id ??
+          (typeof meta.workspace_id === 'string'
             ? meta.workspace_id
-            : (liveRow?.workspaceId ?? cached?.workspaceId);
+            : (liveRow?.workspaceId ?? cached?.workspaceId));
         // Title resolution — server-only. No local cache fallback.
         // Empty string = no title yet; sidebar renders the
         // 'New chat' placeholder for empty titles.
@@ -610,7 +603,12 @@ export function useDeleteThreadMutation(opts?: {
 /** Create a new thread — used lazily by ChatSurface on first send.
  *  Adds the row to the threads cache optimistically with the
  *  user's prompt as a derived title; reconciles when the server
- *  responds with the canonical id + timestamps. */
+ *  responds with the canonical id + timestamps.
+ *
+ *  v2 contract: workspaceId is a top-level field (was buried in
+ *  `metadata.workspace_id` in the pre-0030 client). The server
+ *  resolves to the user's chat workspace if no id is passed and
+ *  implicitly promotes to sandbox on the first agent turn. */
 export function useCreateThreadMutation() {
   const qc = useQueryClient();
   return useMutation({
@@ -618,44 +616,41 @@ export function useCreateThreadMutation() {
       workspace: Workspace | null;
       model: string;
     }) => {
-      const meta = args.workspace
-        ? {
-            // Always send path + name (canonical, cross-device).
-            workspace_path: args.workspace.path,
-            workspace_name: args.workspace.name,
-            // Per-device registry id. Sent so the originating
-            // client can re-link the thread to its registry entry
-            // after a cache wipe; other devices ignore it and fall
-            // back to path matching.
-            ...(args.workspace.id ? { workspace_id: args.workspace.id } : {}),
-          }
-        : undefined;
-      return createRemoteThread(meta ? { metadata: meta } : undefined).then(
-        (t) => ({
-          remote: t,
-          summary: {
-            id: t.id,
-            // Title is SERVER-ONLY now. We deliberately omit the
-            // 'New chat' seed here — the sidebar renderer maps an
-            // empty/missing title to the placeholder. Any local
-            // title we write here would race with the LLM regen's
-            // server PATCH and could win the merge incorrectly.
-            title: '',
-            model: args.model,
-            createdAt: t.created_at,
-            updatedAt: t.last_active_at,
-            ...(args.workspace
-              ? {
-                  ...(args.workspace.id
-                    ? { workspaceId: args.workspace.id }
-                    : {}),
-                  workspacePath: args.workspace.path,
-                  workspaceName: args.workspace.name,
-                }
+      return createRemoteThread(
+        args.workspace?.id
+          ? { workspaceId: args.workspace.id }
+          : undefined,
+      ).then((t) => ({
+        remote: t,
+        summary: {
+          id: t.id,
+          // Title is SERVER-ONLY now. We deliberately omit the
+          // 'New chat' seed here — the sidebar renderer maps an
+          // empty/missing title to the placeholder. Any local
+          // title we write here would race with the LLM regen's
+          // server PATCH and could win the merge incorrectly.
+          title: '',
+          model: args.model,
+          createdAt: t.created_at,
+          updatedAt: t.last_active_at,
+          // workspaceId now comes from the SERVER response — the
+          // typed column populated by the v2 endpoint's
+          // ensureUserChatWorkspace / explicit-id resolution. We
+          // prefer it over the client-side hint (which might still
+          // be a stale local-only id).
+          ...(t.workspace_id
+            ? { workspaceId: t.workspace_id }
+            : args.workspace?.id
+              ? { workspaceId: args.workspace.id }
               : {}),
-          } as ThreadSummary,
-        }),
-      );
+          ...(args.workspace
+            ? {
+                workspacePath: args.workspace.path,
+                workspaceName: args.workspace.name,
+              }
+            : {}),
+        } as ThreadSummary,
+      }));
     },
     onSuccess: ({ summary }) => {
       const prev = qc.getQueryData<ThreadSummary[]>(qk.threads) ?? [];
