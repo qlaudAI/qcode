@@ -1322,7 +1322,16 @@ export function ChatSurface({
   return (
     <div className="flex min-h-0 min-w-0 flex-1" data-qcode-selectable="true">
       <div
-        className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+        className={cn(
+          'relative flex min-h-0 min-w-0 flex-1 flex-col',
+          // alpha.193: when empty, center BOTH the hero AND the
+          // composer as one block (Codex pattern). Scroll-area is
+          // sized to its natural content; composer follows below;
+          // parent's justify-center centers the pair vertically.
+          // When non-empty, the scroll area greedily takes flex-1
+          // and the composer pins to the bottom as before.
+          empty && 'justify-center',
+        )}
         onDragEnter={onSurfaceDragEnter}
         onDragOver={onSurfaceDragOver}
         onDragLeave={onSurfaceDragLeave}
@@ -1339,7 +1348,17 @@ export function ChatSurface({
           </div>
         </div>
       )}
-      <div ref={scrollRef} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto">
+      <div
+        ref={scrollRef}
+        className={cn(
+          'relative min-h-0 min-w-0 overflow-y-auto',
+          // When empty: natural height so the parent's
+          // justify-center can stack hero + composer mid-viewport.
+          // When non-empty: greedy flex-1 so messages scroll and
+          // the composer pins to the bottom of the viewport.
+          empty ? '' : 'flex-1',
+        )}
+      >
         <StickyActivityBar activity={stickyActivity} devUrl={detectedDevUrl} />
         {/* Session-switch fade. Keying the inner container on threadId
          *  makes motion re-mount and fade the chat in when the user
@@ -1363,9 +1382,12 @@ export function ChatSurface({
           transition={{ duration: 0.2, ease: 'easeOut' }}
           className={cn(
             'mx-auto w-full max-w-[42rem] px-3 sm:px-4',
-            empty
-              ? 'flex min-h-full flex-col items-center justify-center py-12'
-              : 'py-6 sm:py-8',
+            // alpha.193: parent column now handles vertical centering
+            // for the empty state (justify-center on the chat col),
+            // so this container reverts to natural padding. The
+            // alpha.191 min-h-full flex-center was fighting the new
+            // parent layout.
+            empty ? 'pb-6 pt-12' : 'py-6 sm:py-8',
           )}
         >
           {empty ? (
@@ -3850,6 +3872,36 @@ function Composer({
   return (
     <div className="border-t border-border/40 bg-background/70 px-3 py-3 backdrop-blur-md sm:px-4 sm:py-4">
       <div className="mx-auto max-w-[42rem]">
+        {/* Busy-mode hint chip (alpha.193). Persistent affordance
+         *  visible above the composer the entire time the model is
+         *  generating — replaces relying on the textarea placeholder
+         *  (which disappears the moment the user starts typing) as
+         *  the only signal that Enter/⌘⏎ behave differently while
+         *  busy.
+         *
+         *  Two modes today:
+         *    Enter           → queue the follow-up; runs after the
+         *                      current turn lands.
+         *    ⌘⏎  (parallel)  → fire a parallel turn immediately;
+         *                      streams concurrently with the
+         *                      current one (no wait).
+         *
+         *  Steer (interrupt + redirect mid-turn) is on the roadmap
+         *  but not implemented — keeping the chip honest until it
+         *  ships. */}
+        {busy && (
+          <div className="mb-2 flex items-center justify-center gap-2 text-[10.5px] text-muted-foreground">
+            <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2 py-0.5">
+              <Kbd className="!border-border/60 !px-1 !text-[9px]">⏎</Kbd>
+              queue
+            </span>
+            <span className="text-muted-foreground/40" aria-hidden>·</span>
+            <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2 py-0.5">
+              <Kbd className="!border-border/60 !px-1 !text-[9px]">⌘⏎</Kbd>
+              run in parallel
+            </span>
+          </div>
+        )}
         <div className="relative">
           {mention && (
             <MentionMenu
