@@ -1281,7 +1281,7 @@ export function ChatSurface({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.2, ease: 'easeOut' }}
-          className="mx-auto w-full max-w-3xl px-3 py-6 sm:px-4 sm:py-8"
+          className="mx-auto w-full max-w-[42rem] px-3 py-6 sm:px-4 sm:py-8"
         >
           {empty ? (
             <EmptyState
@@ -2742,7 +2742,7 @@ function StickyActivityBar({
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -6 }}
           transition={{ duration: 0.18, ease: [0.32, 0.72, 0, 1] }}
-          className="sticky top-2 z-20 mx-auto flex w-full max-w-3xl flex-wrap items-center justify-end gap-2 px-3 sm:px-4"
+          className="sticky top-2 z-20 mx-auto flex w-full max-w-[42rem] flex-wrap items-center justify-end gap-2 px-3 sm:px-4"
         >
           {activity && (
             <div className="flex items-center gap-2 rounded-full border border-border/60 bg-background/85 px-3 py-1 text-[11.5px] text-foreground/80 shadow-sm backdrop-blur-sm">
@@ -3795,7 +3795,7 @@ function Composer({
 
   return (
     <div className="border-t border-border/40 bg-background/70 px-3 py-3 backdrop-blur-md sm:px-4 sm:py-4">
-      <div className="mx-auto max-w-3xl">
+      <div className="mx-auto max-w-[42rem]">
         <div className="relative">
           {mention && (
             <MentionMenu
