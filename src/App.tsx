@@ -120,22 +120,44 @@ function parseThreadIdFromPath(): string | null {
 // `qcode.qlaud.ai/?q=build%20me...`. The composer mounts with that
 // text already in place.
 //
-// The param survives the sign-in roundtrip cleanly — `SignInGate`
-// hits an external OAuth flow, but the redirect returns to the same
-// URL we left from, so `?q=` is still there when we re-mount as
-// authed. No special handling needed for the unauthed case.
+// Two sources, checked in order:
 //
-// We cap the read at 4096 chars so a malicious paste can't blow up
-// the textarea or trigger a server-side validation error. Anything
-// longer is silently truncated — better than dropping the whole
-// prefill on the floor.
+//   1. `?q=<prompt>` — the qlaud.ai handoff path. Survives the
+//      sign-in OAuth roundtrip cleanly because both halves of the
+//      flow return to the same origin/path with params intact.
+//
+//   2. `sessionStorage[PENDING_PROMPT_KEY]` — set by the in-app
+//      SignInGate composer. Visitor on qcode.qlaud.ai (unauthed)
+//      types into the gate's composer, hits send → the gate
+//      stashes the text + fires startSignIn(). qlaud.ai's
+//      cli-auth flow rewrites the URL on the way back (drops our
+//      query params), so the URL-only path doesn't work there.
+//      sessionStorage is same-tab + same-origin, survives any
+//      number of in-tab redirects, drained on read.
+//
+// Cap at 4096 chars (matches MAX_PROMPT_LENGTH in SignInGate +
+// LandingHero). Longer pastes get silently truncated.
+const PENDING_PROMPT_KEY = 'qcode.pending_prompt';
+
 function parseInitialPromptFromUrl(): string | null {
   if (typeof window === 'undefined') return null;
   const q = new URLSearchParams(window.location.search).get('q');
-  if (!q) return null;
-  const trimmed = q.trim();
-  if (!trimmed) return null;
-  return trimmed.slice(0, 4096);
+  if (q && q.trim()) return q.trim().slice(0, 4096);
+  // URL didn't carry one — check the sessionStorage stash the
+  // gate-side composer writes before kicking off OAuth. Drain on
+  // read so a refresh after sign-in doesn't re-prime the composer.
+  try {
+    const stashed = sessionStorage.getItem(PENDING_PROMPT_KEY);
+    if (stashed) {
+      sessionStorage.removeItem(PENDING_PROMPT_KEY);
+      const trimmed = stashed.trim();
+      if (trimmed) return trimmed.slice(0, 4096);
+    }
+  } catch {
+    // sessionStorage can throw in incognito / quota-exceeded. Treat
+    // as "no stash" — the user will just see an empty composer.
+  }
+  return null;
 }
 
 // Strip `?q=` from the URL after we've consumed it, so a refresh
