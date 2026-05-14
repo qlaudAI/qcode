@@ -43,7 +43,11 @@ import { type CompactionInfo } from '../lib/threads';
 import { useThreadMessagesQuery } from '../lib/queries';
 import { useThreadEvents } from '../lib/use-thread-events';
 import { QlaudMark } from './QlaudMark';
-import { Spotlight } from '../components/ui/spotlight';
+// Spotlight was removed in alpha.196 — AionUi-side comparison
+// showed the pink radial gradient was loud against the clean white
+// canvas it was meant to enhance. Apple-restraint principle won:
+// no ambient flourish on the empty state. Component file kept in
+// components/ui/spotlight.tsx for future reuse on landing pages.
 // BorderBeam unused as of alpha.195 — its interior mask blocked
 // the textarea. Replaced with a non-overlaying border-color +
 // ambient ring busy signal applied directly to the composer card.
@@ -1579,6 +1583,7 @@ export function ChatSurface({
           setTextFiles((prev) => prev.filter((x) => x.id !== id));
         }}
         onImageError={(msg) => setError(msg)}
+        empty={empty}
       />
       </div>
       {rightRailView && (
@@ -3555,8 +3560,9 @@ function EmptyState({
   //      no buttons-everywhere, no onboarding chip swarm.
   //   3. ONE verb per surface ("Build something" / "Open a folder"),
   //      not four competing CTAs ("Plan / Review / Build / Draft").
-  //   4. Spotlight at low opacity gives the surface ambient warmth
-  //      without grabbing attention. Single visual flourish.
+  //   4. alpha.196: no ambient flourish on the empty state. The
+  //      Spotlight gradient I shipped in alpha.188 read as
+  //      "decoration" against AionUi's cleaner reference. Removed.
   //
   // Three branches collapse into one component:
   //   * Web, no workspace      → "What do you want to build?"
@@ -3570,7 +3576,7 @@ function EmptyState({
     // Desktop without a folder yet → one verb, one button.
     return (
       <div className="relative flex flex-col items-center pt-16 text-center sm:pt-24">
-        <Spotlight />
+
         <div className="relative z-10 flex flex-col items-center">
           <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
           <h2 className="mt-6 text-3xl font-semibold tracking-tight sm:text-4xl">
@@ -3605,7 +3611,6 @@ function EmptyState({
     : SAMPLE_PROMPTS.slice(0, 3);
   return (
     <div className="relative flex flex-col items-center pt-12 text-center sm:pt-20">
-      <Spotlight />
       <div className="relative z-10 flex w-full flex-col items-center">
         <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
         <h2 className="mt-6 max-w-2xl px-2 text-3xl font-semibold tracking-tight sm:text-4xl">
@@ -3697,6 +3702,7 @@ function Composer({
   onAttachUpload,
   onDetachUpload,
   onImageError,
+  empty = false,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -3736,6 +3742,12 @@ function Composer({
   onAttachUpload: (f: AttachedFile) => void;
   onDetachUpload: (id: string) => void;
   onImageError: (message: string) => void;
+  /** True when the conversation has no rendered blocks yet — the
+   *  parent ChatSurface uses this for layout (centered hero), and
+   *  here we drop the top-divider + blurred background tint so the
+   *  composer reads as part of the hero block instead of fenced
+   *  off below it. */
+  empty?: boolean;
 }) {
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -3874,7 +3886,21 @@ function Composer({
   }
 
   return (
-    <div className="border-t border-border/40 bg-background/70 px-3 py-3 backdrop-blur-md sm:px-4 sm:py-4">
+    <div
+      className={cn(
+        'px-3 py-3 sm:px-4 sm:py-4',
+        // alpha.196: drop the top border + blurred background tint
+        // when the conversation is empty. AionUi-side comparison
+        // showed the divider+tint visually fenced the composer off
+        // from the hero — they should read as a single block. When
+        // a real conversation is in progress the divider stays,
+        // because it separates scrolling content above from the
+        // anchored composer below (genuine UX boundary).
+        empty
+          ? ''
+          : 'border-t border-border/40 bg-background/70 backdrop-blur-md',
+      )}
+    >
       <div className="mx-auto max-w-[42rem]">
         {/* Busy-mode hint chip (alpha.193). Persistent affordance
          *  visible above the composer the entire time the model is
