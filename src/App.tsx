@@ -373,11 +373,21 @@ export function App() {
     // turn-landed callback. Initial mount path (workspace just
     // resolved, ref is still false): auto-select fires correctly.
     if (userExplicitlyClearedRef.current) return;
+    // Auto-select the most-recent thread in this workspace — BUT
+    // only if it has a real title. Untitled threads ("New chat" or
+    // empty) look identical to a fresh-empty-state surface; the
+    // user types thinking they're starting fresh and accidentally
+    // resumes the prior conversation. Filtering to titled threads
+    // means truly-empty workspaces show the empty state, and only
+    // workspaces with real conversations auto-resume.
     const match = threadsQuery.data
       .filter(
         (t) =>
-          t.workspaceId === workspace.id ||
-          t.workspacePath === workspace.path,
+          (t.workspaceId === workspace.id ||
+            t.workspacePath === workspace.path) &&
+          !!t.title &&
+          t.title.length > 0 &&
+          t.title.toLowerCase() !== 'new chat',
       )
       .sort((a, b) => b.updatedAt - a.updatedAt)[0];
     if (match) setCurrentId(match.id);
@@ -805,10 +815,24 @@ export function App() {
     //     and no explicit New-chat click: attach. Matches the
     //     desktop expectation that "chats in this folder" is a
     //     real grouping.
+    // alpha.184: don't auto-attach SANDBOX workspaces to new chats.
+    // Sandbox-kind workspaces are server-auto-provisioned (one per
+    // agent-promoted thread) and carry a GitLab repo with conversation
+    // state. Auto-attaching them to a "new chat" means the new thread
+    // inherits the prior conversation's filesystem + agent context —
+    // the user sees "Restoring workspace from gitlab.com/…" + "bridging
+    // 20 prior messages" for what they thought was a fresh send.
+    //
+    // Heuristic: workspace.gitlabProjectPath is set iff the workspace
+    // has GitLab-backed state (i.e. it's a sandbox workspace from a
+    // prior agent turn). Local folders the user opened explicitly
+    // have no gitlabProjectPath and remain eligible for auto-attach.
+    const isSandboxWorkspace = !!workspace?.gitlabProjectPath;
     const shouldAttachWorkspace =
       isTauri() &&
       !userExplicitlyClearedRef.current &&
-      !!workspace;
+      !!workspace &&
+      !isSandboxWorkspace;
     // TEMP diagnostic — strip after the "new chat reuses old sandbox"
     // ticket is closed. Tells us whether the client is the culprit
     // (sending workspace_id in metadata) or whether the server is
