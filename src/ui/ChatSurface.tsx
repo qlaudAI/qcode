@@ -3569,7 +3569,7 @@ function EmptyState({
         <Spotlight />
         <div className="relative z-10 flex flex-col items-center">
           <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
-          <h2 className="mt-6 text-2xl font-semibold tracking-tight sm:text-3xl">
+          <h2 className="mt-6 text-3xl font-semibold tracking-tight sm:text-4xl">
             What can I build for you?
           </h2>
           <p className="mt-2 max-w-sm text-[13px] leading-relaxed text-muted-foreground">
@@ -3604,7 +3604,7 @@ function EmptyState({
       <Spotlight />
       <div className="relative z-10 flex w-full flex-col items-center">
         <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
-        <h2 className="mt-6 max-w-2xl px-2 text-2xl font-semibold tracking-tight sm:text-3xl">
+        <h2 className="mt-6 max-w-2xl px-2 text-3xl font-semibold tracking-tight sm:text-4xl">
           {heading}
         </h2>
         {memory && (
@@ -4060,19 +4060,21 @@ function Composer({
               onFocus={onLoadFiles}
               placeholder={
                 busy
-                  ? 'Enter queues · ⌘⏎ runs in parallel · type a follow-up'
-                  : 'Ask qcode about your code… type @ to attach a file'
+                  ? 'Type a follow-up… Enter queues, ⌘⏎ runs in parallel'
+                  : 'Send a message, upload files, open a folder…'
               }
-              rows={2}
-              // Stays enabled while busy: pressing Enter queues the
-              // message into the parent's `queued` state and fires
-              // it as soon as the current turn completes. Same UX
-              // as Claude CLI's mid-run input handling.
+              rows={3}
+              // alpha.194: more generous min-height (rows=3 from 2)
+              // and bigger text (15px from 14px) to match AionUI's
+              // composer breath. Apple-restraint principle: ONE
+              // important interactive element on the surface = give
+              // it the real estate to feel important.
+              //
               // text-base (16px) on mobile prevents iOS Safari from
-              // auto-zooming the page on focus — Safari only zooms
-              // when the input's font-size is < 16px. text-sm
-              // (14px) returns at sm: where we're not on touch.
-              className="block w-full resize-none rounded-2xl bg-transparent px-4 py-3 text-base leading-6 text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60 sm:text-sm sm:leading-6"
+              // auto-zooming on focus (zoom only fires when font is
+              // < 16px). text-[15px] returns at sm: — slightly
+              // larger than the prior 14px for breathing room.
+              className="block w-full resize-none rounded-2xl bg-transparent px-5 py-4 text-base leading-7 text-foreground outline-none placeholder:text-muted-foreground/70 disabled:opacity-60 sm:text-[15px] sm:leading-6"
             />
             <div className="flex items-center justify-between border-t border-border/40 px-3 py-2">
               <div className="flex items-center gap-2">
@@ -4087,11 +4089,11 @@ function Composer({
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="grid h-7 w-7 place-items-center rounded-md border border-border/60 bg-background text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground active:scale-95"
+                  className="grid h-8 w-8 place-items-center rounded-full border border-border/60 bg-background text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground active:scale-95"
                   aria-label="Attach files"
                   title="Attach images, PDFs, or text files"
                 >
-                  <Paperclip className="h-3.5 w-3.5" />
+                  <Paperclip className="h-4 w-4" />
                 </button>
                 {dragging ? (
                   <span className="text-[11px] font-medium text-primary">
@@ -4195,10 +4197,10 @@ function Composer({
                     documents.length === 0 &&
                     textFiles.length === 0
                   }
-                  className="grid h-7 w-7 place-items-center rounded-md bg-primary text-primary-foreground transition-all hover:bg-primary/90 active:scale-95 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+                  className="grid h-8 w-8 place-items-center rounded-full bg-primary text-primary-foreground transition-all hover:bg-primary/90 active:scale-95 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
                   aria-label="Send"
                 >
-                  <ArrowUp className="h-3.5 w-3.5" />
+                  <ArrowUp className="h-4 w-4" />
                 </button>
               )}
             </div>
