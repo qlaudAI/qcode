@@ -205,6 +205,7 @@ export function ChatSurface({
   onOpenFolder,
   rightRailView,
   onCloseRightRail,
+  initialPrompt,
 }: {
   model: string;
   /** Optional callback to swap the active model. Used by retry()
@@ -234,6 +235,13 @@ export function ChatSurface({
   rightRailView?: RightRailView | null;
   /** Close handler for the rail's X button. */
   onCloseRightRail?: () => void;
+  /** Cold-boot prompt prefill, read from `?q=` in App.tsx. When
+   *  present, the composer mounts with this text already in the
+   *  textarea — drives the qlaud.ai landing → qcode handoff
+   *  (visitor types on the marketing site, we send them here with
+   *  the prompt in the URL). Consumed once at mount; subsequent
+   *  threadId changes or re-renders don't re-prefill. */
+  initialPrompt?: string | null;
 }) {
   const models = useTextModels();
   const m = models.find((x) => x.slug === model);
@@ -256,7 +264,13 @@ export function ChatSurface({
   const queued = runState.queued;
 
   const [compaction, setCompaction] = useState<CompactionInfo | null>(null);
-  const [input, setInput] = useState('');
+  // Composer text — initialized from the optional `initialPrompt`
+  // prop on the very first mount. This is how the qlaud.ai landing
+  // page hand-off works: visitor types a prompt there, hits send,
+  // we redirect to qcode.qlaud.ai/?q=<encoded>, App.tsx reads the
+  // param and threads it down here. The user sees their text
+  // already in the textarea, hits Enter, and ships.
+  const [input, setInput] = useState<string>(() => initialPrompt ?? '');
   const [error, setError] = useState<string | null>(null);
   const [attached, setAttached] = useState<string[]>([]);
   const [images, setImages] = useState<AttachedImage[]>([]);

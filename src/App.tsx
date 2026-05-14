@@ -114,9 +114,60 @@ function parseThreadIdFromPath(): string | null {
   return null;
 }
 
+// Pull a prefilled prompt out of the URL on cold boot. Used by the
+// qlaud.ai landing page composer: a visitor types "build me a todo
+// app" there, hits send, and we redirect them here at
+// `qcode.qlaud.ai/?q=build%20me...`. The composer mounts with that
+// text already in place.
+//
+// The param survives the sign-in roundtrip cleanly — `SignInGate`
+// hits an external OAuth flow, but the redirect returns to the same
+// URL we left from, so `?q=` is still there when we re-mount as
+// authed. No special handling needed for the unauthed case.
+//
+// We cap the read at 4096 chars so a malicious paste can't blow up
+// the textarea or trigger a server-side validation error. Anything
+// longer is silently truncated — better than dropping the whole
+// prefill on the floor.
+function parseInitialPromptFromUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  const q = new URLSearchParams(window.location.search).get('q');
+  if (!q) return null;
+  const trimmed = q.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, 4096);
+}
+
+// Strip `?q=` from the URL after we've consumed it, so a refresh
+// doesn't re-prefill. History API replace — no navigation, no
+// scroll. Leaves other query params (e.g. future `?ref=...`)
+// alone in case marketing attribution lands here later.
+function stripPromptParamFromUrl(): void {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has('q')) return;
+  url.searchParams.delete('q');
+  const next = url.pathname + (url.search ? url.search : '') + url.hash;
+  window.history.replaceState(null, '', next);
+}
+
 export function App() {
   const [authed, setAuthed] = useState<boolean>(() => Boolean(getKey()));
   const [model, setModel] = useState<string>(() => getSettings().defaultModel);
+  // Prompt prefill — read once on cold boot from `?q=`. Threaded
+  // into ChatSurface as `initialPrompt` and consumed exactly once
+  // (the URL param is stripped immediately so a refresh doesn't
+  // re-fire). Drives the qlaud.ai landing-page chat composer →
+  // qcode.qlaud.ai handoff: visitor types there, hits send, we
+  // redirect with the prompt in the URL and the composer mounts
+  // with it already typed. Survives the sign-in roundtrip because
+  // it's just a query param the OAuth flow returns to us with.
+  const [initialPrompt] = useState<string | null>(() =>
+    parseInitialPromptFromUrl(),
+  );
+  useEffect(() => {
+    if (initialPrompt) stripPromptParamFromUrl();
+  }, [initialPrompt]);
   // Mode init — when SANDBOX_AGENT_ENABLED is false (web build,
   // currently), force 'chat' regardless of what's in localStorage.
   // Otherwise a desktop user who set Agent mode and then opens
@@ -1200,6 +1251,7 @@ export function App() {
             rightRailView={rightRailView}
             onCloseRightRail={() => setRightRailView(null)}
             workspacePath={mode === 'chat' ? undefined : workspace?.path}
+            initialPrompt={initialPrompt}
           />
         </main>
       </div>
