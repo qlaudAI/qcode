@@ -4,6 +4,7 @@
 // this, what visibly happens?" answer.
 
 import { DEFAULT_MODEL } from './models';
+import { isTauri } from './tauri';
 
 const STORAGE_KEY = 'qcode.settings';
 
@@ -237,9 +238,28 @@ const DEFAULTS: Settings = {
  *  window so old localStorage values don't crash, but no fresh
  *  install ever returns it from this function.
  *
- *  Idempotent: same answer for the same platform. */
+ *  Idempotent: same answer for the same platform.
+ *
+ *  alpha.187: pre-fix this returned 'claude-code' unconditionally,
+ *  including on web. That triggered ChatSurface's engine-mode
+ *  rehydrate branch (intended for desktop's claude-code sidecar)
+ *  on web deep-links — which fetches 200 messages instead of the
+ *  paginated 15, and on threads with no sessionId mapping (every
+ *  web thread) the rehydrate completes silently with empty data.
+ *  Result: web user deep-links to a thread with 81 messages and
+ *  sees the empty-state surface.
+ *
+ *  Correct behavior:
+ *    * Tauri (desktop)       → 'claude-code'  (sidecar engine)
+ *    * Web                   → 'qcode-legacy' (paginated query via
+ *                              messagesQuery, no sidecar)
+ *
+ *  The 'sandbox-agent' engine isn't returned here — it's chosen
+ *  per-turn by the dispatcher based on mode + workspace state.
+ *  This function returns the BASE engine the platform uses when
+ *  no agent path applies. */
 function coerceEngine(): Engine {
-  return 'claude-code';
+  return isTauri() ? 'claude-code' : 'qcode-legacy';
 }
 
 /** Coerce the stored autoApprove value to a tri-state mode. Handles
