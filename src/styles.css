@@ -40,13 +40,23 @@
      * Surfaces that need solid backgrounds (chat bubbles, composer,
      * sidebar inner) paint their own. */
     background: hsl(var(--background) / 0.6);
+    /* `overflow: hidden` only in Tauri mode — the desktop window
+     * doesn't scroll; the inner chat surface (ChatSurface scroll
+     * area) handles all overflow. Web mode (qcode.qlaud.ai in
+     * browser) MUST allow document scrolling — the SignInGate
+     * gets tall on mobile, the marketing surfaces below grow with
+     * content, etc. Overriding in the `html:not([data-tauri='1'])`
+     * block below restores normal browser scroll. */
     overflow: hidden;
     -webkit-user-select: none;
     user-select: none;
   }
-  /* Browser-mode (vite dev, no Tauri vibrancy backdrop). */
+  /* Browser-mode (vite dev, qcode.qlaud.ai, no Tauri vibrancy
+   * backdrop). Solid background + allow page-level scroll for
+   * surfaces that grow past the viewport. */
   html:not([data-tauri='1']) body {
     background: hsl(var(--background));
+    overflow: auto;
   }
   input,
   textarea,

@@ -155,7 +155,17 @@ export function SignInGate({ onSignIn }: { onSignIn: () => Promise<void> | void 
         className="titlebar h-11 shrink-0 border-b border-border/40 backdrop-blur-sm"
       />
 
-      <div className="flex flex-1 items-center justify-center px-4 py-8 sm:px-6 sm:py-10">
+      {/* alpha.206: dropped `items-center` from this wrapper.
+       *  Vertical centering plus min-h-dvh worked when the gate was
+       *  short (composer + sign-in button + pricing tiers fit in
+       *  one viewport on most screens). Adding the DiscoveryGrid
+       *  pushed total content past mobile viewport heights, and the
+       *  vertical-center trap meant the top half clipped off-screen
+       *  with no scroll affordance. Switching to top-aligned flow
+       *  (`items-start` implicit via the absence of `items-center`)
+       *  lets the page grow naturally and the document scrolls when
+       *  content overflows. */}
+      <div className="flex flex-1 justify-center px-4 py-8 sm:px-6 sm:py-10">
         <div className="w-full max-w-2xl">
           <div className="text-center">
             <QlaudMark className="mx-auto h-12 w-12 rounded-2xl shadow-md sm:h-14 sm:w-14" />
