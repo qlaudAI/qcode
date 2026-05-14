@@ -1911,9 +1911,6 @@ function Sidebar({
         >
           <Settings className="h-4 w-4 text-muted-foreground transition-colors group-hover:text-foreground" />
           <span className="flex-1 truncate">Settings</span>
-          <span className="text-[10px] tabular-nums text-muted-foreground/60">
-            v0.1.0-alpha
-          </span>
         </button>
       </div>
     </aside>

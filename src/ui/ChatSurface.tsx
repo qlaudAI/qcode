@@ -12,7 +12,6 @@ import {
   GitBranch,
   Paperclip,
   RotateCcw,
-  Sparkles,
   Square,
   X,
 } from 'lucide-react';
@@ -2555,22 +2554,25 @@ function BlockRow({
     return <SubagentBlock block={block} workspace={workspace} />;
   }
   // assistant_text
+  //
+  // alpha.198: avatar removed. The red sparkle bubble next to every
+  // assistant turn was visual noise that didn't add information
+  // (no human-user is ambiguous about which side a message came
+  // from in a 1:1 chat). AionUi/Codex/ChatGPT all drop the
+  // assistant avatar; the role is conveyed by indentation +
+  // typography contrast.
   if (!block.text && busy) {
     return (
-      <div className="flex gap-3">
-        <Avatar />
-        <div className="flex-1 pt-0.5">
-          {block.skill && <SkillAttribution skill={block.skill} model={block.resolvedModel} />}
-          <TypingDots activity={activity ?? null} />
-        </div>
+      <div className="pt-0.5">
+        {block.skill && <SkillAttribution skill={block.skill} model={block.resolvedModel} />}
+        <TypingDots activity={activity ?? null} />
       </div>
     );
   }
   if (!block.text) return null;
   return (
-    <div className="group flex gap-3">
-      <Avatar />
-      <div className="flex-1 pt-0.5">
+    <div className="group pt-0.5">
+      <div>
         {block.skill && <SkillAttribution skill={block.skill} model={block.resolvedModel} />}
         <Markdown source={block.text} streaming={busy} />
         {/* Hover-revealed message actions. Lives at the bottom of
@@ -2655,13 +2657,9 @@ function prettyModelName(slug: string): string {
   return slug;
 }
 
-function Avatar() {
-  return (
-    <div className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
-      <Sparkles className="h-3.5 w-3.5" />
-    </div>
-  );
-}
+// Avatar removed in alpha.198 — assistant turns no longer render a
+// per-message bubble icon. See the assistant_text render block for
+// rationale.
 
 // Curated programmer one-liners. Tasteful, single-line, dev-tone.
 // No vendor jokes, no cruelty, no inside-baseball that requires a
