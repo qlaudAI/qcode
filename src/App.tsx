@@ -1897,20 +1897,38 @@ function Sidebar({
       {/* alpha.197 — Settings entry moved to the sidebar's bottom-
        *  left, matching the AionUi pattern. Big touchtarget pill
        *  row instead of the cramped titlebar gear that lived at
-       *  the top-right since alpha.108. Keeps the small version
-       *  label on the right as a quiet identifier. */}
-      <div className="border-t border-border/40 px-2 py-2">
+       *  the top-right since alpha.108.
+       *
+       *  alpha.200 — paired with an Avatar pill on the right that
+       *  surfaces the signed-in identity (initial + email tooltip)
+       *  and opens Settings on click. Two entry points to the same
+       *  drawer is fine: the gear is the conventional path, the
+       *  avatar is the "who am I signed in as" path. Both lead to
+       *  the same place so users can't get lost. */}
+      <div className="flex items-center gap-1.5 border-t border-border/40 px-2 py-2">
         <button
           onClick={onOpenSettings}
-          className="group flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] font-medium text-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
-          title={
-            profile?.email
-              ? `Settings · signed in as ${profile.email}`
-              : 'Settings'
-          }
+          className="group flex flex-1 items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] font-medium text-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
+          title="Settings"
         >
           <Settings className="h-4 w-4 text-muted-foreground transition-colors group-hover:text-foreground" />
           <span className="flex-1 truncate">Settings</span>
+        </button>
+        <button
+          onClick={onOpenSettings}
+          title={
+            profile?.email
+              ? `Signed in as ${profile.email} — click for account settings`
+              : 'Account'
+          }
+          aria-label={
+            profile?.email
+              ? `Signed in as ${profile.email}`
+              : 'Account'
+          }
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-muted text-[11px] font-semibold uppercase text-foreground/75 transition-colors hover:bg-foreground hover:text-background"
+        >
+          {profile?.email ? profile.email.charAt(0).toUpperCase() : '?'}
         </button>
       </div>
     </aside>

@@ -6,7 +6,6 @@ import {
   Github,
   KeyRound,
   LogOut,
-  Sparkles,
   Sparkles as PlanSparkles,
   Trash2,
   X,
@@ -209,9 +208,6 @@ export function SettingsDrawer({
                 };
               })}
             />
-            <p className="text-[11px] text-muted-foreground">
-              You can still switch the model per-conversation from the title bar.
-            </p>
 
             <FieldLabel>Default mode for new chats</FieldLabel>
             <Select
@@ -231,10 +227,6 @@ export function SettingsDrawer({
                 },
               ]}
             />
-            <p className="text-[11px] text-muted-foreground">
-              The title-bar Agent / Plan toggle overrides this for the
-              current session.
-            </p>
 
             <FieldLabel>
               {isTauri() ? 'Background model' : 'Subagent model'}
@@ -249,7 +241,7 @@ export function SettingsDrawer({
                 {
                   value: '__parent__',
                   label: 'Same as default',
-                  description: 'No override — background calls reuse the main model',
+                  description: 'Reuse the main model',
                 },
                 ...models.map<SelectOption>((m) => ({
                   value: m.slug,
@@ -260,23 +252,8 @@ export function SettingsDrawer({
               ]}
             />
             <p className="text-[11px] text-muted-foreground">
-              {isTauri() ? (
-                <>
-                  Drives Claude Code&rsquo;s background calls — title
-                  generation, summarization, internal planning helpers.
-                  Pairing your main pick with a cheap model here (e.g.
-                  Sonnet + Haiku, GPT-5.4 + GPT-5.4 mini) saves ~3–5×
-                  on those tokens with no quality hit on the main agent.
-                </>
-              ) : (
-                <>
-                  The <span className="font-mono">task</span> tool spawns
-                  a subagent for bounded scout work (find files, summarize
-                  a module). Pick a cheap model here to keep subagent
-                  fan-out from running up the bill — the parent stays on
-                  whatever you picked above.
-                </>
-              )}
+              Pair a cheap model here with your main pick to save on
+              title generation, summaries, and subagent fan-out.
             </p>
           </Section>
 
@@ -287,45 +264,15 @@ export function SettingsDrawer({
               onChange={(v) => update('mediaCloudSync', v)}
             />
             <p className="text-[11px] text-muted-foreground">
-              When on, images / audio / video the agent generates are
-              also uploaded to qlaud&rsquo;s cross-device storage
-              (R2-backed, tenant-locked to your account). Local copies
-              under{' '}
-              <span className="font-mono">.qcode/media/</span> stay
-              unchanged. Off by default — local-only is the
-              privacy-preserving default. Pricing: $0.015/GB-month
-              deducted from your wallet.
+              Off by default. Local copies stay either way. $0.015/GB-month
+              when on.
             </p>
             {isTauri() && (
-              <>
-                <Toggle
-                  label="Always inline video creator skill (advanced)"
-                  checked={settings.videoCreatorSkill}
-                  onChange={(v) => update('videoCreatorSkill', v)}
-                />
-                <p className="text-[11px] text-muted-foreground">
-                  The video creator skill is{' '}
-                  <span className="font-medium text-foreground/80">
-                    always available
-                  </span>{' '}
-                  on desktop — qcode drops the full markdown to{' '}
-                  <span className="font-mono">~/.qcode/skills/video-creator.md</span>{' '}
-                  on launch and a thin pointer in the system prompt
-                  tells the agent to{' '}
-                  <span className="font-mono">Read</span> it when a user
-                  request matches (explainer / ad / reel / SaaS demo /
-                  documentary). This toggle{' '}
-                  <span className="font-medium text-foreground/80">
-                    additionally
-                  </span>{' '}
-                  inlines the full ~7-8k-token skill into every system
-                  prompt, skipping the one-time Read roundtrip. Off by
-                  default — the on-demand read is strictly cheaper for
-                  typical usage (skill loads once per session, then
-                  cached). Render budget typically $0.30–0.50 per
-                  minute (more with Sora b-roll).
-                </p>
-              </>
+              <Toggle
+                label="Always inline video creator skill"
+                checked={settings.videoCreatorSkill}
+                onChange={(v) => update('videoCreatorSkill', v)}
+              />
             )}
           </Section>
 
@@ -347,13 +294,6 @@ export function SettingsDrawer({
                 </button>
               ))}
             </div>
-            <p className="text-[11px] text-muted-foreground">
-              <span className="font-medium text-foreground/80">System</span>{' '}
-              follows your OS dark-mode preference (and tracks live
-              if you flip it). <span className="font-medium text-foreground/80">Light</span>{' '}
-              and <span className="font-medium text-foreground/80">Dark</span>{' '}
-              lock the palette regardless of the OS setting.
-            </p>
           </Section>
 
           {/* Engine picker — hidden on desktop. With alpha.110
@@ -390,21 +330,8 @@ export function SettingsDrawer({
               ))}
             </div>
             <p className="text-[11px] text-muted-foreground">
-              <span className="font-medium text-foreground/80">YOLO</span>{' '}
-              auto-approves every write + every shell command — even
-              ones outside the safe whitelist. Use when you trust the
-              agent and rely on git as your undo. Hard deny-list (
-              <span className="font-mono">rm -rf /</span>,{' '}
-              <span className="font-mono">sudo</span>,{' '}
-              <span className="font-mono">curl | sh</span>) still
-              applies. <span className="font-medium text-foreground/80">Smart</span>{' '}
-              (default) auto-approves workspace writes + safe-bash
-              whitelist (<span className="font-mono">ls</span>,{' '}
-              <span className="font-mono">pnpm test</span>,{' '}
-              <span className="font-mono">git status</span>); prompts
-              for anything destructive or background jobs.{' '}
-              <span className="font-medium text-foreground/80">Strict</span>{' '}
-              prompts for every write and every command.
+              Smart (default) approves safe writes + whitelisted shell.
+              YOLO skips most prompts. Strict prompts for everything.
             </p>
           </Section>
 
@@ -415,15 +342,8 @@ export function SettingsDrawer({
               onChange={(v) => update('autoCommit', v)}
             />
             <p className="text-[11px] text-muted-foreground">
-              When on, qcode runs <span className="font-mono">git add -A &amp;&amp; git commit</span> on
-              your current branch after every agent turn that wrote
-              files. Author is set to{' '}
-              <span className="font-mono">qcode &lt;bot@qlaud.ai&gt;</span>{' '}
-              so you can filter agent commits from manual ones. Skipped
-              when the working tree was already dirty before the turn
-              (won't mix your WIP), during merges/rebases, or on
-              detached HEAD. <strong>Never pushes</strong> — that
-              stays your call.
+              Adds a qcode-authored commit after writes. Skipped on
+              dirty trees, rebases, or detached HEAD. Never pushes.
             </p>
           </Section>
 
@@ -433,10 +353,6 @@ export function SettingsDrawer({
               checked={settings.autoUpdate}
               onChange={(v) => update('autoUpdate', v)}
             />
-            <p className="text-[11px] text-muted-foreground">
-              Updates are signed and verified by your local Tauri public key.
-              Only signed releases install.
-            </p>
           </Section>
 
           <Section title="Search performance">
@@ -459,16 +375,7 @@ export function SettingsDrawer({
            *    yet wire. Auto-sync to ~/.claude.json is on the
            *    Phase C list. */}
           <Section title="Connectors">
-            {isTauri() ? (
-              <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
-                Claude Code on this device reads its own MCP config
-                from{' '}
-                <span className="font-mono">~/.claude.json</span>. The
-                list below shows what you&rsquo;ve registered with qlaud
-                for reference — auto-sync to Claude Code is coming in
-                a future update.
-              </div>
-            ) : (
+            {!isTauri() && (
               <Toggle
                 label="Let the agent discover qlaud tools"
                 checked={settings.enableConnectors}
@@ -483,17 +390,7 @@ export function SettingsDrawer({
               enabled={isTauri() ? true : settings.enableConnectors}
             />
             <p className="text-[11px] text-muted-foreground">
-              {isTauri() ? (
-                <>
-                  Manage your registered MCP servers (browse 100+ curated
-                  catalog entries, add credentials) at{' '}
-                </>
-              ) : (
-                <>
-                  Lets the model discover + call MCP servers you connected
-                  on{' '}
-                </>
-              )}
+              Manage connectors at{' '}
               <a
                 href="#"
                 onClick={(e) => {
@@ -504,15 +401,7 @@ export function SettingsDrawer({
               >
                 qlaud.ai/tools
               </a>
-              {isTauri() ? (
-                <>.</>
-              ) : (
-                <>
-                  . When enabled, qcode adds 4 discovery tools alongside
-                  the 7 local ones — same approval flow for any write
-                  action.
-                </>
-              )}
+              .
             </p>
           </Section>
 
@@ -539,19 +428,12 @@ export function SettingsDrawer({
 
           <Section title="Privacy">
             <p className="text-[12.5px] leading-relaxed text-muted-foreground">
-              qcode never sends your code anywhere except qlaud, and only when a
-              model call needs context. Tool calls (read_file, edit_file, bash)
-              run locally on your machine. There is no telemetry, no usage
-              analytics, and no error reporting beacon.
+              Code only leaves your machine when a model call needs it.
+              Tool calls run locally. No telemetry.
             </p>
           </Section>
 
           <Section title="About">
-            <Row
-              label="Version"
-              value="0.1.0-alpha.4"
-              icon={<Sparkles className="h-3.5 w-3.5" />}
-            />
             <button
               onClick={() => openExternal('https://github.com/qlaudAI/qcode')}
               className="flex w-full items-center justify-between rounded-md border border-border bg-background px-3 py-2 text-sm transition-colors hover:border-foreground/30"

@@ -2369,7 +2369,14 @@ function BlockRow({
             </div>
           )}
           {block.text && (
-            <div className="rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground shadow-sm">
+            // alpha.200: drop the brand-red bubble. User and assistant
+            // turns now share the same colorless register — neutral
+            // muted background, foreground text. The brand color
+            // belonged in this seat back when chat was the centerpiece;
+            // now it competes with tool cards and code blocks for
+            // attention and loses the comparison. Right-alignment +
+            // subtle pill is enough to disambiguate turn ownership.
+            <div className="rounded-2xl rounded-br-md bg-muted px-4 py-2.5 text-sm leading-relaxed text-foreground/90">
               <p className="whitespace-pre-wrap">{block.text}</p>
             </div>
           )}
