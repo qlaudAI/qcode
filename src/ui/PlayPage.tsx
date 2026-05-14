@@ -194,7 +194,7 @@ export function PlayPage() {
     return (
       <PreviewView
         url={previewUrl}
-        sessionId={getSandboxSessionId() ?? '—'}
+        sessionId={getSandboxSessionId('__legacy_runtime__') ?? '—'}
         onReset={reset}
       />
     );

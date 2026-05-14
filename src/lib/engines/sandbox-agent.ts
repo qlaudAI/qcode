@@ -52,6 +52,17 @@ export type RunSandboxAgentOpts = {
   onSessionId?: (id: string) => void;
   model: string;
   qcodeThreadId?: string | null;
+  /** Pinning the container to this workspace. Each (user, workspace)
+   *  pair gets its own Sandbox DO — see qlaud_router
+   *  routes/sandbox.ts:activeSessionKey comment block.
+   *
+   *  When null (chat-only thread that hasn't promoted yet, or the
+   *  caller doesn't know the workspaceId — first send of a brand-new
+   *  agent thread), we fall back to using the qcode thread id as
+   *  the cache key. The server's implicit promotion path will mint
+   *  the real per-workspace container and emit qcode_session_rebound
+   *  so subsequent turns target the canonical session. */
+  workspaceId?: string | null;
   /** 'agent' (default) → claude with --dangerously-skip-permissions
    *  for full toolkit. 'plan' → claude with --permission-mode plan
    *  (read-only tools, model proposes, user flips to agent to
@@ -100,12 +111,20 @@ export async function runEngineSandboxAgent(
   // desktop engine fires; ChatSurface already listens.
   opts.onEvent({ type: 'turn_start', turn: 0 });
 
-  // 1. Mint or reuse a sandbox session. Lazy import so the web build
-  //    can tree-shake the runtime layer if /play isn't loaded.
+  // 1. Mint or reuse a sandbox session for THIS workspace. Sessions
+  //    are per-workspace as of alpha.179 — see sandbox-session.ts.
+  //    Fall back to the qcode thread id as a cache key when no
+  //    workspaceId is known (pre-promotion); the server-side
+  //    qcode_session_rebound event will fix the cache mid-turn once
+  //    the real workspaceId materializes.
   const { ensureSandboxSession } = await import('../runtime/sandbox-session');
+  const sessionCacheKey =
+    opts.workspaceId ??
+    opts.qcodeThreadId ??
+    '__no_workspace_no_thread__';
   let sessionId: string;
   try {
-    sessionId = await ensureSandboxSession();
+    sessionId = await ensureSandboxSession(sessionCacheKey);
   } catch (e) {
     opts.onEvent({
       type: 'error',
@@ -580,6 +599,33 @@ export async function runEngineSandboxAgent(
             type: 'text',
             text: `✓ Workspace ready: ${wpp.workspace_name}\n`,
           });
+        }
+        return;
+      }
+      // qcode_session_rebound — server resolved a different
+      // sessionId than the URL one. Happens on chat→sandbox
+      // promotion (no session existed for the new workspace yet),
+      // on LRU eviction, or when the client is using a stale
+      // pre-alpha.179 per-user sessionId. Update the in-tab cache
+      // so subsequent agent turns target the canonical container.
+      if (w.type === 'qcode_session_rebound') {
+        const wsr = w as unknown as {
+          workspace_id?: string;
+          session_id?: string;
+          minted?: boolean;
+        };
+        if (wsr.workspace_id && wsr.session_id) {
+          void (async () => {
+            try {
+              const { setSandboxSessionFromServer } = await import(
+                '../runtime/sandbox-session'
+              );
+              setSandboxSessionFromServer(wsr.workspace_id!, wsr.session_id!);
+            } catch {
+              /* non-fatal — next turn will mint correctly via
+                 ensureSandboxSession(workspaceId) anyway */
+            }
+          })();
         }
         return;
       }

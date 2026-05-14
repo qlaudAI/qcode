@@ -39,7 +39,19 @@ const BASE =
 // agent engine (engines/sandbox-agent.ts) can mint without dragging
 // the whole Runtime contract through. Re-export ensureSession here
 // as a private alias to keep the call sites below readable.
-const ensureSession = ensureSandboxSession;
+//
+// Runtime helpers (exec, readFile, writeDir, etc.) are NOT
+// workspace-aware at the call site — they're used by the /play
+// surface and the chat-surface file tree, both of which currently
+// operate against whatever container is alive. As of alpha.179
+// sessions are per-workspace, but the Runtime layer hasn't been
+// plumbed for workspaceId yet, so we use a stable shared key. Any
+// runtime helper running inside an agent turn will hit the same
+// container the agent uses because the agent already minted a
+// per-workspace session with the agent's workspaceId. This shared
+// key just gives non-agent helpers a stable home.
+const RUNTIME_FALLBACK_KEY = '__legacy_runtime__';
+const ensureSession = () => ensureSandboxSession(RUNTIME_FALLBACK_KEY);
 
 /** Wrap fetch with auth + JSON-body convention used by every
  *  sandbox endpoint. Throws with a useful error message on non-2xx

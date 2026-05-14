@@ -926,6 +926,13 @@ export function ChatSurface({
           },
           model,
           qcodeThreadId: myThread,
+          // Per-workspace container isolation (alpha.179): pin the
+          // mint to this workspace's id so the engine targets the
+          // right Sandbox DO. Null on chat threads pre-promotion;
+          // the engine falls back to the thread id as a cache key
+          // and the server's qcode_session_rebound event updates
+          // the cache once the implicit promotion lands.
+          workspaceId: workspace?.id ?? null,
           // mode is 'agent' or 'plan' here (engineMode==='sandbox-agent'
           // is gated on mode!=='chat' in the dispatcher above). Type
           // narrowing is fine; cast through the union to satisfy TS.
