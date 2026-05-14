@@ -189,7 +189,18 @@ export function SignInGate({ onSignIn }: { onSignIn: () => Promise<void> | void 
               e.preventDefault();
               void submitWithPrompt();
             }}
-            className="mt-7 flex min-h-[140px] flex-col rounded-[18px] border border-primary/30 bg-card/95 p-5 shadow-[0_8px_32px_rgba(0,0,0,0.06)] backdrop-blur-sm transition-all duration-200 focus-within:border-primary/60 focus-within:shadow-[0_8px_32px_rgba(0,0,0,0.10)] dark:bg-card/90"
+            // alpha.207: clicking anywhere on the composer card
+            // focuses the textarea. Without this, only the literal
+            // textarea rectangle was clickable — the form's padding
+            // and the action-row strip were dead zones, which read
+            // as "this thing doesn't accept clicks." Skip buttons
+            // and links so their click semantics survive.
+            onClick={(e) => {
+              const t = e.target as HTMLElement;
+              if (t.closest('button, a, input, select, textarea')) return;
+              textareaRef.current?.focus();
+            }}
+            className="mt-7 flex min-h-[160px] cursor-text flex-col rounded-[18px] border border-primary/30 bg-card/95 p-5 shadow-[0_8px_32px_rgba(0,0,0,0.06)] backdrop-blur-sm transition-all duration-200 focus-within:border-primary/60 focus-within:shadow-[0_8px_32px_rgba(0,0,0,0.10)] dark:bg-card/90"
           >
             <textarea
               ref={textareaRef}
@@ -206,8 +217,12 @@ export function SignInGate({ onSignIn }: { onSignIn: () => Promise<void> | void 
                 }
               }}
               placeholder={`Create a ${placeholderText}`}
-              className="w-full resize-none border-0 bg-transparent text-[15px] leading-relaxed text-foreground outline-none ring-0 placeholder:text-foreground/40 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0"
-              rows={1}
+              className="w-full flex-1 resize-none border-0 bg-transparent text-[15px] leading-relaxed text-foreground outline-none ring-0 placeholder:text-foreground/40 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0"
+              // rows=3 sets the initial visible height so the
+              // composer reads as "this accepts a paragraph" rather
+              // than "this is a single-line input." adjustHeight()
+              // grows past 3 lines as the user types.
+              rows={3}
               maxLength={MAX_PROMPT_LENGTH + 256}
               disabled={busy}
             />

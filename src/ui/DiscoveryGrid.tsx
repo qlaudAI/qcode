@@ -24,8 +24,8 @@
 //     is fresh and the user hasn't typed yet, show this grid as a
 //     suggestion / template gallery.
 
-import { useRef, useState } from 'react';
-import { Play } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ExternalLink, Play, X } from 'lucide-react';
 
 // CDN base for showcase assets. Today these live in qlaud-dashboard's
 // public/ folder and are served from qlaud.ai. Tomorrow they'll move
@@ -118,7 +118,13 @@ export const DISCOVERY_ITEMS: DiscoveryItem[] = [
   },
 ];
 
-/** The grid. Responsive: 1 col → 2 → 3 → 4 across breakpoints. */
+/** The grid. Responsive: 1 col → 2 → 3 → 4 across breakpoints.
+ *
+ *  alpha.207: clicking a card opens an in-app viewer modal instead
+ *  of navigating to a new tab. Videos play in a built-in <video>
+ *  element with controls; sites/apps load in a sandboxed iframe.
+ *  Every viewer offers an "Open in new tab" affordance for the case
+ *  where the target has X-Frame-Options or CSP blocking embeds. */
 export function DiscoveryGrid({
   items = DISCOVERY_ITEMS,
   className = '',
@@ -126,21 +132,40 @@ export function DiscoveryGrid({
   items?: DiscoveryItem[];
   className?: string;
 }) {
+  const [openItem, setOpenItem] = useState<DiscoveryItem | null>(null);
   return (
-    <div
-      className={
-        'grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 ' +
-        className
-      }
-    >
-      {items.map((item, i) => (
-        <DiscoveryCard key={item.id} item={item} index={i} />
-      ))}
-    </div>
+    <>
+      <div
+        className={
+          'grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 ' +
+          className
+        }
+      >
+        {items.map((item, i) => (
+          <DiscoveryCard
+            key={item.id}
+            item={item}
+            index={i}
+            onOpen={setOpenItem}
+          />
+        ))}
+      </div>
+      {openItem && (
+        <DiscoveryViewer item={openItem} onClose={() => setOpenItem(null)} />
+      )}
+    </>
   );
 }
 
-function DiscoveryCard({ item, index }: { item: DiscoveryItem; index: number }) {
+function DiscoveryCard({
+  item,
+  index,
+  onOpen,
+}: {
+  item: DiscoveryItem;
+  index: number;
+  onOpen: (item: DiscoveryItem) => void;
+}) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [hovered, setHovered] = useState(false);
 
@@ -152,9 +177,8 @@ function DiscoveryCard({ item, index }: { item: DiscoveryItem; index: number }) 
     const el = videoRef.current;
     if (!el) return;
     el.play().catch(() => {
-      // Autoplay blocked — the user clicks through to the full video.
-      // Don't error-log; this is normal on first interaction in
-      // some browsers (Safari especially).
+      // Autoplay blocked — user clicks through to the in-app
+      // viewer instead. Normal on first interaction in Safari.
     });
   };
   const onLeave = () => {
@@ -168,8 +192,14 @@ function DiscoveryCard({ item, index }: { item: DiscoveryItem; index: number }) 
   return (
     <a
       href={item.href}
-      target={item.href.startsWith('http') ? '_blank' : undefined}
-      rel={item.href.startsWith('http') ? 'noreferrer' : undefined}
+      // Preserve href so middle-click / cmd-click still opens in a
+      // new tab as a user would expect. Plain click intercepts and
+      // opens the in-app viewer.
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        e.preventDefault();
+        onOpen(item);
+      }}
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
       // Staggered fade-in. Each card delays by 60ms × its index so
@@ -276,5 +306,141 @@ function DiscoveryCard({ item, index }: { item: DiscoveryItem; index: number }) 
         }
       `}</style>
     </a>
+  );
+}
+
+// In-app viewer modal. Two surfaces under one shell:
+//
+//   - Video items (item.videoSrc): native <video controls autoPlay>
+//     wide enough to play comfortably; no custom player chrome.
+//
+//   - Site/app items: sandboxed <iframe src={item.href}> filling
+//     the viewer. Many targets refuse to embed (X-Frame-Options /
+//     CSP frame-ancestors); the "Open in new tab" affordance in
+//     the header always gets the user where they wanted to go.
+//
+// Keeps qlaud's branding: red primary for the open-in-tab link,
+// `bg-card` + `border-border` surfaces, qlaud-tokened typography.
+// Vibesdk's flat neutral palette is intentionally NOT adopted —
+// the viewer reads as a qlaud surface, not a generic gallery.
+function DiscoveryViewer({
+  item,
+  onClose,
+}: {
+  item: DiscoveryItem;
+  onClose: () => void;
+}) {
+  // Esc to close — same shortcut every modal in qcode uses.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  // Body-scroll lock while the modal is open. Restores the prior
+  // overflow on unmount so we don't fight the html:not(tauri) rule
+  // that allows page scrolling in web mode.
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={item.title}
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm animate-[discovery-fade-in_0.18s_ease-out_forwards]"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="relative flex h-[85vh] max-h-[85vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
+      >
+        {/* Header — title + subtitle on the left, open-in-tab and
+         *  close on the right. Truncates long titles gracefully. */}
+        <header className="flex shrink-0 items-center gap-3 border-b border-border/60 px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-semibold text-foreground">
+              {item.title}
+            </div>
+            <div className="truncate text-[11px] text-muted-foreground">
+              {item.subtitle}
+            </div>
+          </div>
+          {item.href && item.href !== '#composer' && (
+            <a
+              href={item.href}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-background px-2.5 py-1 text-[11px] font-medium text-foreground/85 transition-colors hover:border-primary/40 hover:text-primary"
+            >
+              Open in new tab
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close viewer"
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+
+        {/* Body — video or iframe, fills the remaining height. */}
+        <div className="flex-1 overflow-hidden bg-muted/30">
+          {item.videoSrc ? (
+            <video
+              src={item.videoSrc}
+              poster={item.image}
+              controls
+              autoPlay
+              playsInline
+              className="h-full w-full bg-black object-contain"
+            />
+          ) : item.placeholder ? (
+            // Placeholder cards have no real preview; they nudge the
+            // visitor back to the composer. Render a soft "type to
+            // start" panel instead of an empty iframe.
+            <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-primary/5 via-card to-muted/30 px-6 text-center">
+              <div>
+                <div className="text-2xl font-semibold tracking-tight text-foreground">
+                  Type a prompt to start
+                </div>
+                <div className="mt-2 text-sm text-muted-foreground">
+                  Your project shows up here once you ship it.
+                </div>
+              </div>
+            </div>
+          ) : (
+            <iframe
+              src={item.href}
+              title={item.title}
+              loading="lazy"
+              // Permissive enough to let most app demos function;
+              // tight enough to avoid letting an embedded page
+              // navigate the parent. Same set Vercel / Cloudflare
+              // dashboards use for their preview iframes.
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+              className="h-full w-full border-0 bg-white"
+            />
+          )}
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes discovery-fade-in {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+      `}</style>
+    </div>
   );
 }
