@@ -30,13 +30,16 @@ export const PENDING_PROMPT_KEY = 'qcode.pending_prompt';
 
 const MAX_PROMPT_LENGTH = 4096;
 
-// Same trio vibesdk uses + qlaud.ai's LandingHero — keeping the
-// rhythm identical across the two surfaces so visitors who saw
-// the marketing landing recognize the typewriter immediately.
+// Typewriter placeholder phrases — same rotation as qlaud.ai's
+// LandingHero so visitors who saw the marketing site recognize
+// the rhythm here. Video-leading mix reflecting qlaud's pivot to
+// motion-video as the headline capability, with one app example
+// so we don't oversell.
 const PLACEHOLDER_PHRASES = [
-  'todo list app',
-  'F1 fantasy game',
-  'personal finance tracker',
+  '60-second launch video',
+  'product explainer reel',
+  'AI music video',
+  'personal finance app',
 ];
 
 export function SignInGate({ onSignIn }: { onSignIn: () => Promise<void> | void }) {
@@ -174,8 +177,8 @@ export function SignInGate({ onSignIn }: { onSignIn: () => Promise<void> | void 
               What should we build today?
             </h1>
             <p className="mt-3 text-balance text-[13px] leading-relaxed text-muted-foreground sm:text-base">
-              Claude, GPT‑5, Gemini, DeepSeek, Llama, Sora — switch
-              models mid-conversation. Code, chat, image, video.
+              Motion video. Sites. Apps. One prompt. Sora, Pika,
+              ElevenLabs, Claude, GPT‑5 — every model behind one key.
             </p>
           </div>
 
