@@ -1334,15 +1334,30 @@ export function ChatSurface({
           className="mx-auto w-full max-w-[42rem] px-3 py-6 sm:px-4 sm:py-8"
         >
           {empty ? (
-            <EmptyState
-              modelLabel={m?.label ?? model}
-              provider={m?.provider}
-              memory={memory}
-              hasWorkspace={hasWorkspace}
-              workspaceName={workspaceName}
-              onOpenFolder={onOpenFolder}
-              onPick={(s) => setInput(s)}
-            />
+            // Three sub-states share the empty-blocks condition:
+            //   1. threadId set + messages still loading → user
+            //      deep-linked to a thread (URL nav, sidebar click,
+            //      reload). Show a loading indicator so they know
+            //      content is coming — NOT the "what do you want
+            //      to build?" empty state which makes the surface
+            //      look like a fresh chat.
+            //   2. threadId set + load done + actually empty (just-
+            //      created thread, no turns yet) → empty state
+            //      (rare path; titled threads always have ≥1 turn).
+            //   3. threadId null → real new-chat empty state.
+            threadId && messagesQuery.isLoading ? (
+              <ThreadLoadingState />
+            ) : (
+              <EmptyState
+                modelLabel={m?.label ?? model}
+                provider={m?.provider}
+                memory={memory}
+                hasWorkspace={hasWorkspace}
+                workspaceName={workspaceName}
+                onOpenFolder={onOpenFolder}
+                onPick={(s) => setInput(s)}
+              />
+            )
           ) : (
             // Vertical rhythm: each row owns its top margin (no
             // parent gap-) so we can give DIFFERENT spacing within
@@ -3425,6 +3440,29 @@ function TodoStatusIcon({ status }: { status: TodoItem['status'] }) {
       className="mt-1 h-3.5 w-3.5 shrink-0 rounded-full border border-muted-foreground/30"
       aria-hidden
     />
+  );
+}
+
+/** Shown when the user deep-linked to a thread (URL nav, sidebar
+ *  click, reload) but `useThreadMessagesQuery` hasn't returned yet.
+ *  Distinguishes "thread is loading" from "fresh empty chat" — the
+ *  empty-state UI looked identical pre-alpha.185, so a slow worker
+ *  cold-start made the user think the surface was unresponsive. */
+function ThreadLoadingState() {
+  return (
+    <div className="flex min-h-[40vh] flex-col items-center justify-center gap-4 text-center">
+      <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
+        <span className="relative flex h-2 w-2">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/40" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-primary/80" />
+        </span>
+        Loading conversation…
+      </div>
+      <p className="max-w-sm text-[11.5px] text-muted-foreground/70">
+        Fetching your messages from the server. First-load can take a moment
+        on a cold edge worker.
+      </p>
+    </div>
   );
 }
 
