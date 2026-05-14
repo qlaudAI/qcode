@@ -123,10 +123,19 @@ export function App() {
   // Otherwise a desktop user who set Agent mode and then opens
   // qcode-web on the same browser would see Agent selected with no
   // way to interact (we hide the toggle for non-Chat on web).
+  //
+  // alpha.182: default fresh installs to 'agent' since the
+  // server-side intent classifier (apps/edge/src/sandbox/
+  // intent-classifier.ts) downshifts chat-style prompts back to
+  // the cheap chat path automatically. The visible Mode toggle is
+  // hidden in this version; users just type and the server picks.
   const [mode, setMode] = useState<AgentMode>(() => {
     const saved = getSettings().mode;
     if (!SANDBOX_AGENT_ENABLED && saved !== 'chat') return 'chat';
-    return saved;
+    // No saved preference → default to 'agent' (best general-purpose
+    // default — handles both code work and Q&A through claude-code).
+    // Saved preference wins so existing users keep their choice.
+    return saved ?? 'agent';
   });
   const [workspace, setWorkspace] = useState<Workspace | null>(() =>
     getCurrentWorkspace(),
@@ -1341,10 +1350,13 @@ function Titlebar({
       <div className="h-full flex-1" aria-hidden />
 
       <div data-tauri-drag-region="false" className="no-drag flex items-center gap-1.5 sm:gap-2">
-        {/* Hide mode toggle + spend bar on the smallest widths so the
-         *  titlebar doesn't wrap. Both still reachable: mode via
-         *  composer pill, balance via Settings. */}
-        <div className="hidden sm:block">
+        {/* Mode toggle hidden in alpha.182 — server-side intent
+         *  classifier picks chat vs agent vs plan per turn (see
+         *  apps/edge/src/sandbox/intent-classifier.ts). The user
+         *  shouldn't have to know whether their prompt is "agentic"
+         *  before typing. Composer mode pill remains for now as a
+         *  read-only indicator of what the server resolved to. */}
+        <div className="hidden">
           <ModeToggle value={mode} onChange={onModeChange} />
         </div>
         <ModelPicker value={model} onChange={onModelChange} qcodeMe={qcodeMe} />
