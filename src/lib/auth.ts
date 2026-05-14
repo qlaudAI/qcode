@@ -21,6 +21,18 @@ const ACCOUNT = 'qlaud_key';
 const PROFILE_STORAGE = 'qcode.profile';
 // Browser-mode fallback only. Never read this in the packaged app.
 const FALLBACK_STORAGE = 'qcode.qlaud_key';
+// Set by clearAuth() in web mode. When present, hydrateAuth() skips
+// the boot-time Clerk→qpk_ SSO exchange. Without this gate, hitting
+// "Sign out" in qcode would be useless — the next page load would
+// auto-mint a new qpk_ from the still-active Clerk session. The
+// flag is cleared on any explicit sign-in path (startSignIn,
+// setKey) so signing back in re-enables the silent SSO.
+const SSO_DISABLED_FLAG = 'qcode.sso_disabled';
+
+// API origin for the Clerk session → qpk_ exchange. Same base every
+// other qlaud lib in qcode reads from (kept in sync deliberately).
+const EDGE_BASE =
+  (import.meta.env.VITE_QLAUD_BASE as string | undefined) ?? 'https://api.qlaud.ai';
 
 // Keychain reads are async, but the rest of the app expects a sync
 // snapshot for React's initial render. We hydrate this cache once at
@@ -35,7 +47,16 @@ export type Profile = {
 };
 
 /** Block on the first keychain read so React's initial render can
- *  decide whether to show the sign-in gate. Idempotent. */
+ *  decide whether to show the sign-in gate. Idempotent.
+ *
+ *  alpha.204: when running in web mode with no cached key, attempt
+ *  the silent Clerk → qpk_ exchange BEFORE returning. The visitor
+ *  may already be signed into qlaud.ai (the Clerk cookie lives on
+ *  `.qlaud.ai` so it's readable from every subdomain); if so, we
+ *  mint a fresh qpk_ off that session and skip the SignInGate
+ *  entirely. Failures (no Clerk session, network error, 401) fall
+ *  through silently to the existing sign-in gate flow.
+ */
 export async function hydrateAuth(): Promise<void> {
   if (hydrated) return;
   hydrated = true;
@@ -49,8 +70,70 @@ export async function hydrateAuth(): Promise<void> {
     } catch {
       cachedKey = null;
     }
-  } else {
-    cachedKey = localStorage.getItem(FALLBACK_STORAGE);
+    // Tauri can't read browser cookies from qlaud.ai — the desktop
+    // app authenticates exclusively via the deep-link cli-auth flow.
+    // Skip the SSO bridge entirely on the desktop side.
+    return;
+  }
+  cachedKey = localStorage.getItem(FALLBACK_STORAGE);
+  if (cachedKey) return;
+  // No cached key + web mode. Try the Clerk SSO bridge — but only
+  // if the user hasn't explicitly signed out (the flag would mean
+  // their intent is "stay signed out" regardless of Clerk state).
+  if (localStorage.getItem(SSO_DISABLED_FLAG)) return;
+  await attemptSsoSignIn();
+}
+
+/** Attempt to mint a fresh qpk_ from the visitor's Clerk session by
+ *  hitting `/dashboard/api/qcode/session/issue` on the edge worker.
+ *  Requires the Clerk `__session` cookie to be sent (achieved via
+ *  `credentials: 'include'` + CORS allow-credentials on the worker
+ *  side, which is already configured for the dashboard origins
+ *  list — qcode.qlaud.ai is included).
+ *
+ *  Returns true if a key was minted + persisted, false otherwise.
+ *  Never throws — every failure path falls through to the existing
+ *  SignInGate flow.
+ *
+ *  Cost: one fetch on first cold boot when no qpk_ is cached. The
+ *  call resolves in ~50-150ms at the edge. Subsequent boots have
+ *  cachedKey present and skip this entirely.
+ */
+export async function attemptSsoSignIn(): Promise<boolean> {
+  if (isTauri()) return false;
+  try {
+    // Short timeout — if the bridge can't answer in ~3s, the user
+    // is better served by seeing SignInGate quickly than waiting on
+    // a slow round-trip. AbortController is the standard primitive.
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 3000);
+    const r = await fetch(`${EDGE_BASE}/dashboard/api/qcode/session/issue`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client: 'qcode-web',
+        // Best-effort client version tag — useful for the
+        // product_keys.client_version column. Reads the runtime
+        // string Vite injects at build (alpha.NNN). Falls back to
+        // an empty string which the server treats as unknown.
+        client_version: (import.meta.env.VITE_APP_VERSION as string) ?? '',
+      }),
+      signal: ctl.signal,
+    });
+    clearTimeout(t);
+    if (!r.ok) return false;
+    const data = (await r.json()) as { ok?: boolean; key?: string };
+    if (!data.key) return false;
+    await setKey(data.key);
+    void import('./analytics').then((a) =>
+      a.posthog.capture('sso_auto_signin_success'),
+    );
+    return true;
+  } catch {
+    // Network error, abort, JSON parse — all silent. The user just
+    // sees SignInGate, same as today.
+    return false;
   }
 }
 
@@ -68,6 +151,10 @@ export async function setKey(k: string): Promise<void> {
     });
   } else {
     localStorage.setItem(FALLBACK_STORAGE, k);
+    // Any successful key persistence means the user is signed in,
+    // so the explicit-sign-out flag is no longer current. Clear it
+    // so a future sign-out (and re-arrival) can re-trigger SSO.
+    localStorage.removeItem(SSO_DISABLED_FLAG);
   }
 }
 
@@ -82,6 +169,12 @@ export async function clearAuth(): Promise<void> {
     }
   } else {
     localStorage.removeItem(FALLBACK_STORAGE);
+    // Mark the explicit sign-out so hydrateAuth doesn't auto-mint a
+    // fresh qpk_ from the still-active Clerk session on next load.
+    // Cleared by setKey() (the next successful sign-in re-enables
+    // silent SSO) and by startSignIn() (clicking the sign-in button
+    // signals the user wants in again).
+    localStorage.setItem(SSO_DISABLED_FLAG, '1');
   }
 
   // Wipe ALL user-scoped state so the next account doesn't see the
@@ -152,6 +245,17 @@ export function setProfile(p: Profile): void {
  *  was missing — `await openExternal` rejected silently, the click
  *  handler ate the rejection, and sign-in looked frozen. Never again. */
 export async function startSignIn(): Promise<void> {
+  // Clicking the sign-in button is an explicit "I want in" — wipe
+  // the explicit-sign-out flag so silent SSO is re-armed for the
+  // next cold boot. No-op for Tauri (the flag is web-only).
+  if (!isTauri()) {
+    try {
+      localStorage.removeItem(SSO_DISABLED_FLAG);
+    } catch {
+      // localStorage can throw in incognito; the flag wasn't there
+      // anyway, so this is fine to swallow.
+    }
+  }
   // Fire before any IO — even if the redirect fails or the user
   // bails halfway, we still see they clicked.
   void import('./analytics').then((a) => a.posthog.capture('sign_in_started'));
