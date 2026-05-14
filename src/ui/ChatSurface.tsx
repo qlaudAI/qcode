@@ -490,6 +490,26 @@ export function ChatSurface({
     setCompaction(messagesQuery.data.compaction);
   }, [threadId, busy, messagesQuery.data]);
 
+  // Background-fill: after the first 15 messages render, silently
+  // pull the next page so "Load earlier" is instant when the user
+  // scrolls up. Bounded — one fire per thread mount, only when the
+  // first fetch revealed there's more to load. Costs one extra
+  // round-trip per thread visit (~300ms server time) in exchange
+  // for zero-latency scroll-back.
+  const backgroundFillFiredRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!threadId) return;
+    if (busy) return;
+    if (!messagesQuery.data?.hasMore) return;
+    if (backgroundFillFiredRef.current === threadId) return;
+    backgroundFillFiredRef.current = threadId;
+    // Fire-and-forget — failures are silent (the "Load earlier"
+    // button still works on demand).
+    void loadEarlierMessages(threadId).catch(() => {
+      backgroundFillFiredRef.current = null; // allow retry on next mount
+    });
+  }, [threadId, busy, messagesQuery.data?.hasMore]);
+
   useEffect(
     () => () => {
       // Cancel network on unmount, but DO NOT clear the module-

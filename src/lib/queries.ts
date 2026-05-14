@@ -300,22 +300,21 @@ export function useThreadMessagesQuery(threadId: string | null) {
   return useQuery({
     queryKey: threadId ? qk.threadMessages(threadId) : ['threads', '_none_'],
     enabled: !!threadId,
-    // Initial-load page size. Was 200 to match the engine path's
-    // rehydrate, but agent-mode threads carry tool_result blocks
-    // with bash output that can be 10-100KB EACH — 200 rows
-    // measured at 5-15MB on the wire, taking 1-3 seconds even on
-    // good networks. The chat surface only renders the visible
-    // viewport (~10-20 messages) on first paint anyway; everything
-    // older is shown only if the user scrolls up. The "Load
-    // earlier turns" affordance backed by hasMore already paginates
-    // back through anything not in the first page.
+    // Initial-load page size. History:
+    //   200 → 5-15 MB on wire, 1-3 s paint
+    //    50 → 0.5-3 MB on wire, 400-1000 ms paint
+    //    15 → ~150-800 KB on wire, 100-300 ms paint  ← alpha.186
     //
-    // 50 is the sweet spot: covers the typical "I just opened this
-    // thread to keep working on it" case (last few exchanges
-    // visible immediately), drops first-payload size to <500KB
-    // for chat-only threads and 1-3MB for heavy agent threads
-    // (still 5-10x faster).
-    queryFn: () => getRemoteThreadMessages(threadId as string, { limit: 50 }),
+    // 15 turns = ~7 user/assistant exchanges, which covers the
+    // typical "I just opened this thread to keep working" case
+    // (the user can see the last few messages of their last
+    // session) while keeping the deep-link cold-load fast.
+    //
+    // After the first 15 lands, a background prefetch in
+    // ChatSurface pulls the next 35 (= up to 50 total) so the
+    // user can scroll up without a network round-trip. The
+    // "Load earlier turns" affordance handles anything past 50.
+    queryFn: () => getRemoteThreadMessages(threadId as string, { limit: 15 }),
     staleTime: Infinity, // server-side compaction owns freshness
     refetchInterval: (query) => {
       if (!threadId) return false;
@@ -364,12 +363,12 @@ export function useThreadMessagesQuery(threadId: string | null) {
  *  Limit + staleTime here MUST match useThreadMessagesQuery's
  *  defaults — if they don't, prefetch fetches one page size and
  *  the actual query fetches another, defeating the cache and
- *  causing two round-trips per thread switch. Both at limit=50
+ *  causing two round-trips per thread switch. Both at limit=15
  *  + staleTime aligned. */
 export function prefetchThreadMessages(threadId: string): Promise<void> {
   return queryClient.prefetchQuery({
     queryKey: qk.threadMessages(threadId),
-    queryFn: () => getRemoteThreadMessages(threadId, { limit: 50 }),
+    queryFn: () => getRemoteThreadMessages(threadId, { limit: 15 }),
     // Long stale window: messages are append-only, so re-fetching on
     // hover-spam is wasted work. The actual query has staleTime:
     // Infinity; prefetch can be aggressive too. 5 min covers the
