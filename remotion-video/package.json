@@ -1,0 +1,19 @@
+{
+  "name": "remotion-video",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "preview": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts Intro out/intro.mp4"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "remotion": "^4.0.340"
+  },
+  "devDependencies": {
+    "@remotion/cli": "^4.0.340",
+    "typescript": "^5.9.3"
+  }
+}

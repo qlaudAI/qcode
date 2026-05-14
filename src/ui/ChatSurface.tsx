@@ -7,7 +7,6 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
-  Download,
   FileText,
   FolderOpen,
   GitBranch,
@@ -44,6 +43,11 @@ import { type CompactionInfo } from '../lib/threads';
 import { useThreadMessagesQuery } from '../lib/queries';
 import { useThreadEvents } from '../lib/use-thread-events';
 import { QlaudMark } from './QlaudMark';
+import { Spotlight } from '../components/ui/spotlight';
+// BorderBeam reserved for follow-up commit (composer active-state
+// micro-interaction). Import kept for the next ship; lint-suppressed.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { BorderBeam as _BorderBeam } from '../components/ui/border-beam';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/legacy/tools';
 import {
   registerApproval,
@@ -3487,15 +3491,15 @@ function ThreadLoadingState() {
 }
 
 function EmptyState({
-  modelLabel,
-  provider,
   memory,
   hasWorkspace,
   workspaceName,
   onOpenFolder,
   onPick,
 }: {
-  modelLabel: string;
+  /** alpha.188: kept on the prop type so existing callers compile,
+   *  but no longer rendered. Model/provider live in the Titlebar. */
+  modelLabel?: string;
   provider?: string;
   memory: ProjectMemory | null;
   hasWorkspace: boolean;
@@ -3503,180 +3507,111 @@ function EmptyState({
   onOpenFolder: () => void | Promise<void>;
   onPick: (s: string) => void;
 }) {
-  // First-launch branch: no workspace yet → push the user to open
-  // one before showing sample prompts. The 7 file/edit/bash tools
-  // need a workspace; without one the model can't do anything
-  // useful, so demanding the choice up front is better than letting
-  // the user discover that mid-prompt.
-  if (!hasWorkspace) {
-    // Web build now has a real agent — qcode-web mints a Cloudflare
-    // Sandbox container on first turn and runs claude inside it.
-    // Same toolkit as desktop (file ops, shell, port-expose), just
-    // executing on a remote container's /workspace instead of a
-    // local folder. The "no workspace" empty state copy reflects
-    // that: project IS the sandbox; no folder picker, no download
-    // gate, just sample prompts to spark a build.
-    if (!isTauri()) {
-      return (
-        <div className="flex flex-col items-center pt-6 text-center sm:pt-12">
-          <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
-          <h2 className="mt-5 text-xl font-semibold tracking-tight sm:mt-6 sm:text-2xl">
-            What do you want to build?
-          </h2>
-          <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
-            qcode runs in a sandboxed container — full agent, real shell,
-            real files, live preview URLs you can share. Type a prompt or
-            pick one below.
-          </p>
-          <a
-            href="https://qlaud.ai/qcode"
-            target="_blank"
-            rel="noopener"
-            className="mt-6 inline-flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground"
-          >
-            <Download className="h-3 w-3" />
-            Or download desktop for local filesystem access
-          </a>
-          <div className="mt-10 grid w-full max-w-2xl gap-2 text-left">
-            {WEB_SAMPLE_PROMPTS.map((s) => (
-              <button
-                key={s}
-                onClick={() => onPick(s)}
-                className="rounded-lg border border-border bg-background/70 px-4 py-3 text-sm text-muted-foreground transition-colors hover:border-foreground/20 hover:text-foreground"
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-        </div>
-      );
-    }
-
+  // alpha.188 redesign — Apple/Codex-inspired hero empty state.
+  //
+  // Principles applied throughout:
+  //   1. ONE focal element (the headline + a subtle suggestion row).
+  //      The composer (rendered by ChatSurface a level above) is the
+  //      real CTA — this empty state sits ABOVE the composer and
+  //      tees it up rather than competing.
+  //   2. Whitespace as the primary visual structure. No card grids,
+  //      no buttons-everywhere, no onboarding chip swarm.
+  //   3. ONE verb per surface ("Build something" / "Open a folder"),
+  //      not four competing CTAs ("Plan / Review / Build / Draft").
+  //   4. Spotlight at low opacity gives the surface ambient warmth
+  //      without grabbing attention. Single visual flourish.
+  //
+  // Three branches collapse into one component:
+  //   * Web, no workspace      → "What do you want to build?"
+  //   * Desktop, no workspace  → "Open a folder to get started"
+  //   * Has workspace          → "What should we build in <name>?"
+  //
+  // The suggestion chips are MUCH quieter than before: tiny pills
+  // arranged horizontally, not a 4-button grid. Click fills the
+  // composer; user can edit before sending.
+  if (!hasWorkspace && isTauri()) {
+    // Desktop without a folder yet → one verb, one button.
     return (
-      <div className="flex flex-col items-center pt-6 text-center sm:pt-12">
-        <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
-        <h2 className="mt-5 text-xl font-semibold tracking-tight sm:mt-6 sm:text-2xl">
-          Welcome to qcode
-        </h2>
-        <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
-          Open a folder to give qcode something to work on. It only reads
-          what you point it at — your filesystem stays private otherwise.
-        </p>
-        <button
-          onClick={() => void onOpenFolder()}
-          className="mt-6 inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90 active:scale-[0.98]"
-        >
-          <FolderOpen className="h-4 w-4" />
-          Open folder
-          <Kbd className="ml-1 border-primary-foreground/30 text-primary-foreground/70">
-            ⌘O
-          </Kbd>
-        </button>
-        <div className="mt-10 grid w-full max-w-2xl gap-3 text-left sm:grid-cols-3">
-          <OnboardingTip
-            title="Edits with diff approval"
-            body="Every write or edit shows a diff before applying. Bash commands too. You stay in control."
-          />
-          <OnboardingTip
-            title="Multi-model"
-            body={`Connected to ${modelLabel}${provider ? ` · ${provider}` : ''}. Switch in the title bar — Claude, GPT, DeepSeek, more.`}
-          />
-          <OnboardingTip
-            title="qcode.md or CLAUDE.md"
-            body="Drop one in your repo to teach qcode your conventions. Loaded automatically every turn."
-          />
+      <div className="relative flex flex-col items-center pt-16 text-center sm:pt-24">
+        <Spotlight />
+        <div className="relative z-10 flex flex-col items-center">
+          <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
+          <h2 className="mt-6 text-2xl font-semibold tracking-tight sm:text-3xl">
+            What can I build for you?
+          </h2>
+          <p className="mt-2 max-w-sm text-[13px] leading-relaxed text-muted-foreground">
+            Open a folder to get started. qcode only reads what you
+            point it at.
+          </p>
+          <button
+            onClick={() => void onOpenFolder()}
+            className="mt-7 inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2 text-[13px] font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90 active:scale-[0.98]"
+          >
+            <FolderOpen className="h-3.5 w-3.5" />
+            Open folder
+            <Kbd className="ml-1 border-primary-foreground/30 text-primary-foreground/70">
+              ⌘O
+            </Kbd>
+          </button>
         </div>
       </div>
     );
   }
 
-  // Returning user with a workspace open — the existing canvas.
-  // Heading personalizes to the open folder so it feels like the
-  // agent is opening *this* repo, not a generic "team": "What should
-  // we build in qlaud-router?" reads like a coworker, not a tool.
+  // Web (no folder concept) OR desktop with a workspace open. Same
+  // hero shape; the heading varies by workspace presence.
   const heading = workspaceName
     ? `What should we build in ${workspaceName}?`
-    : 'What can the team build?';
+    : 'What can I build for you?';
+  const suggestions = !hasWorkspace
+    ? WEB_SAMPLE_PROMPTS.slice(0, 3)
+    : SAMPLE_PROMPTS.slice(0, 3);
   return (
-    <div className="flex flex-col items-center pt-12 text-center">
-      <div className="grid h-12 w-12 place-items-center rounded-2xl bg-primary/10 text-primary">
-        <Sparkles className="h-5 w-5" />
-      </div>
-      <h2 className="mt-5 px-2 text-xl font-semibold tracking-tight sm:mt-6 sm:text-2xl">
-        {heading}
-      </h2>
-      <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
-        Just describe it. We&rsquo;ll route to the right specialist —
-        Staff, Backend, Frontend, Design, Reviewer, QA, DevOps,
-        Security, Marketing, or Sales — and tell you who&rsquo;s on it.
-      </p>
-      {memory && (
-        <div
-          className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-background/70 px-2.5 py-0.5 text-[11px] text-muted-foreground"
-          title={`Loaded ${memory.text.length.toLocaleString()} chars of project context from ${memory.source}`}
-        >
-          <BookOpen className="h-3 w-3" />
-          <span>
+    <div className="relative flex flex-col items-center pt-12 text-center sm:pt-20">
+      <Spotlight />
+      <div className="relative z-10 flex w-full flex-col items-center">
+        <QlaudMark className="h-12 w-12 rounded-2xl shadow-sm" />
+        <h2 className="mt-6 max-w-2xl px-2 text-2xl font-semibold tracking-tight sm:text-3xl">
+          {heading}
+        </h2>
+        {memory && (
+          <div
+            className="mt-4 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-background/70 px-2.5 py-0.5 text-[11px] text-muted-foreground"
+            title={`Loaded ${memory.text.length.toLocaleString()} chars from ${memory.source}`}
+          >
+            <BookOpen className="h-3 w-3" />
             Using{' '}
             <span className="font-mono text-foreground/80">
               {memory.source}
-            </span>{' '}
-            as project context
-          </span>
+            </span>
+          </div>
+        )}
+        {/* Suggestion chips — quiet horizontal row, NOT a button grid.
+         *  Three contextual prompts; click drops into the composer
+         *  for the user to edit/send. Codex-style restraint: chips
+         *  hint at capability, they don't dominate the canvas. */}
+        <div className="mt-8 flex max-w-2xl flex-wrap items-center justify-center gap-1.5">
+          {suggestions.map((s) => (
+            <button
+              key={s}
+              onClick={() => onPick(s)}
+              className="rounded-full border border-border/60 bg-background/40 px-3 py-1 text-[11.5px] text-muted-foreground transition-colors hover:border-foreground/30 hover:bg-background hover:text-foreground"
+            >
+              {s.length > 56 ? s.slice(0, 53) + '…' : s}
+            </button>
+          ))}
         </div>
-      )}
-      <div className="mt-8 grid w-full max-w-2xl gap-2 text-left sm:mt-10">
-        {SAMPLE_PROMPTS.map((s) => (
-          <button
-            key={s}
-            onClick={() => onPick(s)}
-            className="rounded-lg border border-border bg-background/70 px-4 py-3 text-sm text-muted-foreground transition-colors hover:border-foreground/20 hover:text-foreground"
-          >
-            {s}
-          </button>
-        ))}
-      </div>
-      {/* Secondary actions — Codex has a similar quiet row below the
-       *  prompt list ("Connect to GitHub", "Connect your favorite
-       *  apps"). We keep it project-relevant: switch folder for when
-       *  the user wants to point qcode somewhere else, and a soft
-       *  link to qlaud's connector marketplace for app integrations
-       *  the agent can call (Slack, Linear, Notion, etc.). */}
-      <div className="mt-3 flex w-full max-w-2xl flex-wrap items-center justify-center gap-3 text-[11.5px] text-muted-foreground">
-        <button
-          onClick={() => void onOpenFolder()}
-          className="inline-flex items-center gap-1.5 transition-colors hover:text-foreground"
-        >
-          <FolderOpen className="h-3 w-3" />
-          Switch folder
-        </button>
-        <span className="text-border" aria-hidden>
-          ·
-        </span>
-        <a
-          href="https://qlaud.ai/connectors"
-          target="_blank"
-          rel="noopener"
-          className="inline-flex items-center gap-1.5 transition-colors hover:text-foreground"
-        >
-          <Sparkles className="h-3 w-3" />
-          Connect apps to your team
-        </a>
+        <p className="mt-6 max-w-sm text-[11.5px] leading-relaxed text-muted-foreground/60">
+          Or type anything below — describe a feature, paste an error,
+          ask a question.
+        </p>
       </div>
     </div>
   );
 }
 
-function OnboardingTip({ title, body }: { title: string; body: string }) {
-  return (
-    <div className="rounded-lg border border-border/60 bg-background/70 px-3 py-2.5">
-      <div className="text-[12px] font-medium text-foreground">{title}</div>
-      <p className="mt-1 text-[11.5px] leading-relaxed text-muted-foreground">
-        {body}
-      </p>
-    </div>
-  );
-}
+// OnboardingTip removed in alpha.188 — the 3-card tip grid on the
+// desktop empty state was retired in favor of the single-CTA hero.
 
 function Kbd({
   children,
