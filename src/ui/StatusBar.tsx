@@ -56,9 +56,13 @@ export function StatusBar({ workspace, model, mode, appVersion }: Props) {
       role="contentinfo"
       className="flex h-6 shrink-0 items-center gap-3 border-t border-border/40 bg-muted/30 px-3 text-[11px] text-muted-foreground backdrop-blur-sm"
     >
-      {/* Left cluster — workspace context */}
+      {/* Left cluster - workspace context. alpha.199: collapse to
+       *  nothing when no workspace is attached, rather than render
+       *  a 'no workspace' placeholder chip. The empty state is
+       *  conveyed by absence; the bar still has weight from the
+       *  right cluster (model + mode + connection + version). */}
       <div className="flex min-w-0 items-center gap-3">
-        {workspace ? (
+        {workspace && (
           <>
             <Chip icon={Folder} title={workspace.path}>
               <span className="max-w-[160px] truncate text-foreground/85">
@@ -78,10 +82,6 @@ export function StatusBar({ workspace, model, mode, appVersion }: Props) {
               </Chip>
             )}
           </>
-        ) : (
-          <Chip icon={Folder} title="No workspace open">
-            <span className="text-muted-foreground/70">no workspace</span>
-          </Chip>
         )}
       </div>
 
