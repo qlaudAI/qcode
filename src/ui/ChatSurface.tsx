@@ -680,7 +680,18 @@ export function ChatSurface({
     let myThread: string;
     try {
       myThread = await ensureThreadId();
-    } catch {
+    } catch (e) {
+      // Pre-alpha.181 this was a silent return — the send vanished
+      // and the user saw nothing. Now surface the failure so they
+      // know to retry / switch workspace / sign in. Most common
+      // cause: workspace_id in the local registry doesn't exist
+      // server-side (id mismatch between alpha.176 local registry
+      // and alpha.177+ server registry). The server fallback in
+      // qlaud_router routes/threads.ts handles the easy case;
+      // anything else (auth lapse, network blip) bubbles here.
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[ChatSurface] ensureThreadId failed:', msg);
+      setError(`Couldn't start the chat: ${msg}. Try again, or click + New chat.`);
       return;
     }
     if (!myThread) return;
