@@ -44,10 +44,7 @@ import { useThreadMessagesQuery } from '../lib/queries';
 import { useThreadEvents } from '../lib/use-thread-events';
 import { QlaudMark } from './QlaudMark';
 import { Spotlight } from '../components/ui/spotlight';
-// BorderBeam reserved for follow-up commit (composer active-state
-// micro-interaction). Import kept for the next ship; lint-suppressed.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { BorderBeam as _BorderBeam } from '../components/ui/border-beam';
+import { BorderBeam } from '../components/ui/border-beam';
 import type { ApprovalDecision, ApprovalRequest } from '../lib/legacy/tools';
 import {
   registerApproval,
@@ -3863,13 +3860,19 @@ function Composer({
             }}
             onDrop={onDrop}
             className={cn(
-              'rounded-2xl border bg-background shadow-sm transition-shadow',
+              'relative rounded-2xl border bg-background shadow-sm transition-shadow',
               'focus-within:shadow-md',
               dragging
                 ? 'border-primary/40 ring-2 ring-primary/20'
                 : 'border-border focus-within:border-foreground/20',
             )}
           >
+            {/* MagicUI-style traveling border beam while the model
+             *  is generating. Replaces the inline-text "thinking…"
+             *  indicator with an ambient "this surface is alive"
+             *  signal. CSS-only (compositor-friendly); zero JS rAF.
+             *  Only visible when busy — composer at rest is clean. */}
+            <BorderBeam active={busy} duration={8} size={1.5} />
             {(attached.length > 0 ||
               images.length > 0 ||
               documents.length > 0 ||
