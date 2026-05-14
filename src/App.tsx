@@ -2250,23 +2250,28 @@ function TimeBucketedThreads({
       </p>
     );
   }
+  // alpha.192 simplification: collapse Today/Yesterday/This Week/
+  // This Month/Earlier into ONE flat list (Codex pattern). Each row
+  // already shows a per-thread `1d` / `2w` timestamp on the right —
+  // the bucket subheaders were duplicating that signal. Pinned stays
+  // as its own bucket because it's a different concept (user intent
+  // to keep prominent), not just a date grouping.
+  const pinned = buckets.find((b) => b.label === 'Pinned');
+  const recents = buckets.filter((b) => b.label !== 'Pinned').flatMap((b) => b.threads);
   return (
     <div className="space-y-3">
-      {buckets.map((b) => (
-        <div key={b.label}>
+      {pinned && pinned.threads.length > 0 && (
+        <div>
           <div className="mb-0.5 flex items-center gap-2 px-2">
             <span className="text-[9.5px] font-semibold uppercase tracking-[0.13em] text-muted-foreground/70">
-              {b.label}
+              Pinned
             </span>
-            {b.label === 'Pinned' && (
-              <span aria-hidden className="text-muted-foreground/40">·</span>
-            )}
             <span className="text-[9.5px] tabular-nums text-muted-foreground/50">
-              {b.threads.length}
+              {pinned.threads.length}
             </span>
           </div>
           <ThreadList
-            threads={b.threads}
+            threads={pinned.threads}
             currentId={currentThreadId}
             onPick={onPick}
             onDelete={onDelete}
@@ -2274,7 +2279,17 @@ function TimeBucketedThreads({
             snippetByThread={snippetByThread}
           />
         </div>
-      ))}
+      )}
+      {recents.length > 0 && (
+        <ThreadList
+          threads={recents}
+          currentId={currentThreadId}
+          onPick={onPick}
+          onDelete={onDelete}
+          onTogglePin={onTogglePin}
+          snippetByThread={snippetByThread}
+        />
+      )}
     </div>
   );
 }
