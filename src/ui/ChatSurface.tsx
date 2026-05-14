@@ -1273,6 +1273,39 @@ export function ChatSurface({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, queued]);
 
+  // alpha.203: auto-fire on arrival.
+  //
+  // When ChatSurface mounts with `initialPrompt` set, the user has
+  // already hit send on the surface that handed off to us (either
+  // the qlaud.ai LandingHero or the in-app SignInGate composer).
+  // Making them click Enter a second time on the same text reads
+  // as "I have to do this twice" — exactly the friction we're
+  // trying to remove. Auto-firing send() collapses the two-step
+  // experience into one: type once on the previous surface, watch
+  // the agent start working here.
+  //
+  // Guards:
+  //   1. autoFiredRef — single-shot per mount. ChatSurface stays
+  //      mounted across thread switches, so this also prevents a
+  //      stale prefill from re-firing if the user navigates around.
+  //   2. !busy — never disturb a running turn. The queued-dispatch
+  //      effect above will handle any race where both are set.
+  //   3. input === initialPrompt — if the user somehow started
+  //      typing in the millisecond between mount and effect run,
+  //      respect the edit. They can hit Enter manually.
+  const autoFiredRef = useRef(false);
+  useEffect(() => {
+    if (autoFiredRef.current) return;
+    if (!initialPrompt) return;
+    if (busy) return;
+    if (input !== initialPrompt) return;
+    autoFiredRef.current = true;
+    void send(initialPrompt);
+    // Same closure-fresh-send pattern as the queue dispatcher; don't
+    // list send() as a dep or we'd loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPrompt, busy, input]);
+
   const empty = blocks.length === 0;
 
   // Top-of-chat activity pill: when the agent is mid-turn and a
