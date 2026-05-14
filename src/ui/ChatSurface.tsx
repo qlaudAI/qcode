@@ -1346,13 +1346,27 @@ export function ChatSurface({
          *  switches threads. Subtle 200ms — enough to register
          *  visually as "this is a different conversation" without
          *  feeling sluggish. New chat (threadId=null) reuses the
-         *  same key so the empty state also fades. */}
+         *  same key so the empty state also fades.
+         *
+         *  alpha.191: when the conversation is empty, vertically
+         *  center the content in the scroll area instead of pinning
+         *  to top. This is what makes the hero feel "Codex-like" —
+         *  the headline + chips sit mid-viewport with the composer
+         *  pinned just below, rather than the headline at top with
+         *  a huge dead gap and the composer floating at the very
+         *  bottom. Non-empty conversations keep the natural
+         *  top-to-bottom message flow. */}
         <motion.div
           key={threadId ?? '__new__'}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.2, ease: 'easeOut' }}
-          className="mx-auto w-full max-w-[42rem] px-3 py-6 sm:px-4 sm:py-8"
+          className={cn(
+            'mx-auto w-full max-w-[42rem] px-3 sm:px-4',
+            empty
+              ? 'flex min-h-full flex-col items-center justify-center py-12'
+              : 'py-6 sm:py-8',
+          )}
         >
           {empty ? (
             // Three sub-states share the empty-blocks condition:
