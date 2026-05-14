@@ -114,9 +114,28 @@ export function useThreadEvents(threadId: string | null): void {
 
     let cancelled = false;
     let lastEventId = '0';
+    // Exponential-backoff state for transient failures (fetch-level
+    // errors, 5xx, dropped stream). Resets to 0 the moment we
+    // successfully receive ANY byte from the stream. After
+    // MAX_CONSECUTIVE_FAILURES in a row we give up entirely — protects
+    // against CORS misconfigurations, persistent DNS issues, etc.
+    // tight-looping at 2s forever (which is what the old code did).
+    let consecutiveFailures = 0;
+    const MAX_CONSECUTIVE_FAILURES = 6; // ~63s of trying with the
+                                        // doubling schedule below
 
     const connect = async (): Promise<void> => {
       while (!cancelled) {
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          // Permanent failure mode — log once and bail. User has to
+          // remount the surface (refresh / navigate) to retry.
+          console.warn(
+            `[thread-events] giving up after ${consecutiveFailures} ` +
+              `consecutive failures on thread ${threadId}`,
+          );
+          cancelled = true;
+          break;
+        }
         const controller = new AbortController();
         abortRef.current = controller;
         try {
@@ -143,11 +162,16 @@ export function useThreadEvents(threadId: string | null): void {
               cancelled = true;
               break;
             }
-            // 5xx / no body / network blip — keep retrying with a
-            // brief backoff.
-            await backoff(2_000);
+            // 5xx / no body — count as a transient failure and
+            // exponential-backoff.
+            consecutiveFailures++;
+            await backoff(transientBackoffMs(consecutiveFailures));
             continue;
           }
+          // Got a 2xx with a readable body — reset the failure
+          // counter. The stream itself dying later is a separate
+          // event and gets its own count.
+          consecutiveFailures = 0;
 
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
@@ -204,14 +228,19 @@ export function useThreadEvents(threadId: string | null): void {
           if (cancelled) break;
           // Stream closed without a reconnect frame (network blip or
           // CF retired the connection). Back off briefly then retry.
+          // Not a "failure" if we received any frames — the failure
+          // counter only ticks on connection-establishment errors.
           if (!shouldReconnect) await backoff(1_500);
         } catch (e) {
           if (cancelled) break;
-          // Abort errors are expected on cleanup; everything else
-          // gets a brief backoff to avoid hot-loop on persistent
-          // network failure.
+          // Abort errors are expected on cleanup — exit cleanly.
           if ((e as Error)?.name === 'AbortError') break;
-          await backoff(2_000);
+          // Connection-level failure (fetch threw — CORS rejection,
+          // DNS, TLS, network down). Tick the counter and back off
+          // exponentially; the outer loop check will abandon after
+          // MAX_CONSECUTIVE_FAILURES.
+          consecutiveFailures++;
+          await backoff(transientBackoffMs(consecutiveFailures));
         }
       }
     };
@@ -231,6 +260,18 @@ export function useThreadEvents(threadId: string | null): void {
  *  checks `cancelled` after this resolves. */
 function backoff(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+/** Exponential backoff schedule for transient failures.
+ *  Attempts:  1   2   3   4    5    6
+ *  Delay ms:  1k  2k  4k  8k   16k  30k (capped)
+ *  Total:     ~63s before MAX_CONSECUTIVE_FAILURES trips and the
+ *  loop gives up. Long enough to ride out brief CF / network
+ *  hiccups, short enough that a permanently-broken state surfaces
+ *  to the user in ~1 minute. */
+function transientBackoffMs(failureCount: number): number {
+  const base = 1000 * Math.pow(2, Math.max(0, failureCount - 1));
+  return Math.min(base, 30_000);
 }
 
 /** Apply one server frame to the react-query caches. Pure function
