@@ -120,22 +120,25 @@ export function SettingsDrawer({
         role="dialog"
         aria-label="Settings"
         className={cn(
-          'fixed right-0 top-0 z-50 h-dvh w-[420px] max-w-[90vw] border-l border-border/60 bg-background shadow-[0_8px_32px_rgba(0,0,0,0.12)] transition-transform duration-200',
+          // alpha.197: wider drawer (420→560) so each section has
+          // room to breathe. Modern macOS Settings / AionUi reference
+          // is wider than our old narrow column.
+          'fixed right-0 top-0 z-50 h-dvh w-[560px] max-w-[92vw] border-l border-border/60 bg-background shadow-[0_8px_32px_rgba(0,0,0,0.12)] transition-transform duration-200',
           open ? 'translate-x-0' : 'translate-x-full',
         )}
       >
-        <header className="flex h-12 items-center justify-between border-b border-border/60 px-4">
-          <h2 className="text-sm font-semibold tracking-tight">Settings</h2>
+        <header className="flex h-14 items-center justify-between border-b border-border/60 px-6">
+          <h2 className="text-lg font-semibold tracking-tight">Settings</h2>
           <button
             aria-label="Close settings"
             onClick={onClose}
-            className="grid h-7 w-7 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="grid h-8 w-8 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
-            <X className="h-3.5 w-3.5" />
+            <X className="h-4 w-4" />
           </button>
         </header>
 
-        <div className="h-[calc(100dvh-3rem)] overflow-y-auto">
+        <div className="h-[calc(100dvh-3.5rem)] overflow-y-auto">
           <Section title="Account">
             <Row
               label="Signed in as"
@@ -585,12 +588,15 @@ function Section({
   title: string;
   children: React.ReactNode;
 }) {
+  // alpha.197 modernized: larger heading (sentence-case, not uppercase
+  // tracking-wide), more generous padding, subtle separators between
+  // sections without aggressive border lines.
   return (
-    <section className="space-y-2 border-b border-border/40 px-4 py-4 last:border-b-0">
-      <h3 className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">
+    <section className="space-y-3 px-6 py-5 [&:not(:last-child)]:border-b [&:not(:last-child)]:border-border/30">
+      <h3 className="text-[13px] font-semibold tracking-tight text-foreground">
         {title}
       </h3>
-      <div className="space-y-2">{children}</div>
+      <div className="space-y-1.5">{children}</div>
     </section>
   );
 }
@@ -604,13 +610,16 @@ function Row({
   value: string;
   icon?: React.ReactNode;
 }) {
+  // alpha.197 modernized: borderless row, inline label/value, no
+  // muted-card background. Reads like macOS Settings rather than a
+  // form field.
   return (
-    <div className="flex items-center justify-between gap-3 rounded-md bg-muted/30 px-3 py-2 text-sm">
+    <div className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
       <span className="flex items-center gap-2 text-muted-foreground">
         {icon}
         {label}
       </span>
-      <span className="truncate font-mono text-[12px] text-foreground">
+      <span className="truncate font-mono text-[12px] text-foreground/85">
         {value}
       </span>
     </div>
@@ -634,24 +643,26 @@ function Toggle({
   checked: boolean;
   onChange: (v: boolean) => void;
 }) {
+  // alpha.197 modernized: borderless row, iOS-style switch (larger
+  // 28×16 with smooth shadow on the knob), hover background subtle.
   return (
     <button
       role="switch"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className="flex w-full items-center justify-between rounded-md border border-border bg-background px-3 py-2 text-sm transition-colors hover:border-foreground/30"
+      className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors hover:bg-muted/40"
     >
-      <span>{label}</span>
+      <span className="text-foreground/90">{label}</span>
       <span
         className={cn(
-          'relative h-4 w-7 rounded-full transition-colors',
-          checked ? 'bg-primary' : 'bg-muted',
+          'relative h-[18px] w-[30px] shrink-0 rounded-full transition-colors',
+          checked ? 'bg-primary' : 'bg-muted-foreground/30',
         )}
       >
         <span
           className={cn(
-            'absolute top-0.5 h-3 w-3 rounded-full bg-background shadow transition-transform',
-            checked ? 'left-3.5' : 'left-0.5',
+            'absolute top-[2px] h-[14px] w-[14px] rounded-full bg-white shadow-sm transition-transform duration-150 ease-out',
+            checked ? 'translate-x-[14px]' : 'translate-x-[2px]',
           )}
         />
       </span>

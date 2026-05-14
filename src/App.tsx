@@ -1165,6 +1165,8 @@ export function App() {
               closeSidebarIfMobile();
               onActivateWorkspace(id);
             }}
+            onOpenSettings={() => setSettingsOpen(true)}
+            profile={profile}
           />
         </div>
         <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-background/85 backdrop-blur-sm">
@@ -1255,7 +1257,11 @@ function Titlebar({
   activeThreadWorkspace,
   onFork,
   onRefreshBalance,
-  onOpenSettings,
+  // onOpenSettings kept on the prop type for future ⌘, keyboard
+  // shortcut binding; the visible UI affordance moved to the
+  // sidebar's bottom-left in alpha.197.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  onOpenSettings: _onOpenSettings,
   onToggleSidebar,
   rightRailView,
   onPickRightRailView,
@@ -1405,14 +1411,12 @@ function Titlebar({
             onPick={onPickRightRailView}
           />
         )}
-        <button
-          aria-label="Settings"
-          className="grid h-7 w-7 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          onClick={onOpenSettings}
-          title={profile?.email ? `Settings · signed in as ${profile.email}` : 'Settings'}
-        >
-          <Settings className="h-3.5 w-3.5" />
-        </button>
+        {/* Settings entry moved to the sidebar's bottom-left in
+         *  alpha.197 (matches AionUi pattern). Titlebar stays
+         *  focused on per-session controls (model + spend) and
+         *  shouldn't also carry app-level navigation. The
+         *  onOpenSettings prop is still threaded through so a
+         *  ⌘, keyboard shortcut can reach it. */}
       </div>
     </header>
   );
@@ -1678,6 +1682,8 @@ function Sidebar({
   onTogglePin,
   onActivateWorkspace,
   onClose,
+  onOpenSettings,
+  profile,
 }: {
   workspace: Workspace | null;
   threads: ThreadSummary[];
@@ -1698,6 +1704,12 @@ function Sidebar({
    *  in the top-right of the sidebar that hides the panel. Mirrors
    *  the right-rail's close affordance. */
   onClose?: () => void;
+  /** Open the Settings drawer. Wired to the bottom-left Settings
+   *  button (alpha.197 — matches the AionUi pattern). */
+  onOpenSettings: () => void;
+  /** Signed-in user profile, for the "signed in as" subtitle on
+   *  the Settings row. */
+  profile?: { email?: string | null } | null;
 }) {
   // Subscribe to the workspace registry — the WORKSPACES section
   // iterates over this list directly so adding/removing/activating
@@ -1882,8 +1894,27 @@ function Sidebar({
          */}
       </div>
 
-      <div className="border-t border-border/40 px-3 py-2 text-[10px] text-muted-foreground">
-        v0.1.0-alpha · powered by qlaud
+      {/* alpha.197 — Settings entry moved to the sidebar's bottom-
+       *  left, matching the AionUi pattern. Big touchtarget pill
+       *  row instead of the cramped titlebar gear that lived at
+       *  the top-right since alpha.108. Keeps the small version
+       *  label on the right as a quiet identifier. */}
+      <div className="border-t border-border/40 px-2 py-2">
+        <button
+          onClick={onOpenSettings}
+          className="group flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] font-medium text-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
+          title={
+            profile?.email
+              ? `Settings · signed in as ${profile.email}`
+              : 'Settings'
+          }
+        >
+          <Settings className="h-4 w-4 text-muted-foreground transition-colors group-hover:text-foreground" />
+          <span className="flex-1 truncate">Settings</span>
+          <span className="text-[10px] tabular-nums text-muted-foreground/60">
+            v0.1.0-alpha
+          </span>
+        </button>
       </div>
     </aside>
   );
