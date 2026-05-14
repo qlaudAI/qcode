@@ -884,11 +884,50 @@ export function ChatSurface({
       //                     OR desktop without a folder). Just streams
       //                     /v1/messages; no tools, no sandbox cost.
       //
+      // Intent classifier (alpha.183): even if the user (or saved
+      // settings) has mode='agent', a one-word "hi" or "thanks"
+      // doesn't need the full sandbox container + GitLab restore.
+      // Downshift the effective mode based on prompt content so
+      // chat-style prompts always land on the cheap chat path.
+      //
+      // Bias rules (see lib/intent-classifier.ts):
+      //   * prompt <6 chars → always chat (greetings)
+      //   * "what / why / explain" without an agent verb → chat
+      //   * agent verbs ("build", "fix", "run", "commit") → agent
+      //   * 'plan' mode is preserved (user-explicit read-only intent)
+      //
+      // threadIsAgentic is true when the active workspace is the
+      // sandbox-backed kind (we already have GitLab state attached);
+      // ambiguous follow-ups in an agentic thread stay on agent.
+      const { classifyIntent } = await import('../lib/intent-classifier');
+      const intentResult = classifyIntent({
+        prompt: userMsg,
+        // Active workspace has a GitLab repo attached → thread is
+        // already agentic; ambiguous follow-ups stay on agent.
+        threadIsAgentic: !!workspace?.gitlabProjectPath,
+      });
+      let effectiveMode: typeof mode = mode;
+      if (mode === 'agent' && intentResult.intent === 'chat') {
+        effectiveMode = 'chat';
+        // Telemetry hook — useful when tuning the classifier; safe
+        // to leave on in prod since it's once per send.
+        console.log(
+          '[intent-classifier] downshifted agent→chat:',
+          intentResult.reason,
+        );
+      } else if (mode === 'chat' && intentResult.intent === 'agent') {
+        effectiveMode = 'agent';
+        console.log(
+          '[intent-classifier] upshifted chat→agent:',
+          intentResult.reason,
+        );
+      }
+
       // Mode gating: 'chat' NEVER provisions a sandbox or spawns a
       // sidecar — the user explicitly opted into 'agent'/'plan' for
       // those. Keeps default-mode usage cheap and matches user
       // intent ("I'm just having a conversation" vs "build me X").
-      const wantsRealAgent = mode === 'agent' || mode === 'plan';
+      const wantsRealAgent = effectiveMode === 'agent' || effectiveMode === 'plan';
       // Gate the sandbox path. When SANDBOX_AGENT_ENABLED is false
       // (web build, current default), Agent + Plan from any source
       // (saved settings, deep link) fall through to qcode-legacy
@@ -945,9 +984,9 @@ export function ChatSurface({
           // the cache once the implicit promotion lands.
           workspaceId: workspace?.id ?? null,
           // mode is 'agent' or 'plan' here (engineMode==='sandbox-agent'
-          // is gated on mode!=='chat' in the dispatcher above). Type
-          // narrowing is fine; cast through the union to satisfy TS.
-          mode: mode === 'plan' ? 'plan' : 'agent',
+          // is gated on effectiveMode!=='chat' in the dispatcher above).
+          // Type narrowing is fine; cast through the union to satisfy TS.
+          mode: effectiveMode === 'plan' ? 'plan' : 'agent',
           // workspace passed for contract uniformity; the sandbox
           // engine ignores it (cwd is /workspace inside the
           // container).
@@ -965,10 +1004,10 @@ export function ChatSurface({
           // sandbox/sidecar; just stream /v1/messages." For the
           // legacy path's own internal switches (read-only tool
           // gating etc.) it maps cleanly to 'agent'. The dispatcher
-          // above already routed us here BECAUSE mode==='chat', so
-          // passing 'agent' is benign — there are no tools in this
+          // above already routed us here BECAUSE effectiveMode==='chat',
+          // so passing 'agent' is benign — there are no tools in this
           // path either way.
-          mode: mode === 'chat' ? 'agent' : mode,
+          mode: effectiveMode === 'chat' ? 'agent' : effectiveMode,
           workspace: workspace?.path ?? null,
           content: userContent,
           // Read at send time so toggling the setting takes effect on
