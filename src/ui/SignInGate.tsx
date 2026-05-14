@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, Check, Sparkles } from 'lucide-react';
+import { ArrowRight, Sparkles } from 'lucide-react';
 
 import { handleTitleBarMouseDown } from '../lib/tauri';
+import { DiscoveryGrid } from './DiscoveryGrid';
 import { QlaudMark } from './QlaudMark';
 
 // qcode landing / sign-in gate. Marketing surface for un-authed
@@ -281,43 +282,27 @@ export function SignInGate({ onSignIn }: { onSignIn: () => Promise<void> | void 
             <span className="hidden sm:inline">Pika</span>
           </div>
 
-          {/* Three cards — what you actually get. Replaces the old
-           *  "hard spend cap / any model / open source" trio that
-           *  was a developer-pitch holdover. Now: Free benefits,
-           *  Pro upsell, Power preview. Each card is a tier, ordered
-           *  left-to-right by commitment. */}
-          <div className="mt-8 grid grid-cols-1 gap-3 sm:mt-10 sm:grid-cols-3">
-            <Tier
-              badge="Free"
-              price="$0"
-              tagline="No card required"
-              bullets={[
-                'Unlimited DeepSeek, Qwen, MiniMax',
-                '10 Sonnet / GPT‑5 messages a day',
-                '5 image gens a day',
-              ]}
-            />
-            <Tier
-              badge="Pro"
-              price="$17/mo"
-              tagline="Most popular"
-              bullets={[
-                '200 Sonnet / GPT‑5 / day',
-                '30 Opus / day',
-                '5 Sora video clips, 10 min TTS',
-              ]}
-              accent
-            />
-            <Tier
-              badge="Power"
-              price="$87/mo"
-              tagline="For builders"
-              bullets={[
-                '5× the Pro limits',
-                '150 Opus / day',
-                '30 min Sora video / mo',
-              ]}
-            />
+          {/* Discovery grid — replaces the prior 3-tier pricing
+           *  block. Showing what qlaud generates lands the value
+           *  prop faster than a price list does, especially as we
+           *  pivot toward motion-video generation as the headline
+           *  capability. Pricing still lives on /pricing for users
+           *  who go looking; the gate doesn't need it.
+           *
+           *  alpha.205 — same DiscoveryGrid component renders on
+           *  the qlaud.ai marketing landing too, so visitors see
+           *  the same "what does this thing produce" shelf
+           *  regardless of which surface they hit first. */}
+          <div className="mt-8 sm:mt-10">
+            <div className="mb-4 flex items-baseline justify-between gap-3">
+              <h2 className="text-[15px] font-semibold tracking-tight text-foreground">
+                Built with qlaud
+              </h2>
+              <span className="text-[11px] text-muted-foreground">
+                Type a prompt to start
+              </span>
+            </div>
+            <DiscoveryGrid />
           </div>
 
           {/* Tail line — open-source credit kept (it's a real signal,
@@ -335,55 +320,7 @@ export function SignInGate({ onSignIn }: { onSignIn: () => Promise<void> | void 
   );
 }
 
-function Tier({
-  badge,
-  price,
-  tagline,
-  bullets,
-  accent,
-}: {
-  badge: string;
-  price: string;
-  tagline: string;
-  bullets: string[];
-  accent?: boolean;
-}) {
-  return (
-    <div
-      className={
-        'flex flex-col rounded-lg border p-3 sm:p-3.5 transition-colors ' +
-        (accent
-          ? 'border-primary/40 bg-primary/[0.04] shadow-sm shadow-primary/5'
-          : 'border-border/60 bg-background/40')
-      }
-    >
-      <div className="flex items-baseline justify-between gap-2">
-        <span
-          className={
-            'rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ' +
-            (accent
-              ? 'bg-primary/15 text-primary'
-              : 'bg-muted text-foreground/70')
-          }
-        >
-          {badge}
-        </span>
-        <span className="truncate text-[10.5px] text-muted-foreground sm:text-[11px]">
-          {tagline}
-        </span>
-      </div>
-      <div className="mt-2 text-lg font-semibold tracking-tight">{price}</div>
-      <ul className="mt-2 space-y-1">
-        {bullets.map((b) => (
-          <li
-            key={b}
-            className="flex items-start gap-1.5 text-[11px] leading-snug text-foreground/80"
-          >
-            <Check className="mt-[1px] h-3 w-3 shrink-0 text-primary" />
-            <span>{b}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
+// `Tier` component removed in alpha.205 — the 3-card pricing block
+// was replaced by <DiscoveryGrid /> above. Pricing remains on the
+// /pricing marketing page for visitors who go looking. The gate is
+// a "what can this do" surface now, not a "what does it cost" one.
