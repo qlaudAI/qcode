@@ -44,7 +44,11 @@ import { useThreadMessagesQuery } from '../lib/queries';
 import { useThreadEvents } from '../lib/use-thread-events';
 import { QlaudMark } from './QlaudMark';
 import { Spotlight } from '../components/ui/spotlight';
-import { BorderBeam } from '../components/ui/border-beam';
+// BorderBeam unused as of alpha.195 — its interior mask blocked
+// the textarea. Replaced with a non-overlaying border-color +
+// ambient ring busy signal applied directly to the composer card.
+// Kept as a file in components/ui/ for potential reuse on
+// non-input elements (badges, cards) where the mask trick is safe.
 import type { ApprovalDecision, ApprovalRequest } from '../lib/legacy/tools';
 import {
   registerApproval,
@@ -3926,19 +3930,25 @@ function Composer({
             }}
             onDrop={onDrop}
             className={cn(
-              'relative rounded-2xl border bg-background shadow-sm transition-shadow',
+              'relative rounded-2xl border bg-background shadow-sm transition-all',
               'focus-within:shadow-md',
+              // alpha.195: replace the BorderBeam (which used an
+              // opaque interior mask that overlaid the textarea
+              // and blocked the user from seeing their cursor)
+              // with a non-interfering busy signal: tinted border
+              // + a subtle ambient ring shadow. Both are pure CSS
+              // on the composer card itself — no overlay, no
+              // stacking, no interference with input.
+              busy && !dragging
+                ? 'border-primary/40 [box-shadow:0_0_0_4px_hsl(var(--primary)/0.08)]'
+                : '',
               dragging
                 ? 'border-primary/40 ring-2 ring-primary/20'
-                : 'border-border focus-within:border-foreground/20',
+                : !busy
+                  ? 'border-border focus-within:border-foreground/20'
+                  : '',
             )}
           >
-            {/* MagicUI-style traveling border beam while the model
-             *  is generating. Replaces the inline-text "thinking…"
-             *  indicator with an ambient "this surface is alive"
-             *  signal. CSS-only (compositor-friendly); zero JS rAF.
-             *  Only visible when busy — composer at rest is clean. */}
-            <BorderBeam active={busy} duration={8} size={1.5} />
             {(attached.length > 0 ||
               images.length > 0 ||
               documents.length > 0 ||
