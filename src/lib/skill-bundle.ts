@@ -33,16 +33,14 @@ const EDGE_BASE =
 // we fetch + overwrite; when it doesn't, we fall back to the
 // bundled markdown shipped with this build.
 //
-// Pairs that exist server-side today:
-//   video-creator.md  → server slug 'video'
-//
-// Pairs not yet on server (use bundled fallback indefinitely):
-//   qlaud-tools.md         (no server equivalent — qcode-specific)
-//   deploy-cloudflare.md   (no server equivalent — qcode-specific)
+// All three are server-backed as of alpha.213 — the bundled markdown
+// is now strictly a fallback for offline / pre-auth boots. Updates
+// flow via `wrangler deploy` on the edge worker; next desktop boot
+// picks them up.
 const SERVER_SLUG_BY_FILE: Record<string, string | null> = {
   'video-creator.md': 'video',
-  'qlaud-tools.md': null,
-  'deploy-cloudflare.md': null,
+  'qlaud-tools.md': 'tools',
+  'deploy-cloudflare.md': 'deploy',
 };
 
 /** Idempotent — writes / refreshes the bundled skill markdown files
