@@ -174,11 +174,10 @@ export function SignInGate({ onSignIn }: { onSignIn: () => Promise<void> | void 
             <QlaudMark className="mx-auto h-12 w-12 rounded-2xl shadow-md sm:h-14 sm:w-14" />
 
             <h1 className="mt-5 text-balance text-3xl font-semibold tracking-tight text-primary sm:mt-6 sm:text-4xl">
-              What should we build today?
+              What motion video should we make?
             </h1>
             <p className="mt-3 text-balance text-[13px] leading-relaxed text-muted-foreground sm:text-base">
-              Motion video. Sites. Apps. One prompt. Sora, Pika,
-              ElevenLabs, Claude, GPT‑5 — every model behind one key.
+              Type a prompt, and see your motion video with voice over.
             </p>
           </div>
 
