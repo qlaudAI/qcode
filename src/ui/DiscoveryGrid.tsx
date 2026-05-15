@@ -137,7 +137,16 @@ export function DiscoveryGrid({
     <>
       <div
         className={
-          'grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 ' +
+          // alpha.209: dropped the xl:grid-cols-4 breakpoint. At 4
+          // columns the cards squeezed below ~280px wide on common
+          // laptop widths, making the thumbnail thumbnail-sized
+          // and the title cramped. Capping at lg:grid-cols-3 keeps
+          // each card ≥360px on lg and grows past 400px on xl, so
+          // the thumbnails breathe and the videos actually look
+          // like videos. Gap also widens on lg+ for the same
+          // reason — denser grids feel cluttered, sparser grids
+          // feel showcase-y.
+          'grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 lg:gap-6 ' +
           className
         }
       >
