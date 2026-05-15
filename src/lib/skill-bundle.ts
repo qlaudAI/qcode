@@ -11,12 +11,39 @@
 // always-on. ~95% reduction for users who don't trigger the skill,
 // near-zero overhead for users who do (single read, then cached).
 
+import { getKey } from './auth';
 import { isTauri } from './tauri';
 import { QLAUD_DEPLOY_CLOUDFLARE_SKILL } from './skills/deploy-cloudflare';
 import { QLAUD_TOOLS_SKILL } from './skills/qlaud-tools';
 import { QLAUD_VIDEO_CREATOR_SKILL } from './skills/video-creator';
 
 const SKILLS_DIR_REL = '.qcode/skills';
+
+// API origin for the skill catalog. Same base every other qlaud lib
+// in qcode reads from. The endpoints live at /v1/skills (catalog) +
+// /v1/skills/:slug (markdown body), added in qlaud_router commit
+// for this alpha. Requires an authed qpk_ to read.
+const EDGE_BASE =
+  (import.meta.env.VITE_QLAUD_BASE as string | undefined) ?? 'https://api.qlaud.ai';
+
+// Mapping from local disk filename → server-side skill slug. Local
+// filenames came first (qcode-side conventions: dash-case + .md);
+// server slugs are short (matching the classifier registry). Server
+// is now the source of truth for content. When a server slug exists
+// we fetch + overwrite; when it doesn't, we fall back to the
+// bundled markdown shipped with this build.
+//
+// Pairs that exist server-side today:
+//   video-creator.md  → server slug 'video'
+//
+// Pairs not yet on server (use bundled fallback indefinitely):
+//   qlaud-tools.md         (no server equivalent — qcode-specific)
+//   deploy-cloudflare.md   (no server equivalent — qcode-specific)
+const SERVER_SLUG_BY_FILE: Record<string, string | null> = {
+  'video-creator.md': 'video',
+  'qlaud-tools.md': null,
+  'deploy-cloudflare.md': null,
+};
 
 /** Idempotent — writes / refreshes the bundled skill markdown files
  *  to ~/.qcode/skills/. Safe to call on every app boot or every
@@ -61,6 +88,14 @@ export async function ensureSkillsOnDisk(): Promise<string[] | null> {
       { name: 'qlaud-tools.md', content: QLAUD_TOOLS_SKILL },
       { name: 'deploy-cloudflare.md', content: QLAUD_DEPLOY_CLOUDFLARE_SKILL },
     ];
+
+    // alpha.212: refresh each skill from the server when a mapping
+    // exists. If the fetch succeeds, swap in the server body before
+    // the write-if-changed pass below. Fetch failures (no auth, no
+    // network, server miss) fall through silently — the bundled
+    // body stays in place. No-op when the user hasn't signed in yet
+    // (no key → skipped entirely).
+    await refreshSkillsFromServer(skills);
     const written: string[] = [];
     for (const s of skills) {
       const path = `${dir}/${s.name}`;
@@ -95,6 +130,61 @@ export async function ensureSkillsOnDisk(): Promise<string[] | null> {
     console.error('[skill-bundle] ensureSkillsOnDisk failed', e);
     return null;
   }
+}
+
+/** Fetch latest skill markdown from the server and mutate the
+ *  provided skills array in place. Skills with no server mapping
+ *  (qlaud-tools, deploy-cloudflare) are left at their bundled
+ *  content. Skills with a mapping but a failed fetch fall back to
+ *  bundled too — no-op rather than erase content.
+ *
+ *  Why mutate in place: keeps ensureSkillsOnDisk's flow simple —
+ *  one pass writes whatever we have, server or bundled, with the
+ *  same compare-content-then-write logic. The caller doesn't need
+ *  to branch.
+ *
+ *  Auth: needs a qpk_ key (the endpoint requires apiKeyAuth). On
+ *  first cold-boot before the user signs in, getKey() returns null
+ *  and we skip entirely — bundled content stays, which is fine.
+ *  Subsequent boots after sign-in pick up server updates. */
+async function refreshSkillsFromServer(
+  skills: Array<{ name: string; content: string }>,
+): Promise<void> {
+  const key = getKey();
+  if (!key) {
+    // No auth yet — skip the refresh, fall back to bundled. The
+    // user will get server updates on the boot after they sign in.
+    return;
+  }
+  await Promise.all(
+    skills.map(async (s) => {
+      const slug = SERVER_SLUG_BY_FILE[s.name];
+      if (!slug) return; // No server source; keep bundled.
+      try {
+        // Short timeout — skill fetch is best-effort. If the edge
+        // worker is slow or unreachable, fall back to bundled
+        // rather than block the boot indefinitely.
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 4000);
+        const r = await fetch(`${EDGE_BASE}/v1/skills/${slug}`, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${key}`,
+            Accept: 'text/markdown',
+          },
+          signal: ctl.signal,
+        });
+        clearTimeout(t);
+        if (!r.ok) return; // 401/404/5xx — keep bundled.
+        const body = await r.text();
+        if (!body || body.length < 100) return; // Sanity guard.
+        s.content = body;
+      } catch {
+        // Network error, abort, parse failure — silent. Bundled
+        // content stays.
+      }
+    }),
+  );
 }
 
 /** Short markdown snippet appended to claude-code's system prompt.
