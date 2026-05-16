@@ -519,6 +519,20 @@ export function ChatSurface({
     const serverInFlight = lastMsg?.role === 'user';
     const polling = isInFlight(threadId) || serverInFlight;
     if (!polling && lastLoadedRef.current === threadId) return;
+    // Race guard: stream just ended in THIS tab but D1's
+    // sandboxPersistEvent for the assistant turn is queued via
+    // waitUntil and hasn't committed yet. messagesQuery returns
+    // [user] only, which would wipe the locally-rendered stream
+    // content if we setBlocks here. Skip the overwrite when we've
+    // ALREADY hydrated this thread once (lastLoadedRef matches)
+    // AND D1 says "assistant not yet landed" (serverInFlight). The
+    // next 2s poll will catch D1 once the assistant row commits
+    // and fire this useEffect again with the full history.
+    //
+    // Mid-turn reload from another tab still works: lastLoadedRef
+    // is null on first mount, so the guard doesn't trigger and we
+    // do load [user] from D1 as the initial state.
+    if (serverInFlight && lastLoadedRef.current === threadId) return;
     lastLoadedRef.current = threadId;
     setBlocks(historyToBlocks(messagesQuery.data.messages));
     setCompaction(messagesQuery.data.compaction);
