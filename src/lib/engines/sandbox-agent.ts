@@ -629,19 +629,6 @@ export async function runEngineSandboxAgent(
         }
         return;
       }
-      // Defense-in-depth (added after the broker-deploy diagnostic
-      // window): if a new qcode_* event lands and no branch above
-      // matched, log it to the browser console so next time
-      // something doesn't render we can see exactly which event
-      // the reducer ignored. console.debug stays quiet by default
-      // (filtered out unless the user opens dev tools with Verbose
-      // log level), so this adds zero noise for normal users.
-      console.debug(
-        '[sandbox-agent] unhandled qcode event:',
-        w.type,
-        w.subtype,
-      );
-      return;
     }
 
     if (ev.type === 'system' && ev.subtype === 'init') {
