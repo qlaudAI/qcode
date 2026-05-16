@@ -1076,18 +1076,57 @@ export function ChatSurface({
       // threadIsAgentic is true when the active workspace is the
       // sandbox-backed kind (we already have GitLab state attached);
       // ambiguous follow-ups in an agentic thread stay on agent.
-      const { classifyIntent } = await import('../lib/intent-classifier');
-      const intentResult = classifyIntent({
+      const { classifyIntent, classifyIntentLlm, LLM_FALLBACK_CONFIDENCE_THRESHOLD } =
+        await import('../lib/intent-classifier');
+      let intentResult = classifyIntent({
         prompt: userMsg,
         // Active workspace has a GitLab repo attached → thread is
         // already agentic; ambiguous follow-ups stay on agent.
         threadIsAgentic: !!workspace?.gitlabProjectPath,
       });
+
+      // alpha.216: Haiku-backed LLM fallback for low-confidence
+      // heuristic answers. The keyword list is fragile on follow-
+      // ups ("continue", "retry", "yes", "go") and on prompts that
+      // mix chat phrases with agent verbs. When the heuristic says
+      // "I'm not sure" (< 0.7), spend ~300ms + ~$0.0003 to have
+      // Haiku resolve it. Fires on <10% of sends; high-confidence
+      // cases (~90%) skip this entirely.
+      if (intentResult.confidence < LLM_FALLBACK_CONFIDENCE_THRESHOLD) {
+        const key = (await import('../lib/auth')).getKey();
+        if (key) {
+          // Build a tiny recent-context window (last 2 turns, each
+          // bounded). Helps Haiku disambiguate "continue" by
+          // looking at what was being continued.
+          const recent: string[] = [];
+          for (let i = blocks.length - 1; i >= 0 && recent.length < 3; i--) {
+            const b = blocks[i];
+            if (b?.type === 'user_text' && b.text) {
+              recent.unshift(`user: ${b.text}`);
+            } else if (b?.type === 'assistant_text' && b.text) {
+              recent.unshift(`assistant: ${b.text}`);
+            }
+          }
+          const llm = await classifyIntentLlm({
+            prompt: userMsg,
+            threadIsAgentic: !!workspace?.gitlabProjectPath,
+            authBearer: key,
+            recentMessages: recent,
+          });
+          if (llm) {
+            console.log(
+              '[intent-classifier] LLM overrode heuristic:',
+              `${intentResult.intent}(${intentResult.confidence}) → ${llm.intent}(${llm.confidence})`,
+              llm.reason,
+            );
+            intentResult = llm;
+          }
+        }
+      }
+
       let effectiveMode: typeof mode = mode;
       if (mode === 'agent' && intentResult.intent === 'chat') {
         effectiveMode = 'chat';
-        // Telemetry hook — useful when tuning the classifier; safe
-        // to leave on in prod since it's once per send.
         console.log(
           '[intent-classifier] downshifted agent→chat:',
           intentResult.reason,
