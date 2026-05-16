@@ -100,6 +100,18 @@ type RenderBlock =
       images?: AttachedImage[];
       documents?: AttachedDocument[];
       textFiles?: AttachedText[];
+      /** Snapshot of the send arguments — text + all attachments —
+       *  so a retry path can re-fire the same turn. Set on every
+       *  send. Used by alpha.215's "type 'continue' after Stop"
+       *  flow to resume an interrupted turn without the user having
+       *  to retype anything. */
+      retryInputs?: {
+        text: string;
+        images: AttachedImage[];
+        documents: AttachedDocument[];
+        textFiles: AttachedText[];
+        attached: string[];
+      };
     }
   | { type: 'assistant_text'; text: string; skill?: { slug: string; role: string } | null; resolvedModel?: string }
   | { type: 'tool'; call: ToolCallView }
@@ -609,22 +621,31 @@ export function ChatSurface({
     )
       return;
 
-    // alpha.214: retry-intent shortcut for session-died errors.
+    // alpha.214+215: retry-intent shortcut.
     //
-    // When the user types "retry" (or one of the common synonyms)
-    // immediately after a "Sandbox container died" error block,
-    // they mean "click that retry button," not "send 'retry' as
-    // a chat message." The latter is what the intent classifier
-    // would otherwise downshift it to: short message → chat path
-    // → unhelpful "I'm chat-only mode" reply. Instead, fire the
-    // retry handler directly, which re-runs the original prompt
-    // against a fresh container.
+    // When the user types "retry"/"continue"/"go" (or any of the
+    // common synonyms) and the conversation is in a recoverable
+    // interrupted state, treat it as a click on the retry button.
+    // Without this, short retry-intent messages get classifier-
+    // downshifted to chat mode and the user gets the unhelpful
+    // "I'm chat-only" reply we saw in the autopsy.
     //
-    // Scoped narrowly: latest block must be session_dead AND user
-    // input must match the retry-intent regex (intentionally
-    // strict — anything ambiguous goes through the normal send
-    // path). Attachments + parallel mode bypass this (the user is
-    // explicitly composing a new turn, not retrying).
+    // Two interrupted states match:
+    //
+    //   1. session_dead (alpha.214): the last block is a
+    //      session-died error. retry payload sits on the error
+    //      block itself.
+    //
+    //   2. user-stopped (alpha.215): the user hit Stop on an
+    //      agent turn mid-stream. The block list ends in a
+    //      half-finished turn (last block isn't an assistant
+    //      text turn). retry payload pulled from the most
+    //      recent user_text block's retryInputs (preserved on
+    //      send for exactly this case).
+    //
+    // Both scoped narrowly: input must match the regex exactly,
+    // no attachments, no parallel mode. Anything ambiguous still
+    // goes through the standard intent-classifier path.
     if (
       userMsg &&
       !opts.parallel &&
@@ -634,20 +655,33 @@ export function ChatSurface({
       attached.length === 0
     ) {
       const retryIntent =
-        /^\s*(retry|try again|again|redo|go|continue|restart|retry it|please retry|do it again|run it again|rerun|start over)\s*[!.?]*\s*$/i;
+        /^\s*(retry|try again|again|redo|go|continue|restart|retry it|please retry|do it again|run it again|rerun|start over|keep going)\s*[!.?]*\s*$/i;
       if (retryIntent.test(userMsg)) {
         const latest = blocks[blocks.length - 1];
+        // Case 1: session-died error with retry payload attached
         if (
           latest &&
           latest.type === 'error' &&
           latest.presentation.kind === 'session_dead' &&
           latest.retry
         ) {
-          // The retry function clears the typed input and re-fires
-          // the original prompt + attachments. No further work here.
           setInput('');
           retry(latest.retry);
           return;
+        }
+        // Case 2: stopped mid-turn. Walk backwards to find the
+        // most recent user_text block — its retryInputs has the
+        // original prompt + attachments needed to resume.
+        for (let i = blocks.length - 1; i >= 0; i--) {
+          const b = blocks[i];
+          if (b?.type === 'user_text' && b.retryInputs) {
+            setInput('');
+            retry(b.retryInputs);
+            return;
+          }
+          // Stop the search at the previous assistant_text turn
+          // — anything before that is a different exchange.
+          if (b?.type === 'assistant_text' && b.text) break;
         }
       }
     }
@@ -655,7 +689,20 @@ export function ChatSurface({
     // for current to finish, then run mine" (handled by sendOrQueue
     // below). The parallel path (Cmd/Ctrl+Enter) explicitly opts
     // into firing alongside whatever's running.
-    if (busy && !opts.parallel) return;
+    //
+    // alpha.215: surface a visible inline error when we bail here.
+    // Without this the user types a message, hits Enter, and
+    // nothing happens. They retype, hit Enter again — still
+    // nothing. The autopsy in the alpha.215 ship notes was exactly
+    // this case ("i mistakenly stopped i keep sending continue and
+    // it swallows it"). Now they see a clear "Still working on the
+    // previous turn — wait or click Stop" hint and know what's up.
+    if (busy && !opts.parallel) {
+      setError(
+        'Still working on the previous turn. Wait for it to finish or click ■ Stop, then try again.',
+      );
+      return;
+    }
     // Clear input only when this is the live-typed path (text ===
     // current input). The queued-fire path (busy lifted, queued
     // dispatch) passes a snapshot from `queued`; meanwhile the user
@@ -818,6 +865,11 @@ export function ChatSurface({
         images: sentImages,
         documents: sentDocuments,
         textFiles: sentTextFiles,
+        // Carry the retry snapshot so a "continue" / "retry" after
+        // Stop can resume without the user retyping the prompt or
+        // re-attaching files. alpha.215 retry-intent intercept
+        // walks blocks backward looking for this.
+        retryInputs,
       },
     ]);
     // Telemetry — metadata only, no chat content. Lets us see model
