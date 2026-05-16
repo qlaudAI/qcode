@@ -119,6 +119,14 @@ class TauriRuntime implements Runtime {
       name: options?.name,
     };
   }
+
+  /** Heartbeat — no-op on Tauri. The desktop container is just a
+   *  local process tree the user manages directly; there's no
+   *  idle-eviction timer to reset. Returns true so the caller's
+   *  "stop pinging on failure" logic doesn't trip. */
+  async ping(): Promise<boolean> {
+    return true;
+  }
 }
 
 let cached: TauriRuntime | null = null;

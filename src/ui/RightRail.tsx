@@ -831,6 +831,44 @@ function PreviewView({ blocks }: { blocks: AnyBlock[] }) {
     return portErrors.get(port) ?? null;
   }, [loadedUrl, runtime.kind, portErrors]);
 
+  // Heartbeat — keep the sandbox container alive while the user
+  // is viewing the preview iframe but not driving a new turn.
+  //
+  // Why: sandbox containers have a 10-min sleepAfter idle timer
+  // (apps/edge wrangler.toml). Without this heartbeat, the timer
+  // expires while the user reads the agent's long summary, the
+  // container gets evicted, and the NEXT turn surfaces "Sandbox
+  // container died." User has to retry, gets routed through the
+  // intent classifier which downshifts short retry-words to chat
+  // mode, gets unhelpful "I'm chat-only" responses. Total user-
+  // visible failure mode, fixable here.
+  //
+  // Trigger conditions (all must hold):
+  //   - sandbox runtime (tauri / web-noop have no idle problem)
+  //   - at least one port successfully mapped (proves container
+  //     exists + responding; pinging a dead container is wasted
+  //     network)
+  //
+  // Cadence: 4 minutes. Comfortably under the 10-min eviction
+  // window, leaves headroom for a missed ping + retry. ~250 pings
+  // per 16-hour workday per active preview = trivial load.
+  //
+  // Failure handling: ping returns false on any error. We don't
+  // surface that — if the container actually died, the existing
+  // qcode_session_dead error path catches it on the next user
+  // turn or expose-port retry. No double-error UX.
+  useEffect(() => {
+    if (runtime.kind !== 'sandbox') return;
+    if (portMappings.size === 0) return;
+    const intervalMs = 4 * 60 * 1000;
+    const id = setInterval(() => {
+      void runtime.ping().catch(() => {
+        // Best-effort — the regular error path catches dead containers.
+      });
+    }, intervalMs);
+    return () => clearInterval(id);
+  }, [runtime, portMappings.size]);
+
   // Manual retry — clear the error for the current port so the
   // exposePort effect re-fires. Used by the "Try again" button in
   // the error state.

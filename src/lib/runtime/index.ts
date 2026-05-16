@@ -119,6 +119,14 @@ const WEB_NOOP: Runtime = {
   async readDir() {
     throw new Error('runtime: not available in web build');
   },
+  async ping() {
+    // Web-noop runtime — there's no container, so ping is a no-op
+    // returning true (matches Tauri's behavior of "nothing to keep
+    // alive"). Callers shouldn't be hitting this path because the
+    // PreviewView gates heartbeats on runtime.kind === 'sandbox',
+    // but defining the method satisfies the Runtime contract.
+    return true;
+  },
 };
 
 // Re-export the contract types so consumers don't have to know

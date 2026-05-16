@@ -121,4 +121,13 @@ export interface Runtime {
    *  through `sandbox.exposePort()` and returns the SDK-shaped
    *  `<port>-sandbox-<id>-<token>` URL. */
   exposePort(port: number, options?: { name?: string }): Promise<PreviewUrl>;
+
+  /** Heartbeat — fires a cheap no-op against the runtime to reset
+   *  idle eviction timers. Used by PreviewView to keep a sandbox
+   *  container alive while the user is reading the agent's output
+   *  but not driving a new turn. No-op on Tauri (desktop has no
+   *  idle-eviction problem). Returns true on success, false on
+   *  any failure (container dead, network error) — callers treat
+   *  it as best-effort. */
+  ping(): Promise<boolean>;
 }

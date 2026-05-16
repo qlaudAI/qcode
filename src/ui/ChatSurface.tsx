@@ -608,6 +608,49 @@ export function ChatSurface({
       attached.length === 0
     )
       return;
+
+    // alpha.214: retry-intent shortcut for session-died errors.
+    //
+    // When the user types "retry" (or one of the common synonyms)
+    // immediately after a "Sandbox container died" error block,
+    // they mean "click that retry button," not "send 'retry' as
+    // a chat message." The latter is what the intent classifier
+    // would otherwise downshift it to: short message → chat path
+    // → unhelpful "I'm chat-only mode" reply. Instead, fire the
+    // retry handler directly, which re-runs the original prompt
+    // against a fresh container.
+    //
+    // Scoped narrowly: latest block must be session_dead AND user
+    // input must match the retry-intent regex (intentionally
+    // strict — anything ambiguous goes through the normal send
+    // path). Attachments + parallel mode bypass this (the user is
+    // explicitly composing a new turn, not retrying).
+    if (
+      userMsg &&
+      !opts.parallel &&
+      images.length === 0 &&
+      documents.length === 0 &&
+      textFiles.length === 0 &&
+      attached.length === 0
+    ) {
+      const retryIntent =
+        /^\s*(retry|try again|again|redo|go|continue|restart|retry it|please retry|do it again|run it again|rerun|start over)\s*[!.?]*\s*$/i;
+      if (retryIntent.test(userMsg)) {
+        const latest = blocks[blocks.length - 1];
+        if (
+          latest &&
+          latest.type === 'error' &&
+          latest.presentation.kind === 'session_dead' &&
+          latest.retry
+        ) {
+          // The retry function clears the typed input and re-fires
+          // the original prompt + attachments. No further work here.
+          setInput('');
+          retry(latest.retry);
+          return;
+        }
+      }
+    }
     // Default Enter path bails if busy — the user's intent is "wait
     // for current to finish, then run mine" (handled by sendOrQueue
     // below). The parallel path (Cmd/Ctrl+Enter) explicitly opts
@@ -890,6 +933,46 @@ export function ChatSurface({
         // never sees stale right-rail state after agent activity.
         if (e.type === 'tool_done') {
           bumpWorkspaceRevision();
+        }
+        // alpha.214: intercept 'error' events here BEFORE the
+        // reducer touches them — the reducer can't reach
+        // retryInputs (different scope), so its 'error' branch
+        // always produces blocks with retry: null and the Retry
+        // button never renders. We have retryInputs in scope here.
+        //
+        // Also detect the session-died variant via message text so
+        // the renderer can show a prominent primary-color Retry
+        // CTA instead of the muted ghost button. Sandbox-died is
+        // recoverable (mint a fresh container) and the user's
+        // only forward path; it should look like the only forward
+        // path.
+        if (e.type === 'error') {
+          const msg = (e as { message?: string }).message ?? '';
+          const isSessionDied =
+            /sandbox container died|session.*?(?:dead|ended)/i.test(msg);
+          myUpdateBlocks((b) => [
+            ...b,
+            {
+              type: 'error',
+              presentation: {
+                severity: isSessionDied ? 'warning' : 'error',
+                title: isSessionDied
+                  ? 'Sandbox session ended'
+                  : 'Could not run this turn',
+                body:
+                  msg ||
+                  'Something went wrong before the model could respond.',
+                ...(isSessionDied ? { kind: 'session_dead' as const } : {}),
+              },
+              retry: retryInputs,
+            },
+          ]);
+          posthog.capture('turn_failed', {
+            model,
+            mode,
+            code: isSessionDied ? 'session_dead' : 'engine_error',
+          });
+          return;
         }
         // Critical: route through myUpdateBlocks (bound to the
         // captured myThread), NOT the surface-bound setBlocks. If
@@ -1939,6 +2022,12 @@ type ErrorPresentation = {
    *  UX into "we'll use this other model for you, click to go". */
   retryWithModel?: { label: string; modelSlug: string };
   severity: 'warning' | 'error';
+  /** Discriminator for the few error classes that need bespoke
+   *  rendering. Today: 'session_dead' renders the Retry button as
+   *  a big primary CTA (not the muted ghost variant) because it's
+   *  the only path forward — the user can't get into the agent
+   *  again without minting a fresh container. */
+  kind?: 'session_dead';
 };
 
 // Optional context for richer error rendering. Today: only used by
@@ -2588,14 +2677,23 @@ function BlockRow({
                 </a>
               )}
               {/* Generic retry only when there's no model-specific
-               *  retry to offer (otherwise it'd be redundant). */}
+               *  retry to offer (otherwise it'd be redundant).
+               *  Session-died errors get the bold primary style —
+               *  it's the user's only forward path, so the button
+               *  shouldn't look like a quiet secondary action. */}
               {block.retry && !p.retryWithModel && (
                 <button
                   onClick={() => onRetry?.()}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground/80 transition-colors hover:border-foreground/30 hover:text-foreground"
+                  className={
+                    p.kind === 'session_dead'
+                      ? 'inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 text-sm font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90 hover:shadow'
+                      : 'inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground/80 transition-colors hover:border-foreground/30 hover:text-foreground'
+                  }
                 >
-                  <RotateCcw className="h-3 w-3" />
-                  Retry
+                  <RotateCcw
+                    className={p.kind === 'session_dead' ? 'h-3.5 w-3.5' : 'h-3 w-3'}
+                  />
+                  {p.kind === 'session_dead' ? 'Start a fresh container' : 'Retry'}
                 </button>
               )}
             </div>

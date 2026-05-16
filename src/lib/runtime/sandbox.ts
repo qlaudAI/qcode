@@ -161,6 +161,21 @@ class SandboxRuntime implements Runtime {
     );
     return { port: r.port, url: r.url, name: r.name };
   }
+
+  /** Heartbeat — POSTs to /v1/sandbox/sessions/:id/ping which runs
+   *  a no-op `:` shell command inside the container. Resets the
+   *  10-min idle-eviction timer so the container survives long
+   *  reads of agent output. Returns false on any failure (dead
+   *  container, network) — caller decides what to do (typically
+   *  stops pinging + surfaces a "session ended" affordance). */
+  async ping(): Promise<boolean> {
+    try {
+      await call<{ ok: boolean }>('/ping', {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }
 
 let cached: SandboxRuntime | null = null;
